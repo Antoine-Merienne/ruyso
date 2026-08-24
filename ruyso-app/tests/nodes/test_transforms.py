@@ -6,7 +6,7 @@ input DataFrame -> expected output DataFrame.
 import numpy as np
 import pandas as pd
 
-from pipeline_app.nodes.transforms import (
+from ruyso_app.nodes.transforms import (
     DropNA,
     DropNAParams,
     StandardScalerNode,

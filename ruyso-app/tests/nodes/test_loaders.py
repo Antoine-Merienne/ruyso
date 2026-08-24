@@ -6,7 +6,7 @@ DataFrame output.
 import pandas as pd
 import pytest
 
-from pipeline_app.nodes.loaders import CSVLoader, CSVLoaderParams
+from ruyso_app.nodes.loaders import CSVLoader, CSVLoaderParams
 
 
 @pytest.fixture

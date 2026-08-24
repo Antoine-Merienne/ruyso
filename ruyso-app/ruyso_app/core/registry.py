@@ -27,7 +27,7 @@ import importlib
 import pkgutil
 from types import ModuleType
 
-from pipeline_app.core.node import Node
+from ruyso_app.core.node import Node
 
 
 class NodeRegistry:

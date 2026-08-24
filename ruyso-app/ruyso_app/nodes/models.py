@@ -5,9 +5,9 @@ scikit-learn estimators on it.
 
 from typing import Any
 
-from pipeline_app.core.node import Node, NodeParams
-from pipeline_app.core.port import Port
-from pipeline_app.core.registry import register_node
+from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.port import Port
+from ruyso_app.core.registry import register_node
 
 
 class TrainTestSplitParams(NodeParams):

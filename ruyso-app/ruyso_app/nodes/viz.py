@@ -5,9 +5,9 @@ downstream nodes (or the UI canvas) can display or export.
 
 from typing import Any, Literal
 
-from pipeline_app.core.node import Node, NodeParams
-from pipeline_app.core.port import Port
-from pipeline_app.core.registry import register_node
+from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.port import Port
+from ruyso_app.core.registry import register_node
 
 
 class MatplotlibPlotParams(NodeParams):

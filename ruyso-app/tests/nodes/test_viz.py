@@ -9,7 +9,7 @@ import pandas as pd
 matplotlib.use("Agg")  # ensure headless backend before importing pyplot anywhere
 from matplotlib.figure import Figure
 
-from pipeline_app.nodes.viz import MatplotlibPlot, MatplotlibPlotParams
+from ruyso_app.nodes.viz import MatplotlibPlot, MatplotlibPlotParams
 
 
 def test_matplotlib_plot_returns_a_figure_with_correct_labels():

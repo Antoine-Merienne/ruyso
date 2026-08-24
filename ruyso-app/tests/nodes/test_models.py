@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
-from pipeline_app.nodes.models import (
+from ruyso_app.nodes.models import (
     LinearRegressionFit,
     LinearRegressionFitParams,
     TrainTestSplit,

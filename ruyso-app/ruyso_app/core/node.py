@@ -28,7 +28,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
-from pipeline_app.core.port import Port
+from ruyso_app.core.port import Port
 
 
 class NodeParams(BaseModel):

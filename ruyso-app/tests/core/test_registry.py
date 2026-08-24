@@ -5,8 +5,8 @@ and package-based discovery.
 
 import pytest
 
-from pipeline_app.core.node import Node, NodeParams
-from pipeline_app.core.registry import NodeRegistry, register_node
+from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.registry import NodeRegistry, register_node
 
 
 def test_register_and_get_round_trip():
