@@ -65,7 +65,7 @@ def test_registering_conflicting_class_under_same_node_type_raises():
 
 
 def test_discover_package_registers_all_beta_nodes():
-    import pipeline_app.nodes as nodes_package
+    import ruyso_app.nodes as nodes_package
 
     NodeRegistry.discover_package(nodes_package)
 
