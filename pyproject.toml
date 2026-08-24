@@ -4,9 +4,11 @@ version = "0.1.0"
 dependencies = [
     "numpy",
     "pandas",
+    "geopandas",
     "scipy",
     "matplotlib",
     "pydantic",
     "typing",
-    "scikit-learn"
+    "scikit-learn",
+    "PySide6"
 ]

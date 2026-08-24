@@ -1,7 +1,9 @@
 numpy
 pandas
+geopandas
 scipy
 matplotlib
 pydantic
 typing
 scikit-learn
+PySide6

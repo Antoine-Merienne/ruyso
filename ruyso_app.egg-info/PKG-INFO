@@ -4,9 +4,11 @@ Version: 0.1.0
 License-File: LICENSE
 Requires-Dist: numpy
 Requires-Dist: pandas
+Requires-Dist: geopandas
 Requires-Dist: scipy
 Requires-Dist: matplotlib
 Requires-Dist: pydantic
 Requires-Dist: typing
 Requires-Dist: scikit-learn
+Requires-Dist: PySide6
 Dynamic: license-file
