@@ -1,0 +1,85 @@
+# =========================
+# Python
+# =========================
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+# IDEs / Editors
+# =========================
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# macOS
+.DS_Store
+
+# =========================
+# Environment / secrets
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# =========================
+# PySide6 / Qt
+# =========================
+
+# Qt Designer / generated files
+# Uncomment these only if you generate them automatically:
+# *_ui.py
+
+# Qt resource files generated from .qrc
+# Uncomment if generated automatically:
+# *_rc.py
+
+# =========================
+# Logs
+# =========================
+
+*.log
+
+# =========================
+# Temporary / generated files
+# =========================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# =========================
+# Application-specific
+# =========================
+
+# Add your own generated data here
+# data/
+# output/
+# cache/

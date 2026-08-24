@@ -1,8 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-ruyso_app.egg-info/PKG-INFO
-ruyso_app.egg-info/SOURCES.txt
-ruyso_app.egg-info/dependency_links.txt
-ruyso_app.egg-info/requires.txt
-ruyso_app.egg-info/top_level.txt
