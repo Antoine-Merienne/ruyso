@@ -105,7 +105,7 @@ class NodeRegistry:
 
         Args:
             package: An already-imported package object whose
-                submodules should be scanned (e.g. ``pipeline_app.nodes``).
+                submodules should be scanned (e.g. ``ruyso_app.nodes``).
         """
         if not hasattr(package, "__path__"):
             raise TypeError(f"{package!r} is not a package (no __path__).")
