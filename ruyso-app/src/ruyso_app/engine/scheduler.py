@@ -69,6 +69,19 @@ class PipelineScheduler:
         self._memory = memory if memory is not None else get_memory()
         self._cached_execute = self._memory.cache(_execute_node)
 
+    def _execute(self, node_type: str, params: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+        """
+        Run a node, going through the joblib cache only if its class
+        opts into caching (``Node.cacheable``). Nodes with side
+        effects or non-hashable inputs/outputs (e.g. MatplotlibPlot,
+        FigureExport) declare ``cacheable = False`` and are always
+        re-executed directly.
+        """
+        node_cls = NodeRegistry.get(node_type)
+        if node_cls.cacheable:
+            return self._cached_execute(node_type, params, inputs)
+        return _execute_node(node_type, params, inputs)
+
     def run(self, graph: PipelineGraph) -> dict[str, dict[str, Any]]:
         """
         Execute every node in ``graph``, in dependency order.
@@ -88,7 +101,7 @@ class PipelineScheduler:
         for node_id in graph.topological_order():
             spec = graph.get_node(node_id)
             inputs = self._collect_inputs(graph, node_id, outputs)
-            outputs[node_id] = self._cached_execute(spec.node_type, spec.params, inputs)
+            outputs[node_id] = self._execute(spec.node_type, spec.params, inputs)
 
         return outputs
 

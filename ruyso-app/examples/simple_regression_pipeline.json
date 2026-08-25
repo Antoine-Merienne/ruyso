@@ -24,6 +24,11 @@
       "id": "plot",
       "node_type": "matplotlib_plot",
       "params": {"x": "x", "y": "target", "kind": "scatter", "title": "x vs target"}
+    },
+    {
+      "id": "export_plot",
+      "node_type": "figure_export",
+      "params": {"filepath": "examples/output_scatter.png", "dpi": 150}
     }
   ],
   "connections": [
@@ -33,6 +38,7 @@
     {"source_node": "split", "source_port": "X_train", "target_node": "fit", "target_port": "X_train"},
     {"source_node": "split", "source_port": "y_train", "target_node": "fit", "target_port": "y_train"},
     {"source_node": "split", "source_port": "X_test", "target_node": "fit", "target_port": "X_test"},
-    {"source_node": "split", "source_port": "y_test", "target_node": "fit", "target_port": "y_test"}
+    {"source_node": "split", "source_port": "y_test", "target_node": "fit", "target_port": "y_test"},
+    {"source_node": "plot", "source_port": "figure", "target_node": "export_plot", "target_port": "figure"}
   ]
 }

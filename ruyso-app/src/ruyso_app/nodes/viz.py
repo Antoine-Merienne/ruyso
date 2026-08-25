@@ -42,6 +42,10 @@ class MatplotlibPlot(Node):
     inputs = [Port(name="df", dtype="dataframe")]
     outputs = [Port(name="figure", dtype="figure")]
     params_schema = MatplotlibPlotParams
+    # matplotlib Figure objects can embed internal masked arrays that
+    # joblib's fast hasher cannot process; the figure is cheap to
+    # rebuild anyway, so this node always re-runs rather than being cached.
+    cacheable = False
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         """

@@ -62,6 +62,13 @@ class Node(ABC):
         outputs: List of Port objects this node produces as output.
         params_schema: The NodeParams subclass describing this node's
             configurable parameters.
+        cacheable: Whether the engine is allowed to memoize this
+            node's execution (see engine.scheduler). Set to False for
+            nodes with an external side effect (writing a file,
+            printing, ...) or whose inputs/outputs are not reliably
+            hashable/picklable (e.g. matplotlib Figure objects, which
+            can contain internal masked arrays that joblib's hasher
+            cannot handle) - such nodes should simply always re-run.
     """
 
     node_type: ClassVar[str]
@@ -69,6 +76,7 @@ class Node(ABC):
     inputs: ClassVar[list[Port]] = []
     outputs: ClassVar[list[Port]] = []
     params_schema: ClassVar[type[NodeParams]] = NodeParams
+    cacheable: ClassVar[bool] = True
 
     def __init__(self, params: NodeParams | dict[str, Any] | None = None):
         """
