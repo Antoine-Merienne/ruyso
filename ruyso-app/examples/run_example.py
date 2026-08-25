@@ -24,7 +24,7 @@ from ruyso_app.engine.serialization import load_graph
 
 def main(graph_path: str) -> None:
     """Load, validate, and execute the pipeline at ``graph_path``."""
-    NodeRegistry.discover_package(src.ruyso_app.nodes)
+    NodeRegistry.discover_package(ruyso_app.nodes)
 
     graph = load_graph(graph_path)
     graph.validate()
