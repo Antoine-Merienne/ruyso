@@ -1,0 +1,38 @@
+{
+  "nodes": [
+    {
+      "id": "load",
+      "node_type": "csv_loader",
+      "params": {"filepath": "examples/sample_data.csv"}
+    },
+    {
+      "id": "clean",
+      "node_type": "drop_na",
+      "params": {}
+    },
+    {
+      "id": "split",
+      "node_type": "train_test_split",
+      "params": {"target_column": "target", "test_size": 0.2, "random_state": 42}
+    },
+    {
+      "id": "fit",
+      "node_type": "linear_regression_fit",
+      "params": {"fit_intercept": true}
+    },
+    {
+      "id": "plot",
+      "node_type": "matplotlib_plot",
+      "params": {"x": "x", "y": "target", "kind": "scatter", "title": "x vs target"}
+    }
+  ],
+  "connections": [
+    {"source_node": "load", "source_port": "df", "target_node": "clean", "target_port": "df"},
+    {"source_node": "clean", "source_port": "df", "target_node": "split", "target_port": "df"},
+    {"source_node": "clean", "source_port": "df", "target_node": "plot", "target_port": "df"},
+    {"source_node": "split", "source_port": "X_train", "target_node": "fit", "target_port": "X_train"},
+    {"source_node": "split", "source_port": "y_train", "target_node": "fit", "target_port": "y_train"},
+    {"source_node": "split", "source_port": "X_test", "target_node": "fit", "target_port": "X_test"},
+    {"source_node": "split", "source_port": "y_test", "target_node": "fit", "target_port": "y_test"}
+  ]
+}
