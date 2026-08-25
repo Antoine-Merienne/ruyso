@@ -122,7 +122,7 @@ def test_validate_detects_cycle():
 
 
 def test_json_round_trip_preserves_structure():
-    from src.ruyso_app.engine.serialization import graph_from_json, graph_to_json
+    from ruyso_app.engine.serialization import graph_from_json, graph_to_json
 
     original = _linear_pipeline_graph()
     restored = graph_from_json(graph_to_json(original))
