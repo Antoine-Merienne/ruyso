@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ruyso-app"
 version = "0.1.0"
-description = "Visual data science pipeline builder - Layers 1 (node model) & 2 (execution engine)"
+description = "Visual data science pipeline builder - Layers 1 (node model), 2 (execution engine) & 3 (UI)"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2",
@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ui = ["PySide6>=6.5", "NodeGraphQt>=0.6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

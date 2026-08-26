@@ -52,3 +52,5 @@ ruyso-app/
 │
 └── examples/
     └── simple_regression_pipeline.json   # graphe de démo écrit à la main
+
+To run the project needs ``pip install --upgrade setuptools``be cause it uses the library ``distutils`` deprecated in python versions >3.11 

@@ -19,4 +19,6 @@ Modules:
     scheduler.py       -> PipelineScheduler: runs a PipelineGraph node by
                           node in topological order, wiring outputs to
                           downstream inputs, with caching.
+    codegen.py         -> Export a validated PipelineGraph as a standalone
+                          Python script with no dependency on this engine.
 """

@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system libraries required by PySide6 (headless Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0
+
+      - name: Install package, dev, and ui dependencies
+        run: pip install -e ".[dev,ui]"
+
+      - name: Run test suite (Qt in offscreen mode, no display server needed)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q

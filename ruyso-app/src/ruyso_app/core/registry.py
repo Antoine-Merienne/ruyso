@@ -12,13 +12,13 @@ Two ways to populate the registry are supported:
    which imports every submodule of a given package so that any
    ``@register_node``-decorated classes they contain get registered
    as a side effect of the import. This is what lets the engine (or
-   the UI) simply call ``discover_package(pipeline_app.nodes)`` once
+   the UI) simply call ``discover_package(ruyso_app.nodes)`` once
    at startup instead of importing every node module by hand.
 
 An entry_points-based discovery mechanism (for out-of-tree/third-party
 node packages) can be added later on top of the same registry without
 changing this interface — external packages would just need to expose
-an ``pipeline_app.nodes`` entry point group pointing at modules to import.
+an ``ruyso_app.nodes`` entry point group pointing at modules to import.
 """
 
 from __future__ import annotations
