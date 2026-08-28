@@ -39,6 +39,7 @@ from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
 from ruyso_app.engine.serialization import load_graph, save_graph
 from ruyso_app.ui import theme
 from ruyso_app.ui.canvas import PipelineCanvas
+from ruyso_app.ui.column_spec import input_dataframe_columns
 from ruyso_app.ui.dashboard_page import DashboardPage
 from ruyso_app.ui.execution_worker import PipelineExecutionWorker
 from ruyso_app.ui.graph_bridge import canvas_to_pipeline, pipeline_to_canvas
@@ -51,8 +52,19 @@ from ruyso_app.ui.node_factory import (
 from ruyso_app.ui.node_menu import install_new_node_menu
 from ruyso_app.ui.node_preview import NodePreviewOverlay
 from ruyso_app.ui.pipeline_page import PipelinePage
+from ruyso_app.ui.run_snapshot import modified_since_run, pipeline_signatures
 from ruyso_app.ui.tab_bar import TabBar
 from ruyso_app.ui.table_page import TablePage
+
+#: Chord letter (after Cmd/Ctrl+P) that creates a node of each macro type.
+_MACRO_SHORTCUT_LETTER: dict[str, str] = {
+    "loading": "L",
+    "transform": "T",
+    "model": "M",
+    "statistical_test": "S",
+    "grapher": "G",
+    "export": "E",
+}
 
 #: (key, label) for each tab, in display order (spec section 1).
 TABS: list[tuple[str, str]] = [
@@ -73,6 +85,11 @@ class MainWindow(QMainWindow):
         self._canvas = PipelineCanvas()
         self._graph = self._canvas.graph
         self._worker: PipelineExecutionWorker | None = None
+        self._last_outputs: dict[str, dict] = {}
+        # Signatures of the pipeline as it was when last run successfully
+        # (see ui.run_snapshot); drives the Table tab's "· modified" tags.
+        self._run_snapshot: dict[str, str] = {}
+        self._pending_snapshot: dict[str, str] = {}
 
         self._pipeline_page = PipelinePage(self._canvas)
         self._table_page = TablePage()
@@ -98,7 +115,7 @@ class MainWindow(QMainWindow):
 
         self._tab_bar.tab_changed.connect(self._on_tab_changed)
         self._dashboard_page.export_requested.connect(self._on_export_dashboard)
-        self._options.micro_type_change_requested.connect(self._on_micro_type_change)
+        self._options.node_type_change_requested.connect(self._on_node_type_change)
         self._graph.node_selection_changed.connect(self._on_selection_changed)
 
         install_new_node_menu(self._graph, self._on_pick_macro_type)
@@ -130,6 +147,10 @@ class MainWindow(QMainWindow):
         available = core_node_types_by_category()
         for category, label in theme.MACRO_TYPE_LABELS.items():
             action = new_node_menu.addAction(label)
+            letter = _MACRO_SHORTCUT_LETTER.get(category)
+            if letter:
+                # Two-key chord, e.g. Cmd/Ctrl+P then L for a data loader.
+                action.setShortcut(QKeySequence(f"Ctrl+P, {letter}"))
             if category in available:
                 action.triggered.connect(
                     lambda _checked=False, c=category: self._on_pick_macro_type(c)
@@ -158,6 +179,11 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(self._tab_index[key])
         self._node_menu.setEnabled(key == "pipeline")
         self._dashboard_menu.setEnabled(key == "dashboard")
+        if key == "table":
+            # Rebuild from the current canvas each time the tab is shown.
+            self._table_page.refresh(
+                self._graph, self._last_outputs, self._table_modified_set()
+            )
 
     def current_tab(self) -> str:
         """The key of the currently visible tab (used by tests)."""
@@ -196,13 +222,16 @@ class MainWindow(QMainWindow):
         ruyso_nodes = [n for n in selected if hasattr(type(n), "CORE_NODE_TYPE")]
         if len(ruyso_nodes) == 1:
             node = ruyso_nodes[0]
-            category = type(node).CORE_NODE_CLASS.category
-            siblings = core_node_types_by_category().get(category, [])
-            self._options.show_node(node, siblings)
+            self._options.show_node(
+                node,
+                core_node_types_by_category(),
+                input_dataframe_columns(node, self._last_outputs),
+            )
         else:
             self._options.clear()
 
-    def _on_micro_type_change(self, new_type: str) -> None:
+    def _on_node_type_change(self, new_type: str) -> None:
+        """Macro or micro dropdown changed: recreate the node as ``new_type``."""
         node = self._options.current_node()
         if node is None:
             return
@@ -266,6 +295,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - reported to the user, not swallowed
             self._show_error("Could not open pipeline", exc)
         else:
+            # A freshly opened pipeline has no results yet.
+            self._last_outputs = {}
+            self._run_snapshot = {}
             self.statusBar().showMessage(f"Opened {path}", 5000)
 
     def _on_save_pipeline(self) -> None:
@@ -305,6 +337,9 @@ class MainWindow(QMainWindow):
         self._run_action.setEnabled(False)
         self.statusBar().showMessage("Running pipeline...")
         self._pipeline_page.clear_log()
+        # Remember exactly what is being run; promoted to _run_snapshot
+        # only if this run succeeds.
+        self._pending_snapshot = pipeline_signatures(pipeline)
 
         self._worker = PipelineExecutionWorker(pipeline)
         self._worker.succeeded.connect(self._on_run_succeeded)
@@ -319,8 +354,10 @@ class MainWindow(QMainWindow):
         for node_id, node_outputs in outputs.items():
             for port_name, value in node_outputs.items():
                 self._pipeline_page.append_log(f"[{node_id}] {port_name} = {value!r}")
+        self._last_outputs = outputs
+        self._run_snapshot = self._pending_snapshot
         self._preview_overlay.set_run_outputs(outputs)
-        self._table_page.set_run_outputs(outputs)
+        self._table_page.refresh(self._graph, outputs, self._table_modified_set())
 
     def _on_run_failed(self, message: str) -> None:
         self.statusBar().showMessage("Pipeline failed.", 5000)
@@ -333,6 +370,15 @@ class MainWindow(QMainWindow):
         pipeline = canvas_to_pipeline(self._graph)
         pipeline.validate()
         return pipeline
+
+    def _table_modified_set(self) -> set[str]:
+        """Node ids whose output would differ from the last successful run."""
+        if not self._run_snapshot:
+            return set()
+        try:
+            return modified_since_run(canvas_to_pipeline(self._graph), self._run_snapshot)
+        except Exception:  # noqa: BLE001 - never let this break the Table tab
+            return set()
 
     def _show_error(self, title: str, error: Exception | str) -> None:
         message = str(error)

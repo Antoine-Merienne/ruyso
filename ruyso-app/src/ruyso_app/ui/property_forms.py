@@ -43,6 +43,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from ruyso_app.core.node import NodeParams
+from ruyso_app.core.params import column_ref_dtypes
 
 # Both spellings of "optional union" need to be recognized: pydantic
 # models in this project use the modern `X | None` syntax (PEP 604,
@@ -86,13 +87,27 @@ class FieldSpec:
     widget: NodePropWidgetEnum
     default: Any
     choices: list[str] | None
+    #: If this field names input-DataFrame column(s): the accepted
+    #: column kinds (see core.params.COLUMN_DTYPE_KINDS); else None.
+    column_dtypes: list[str] | None = None
+    #: True when the field holds a list of column names, not just one.
+    is_column_list: bool = False
 
 
 def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
     """Yield one :class:`FieldSpec` per field of ``params_schema``, in order."""
     for field_name, field_info in params_schema.model_fields.items():
         widget_type, default_value, items = _infer_widget(field_name, field_info)
-        yield FieldSpec(field_name, widget_type, default_value, items)
+        column_dtypes = column_ref_dtypes(field_info)
+        annotation, _ = _unwrap_optional(field_info.annotation)
+        yield FieldSpec(
+            field_name,
+            widget_type,
+            default_value,
+            items,
+            column_dtypes=column_dtypes,
+            is_column_list=column_dtypes is not None and _is_str_list(annotation),
+        )
 
 
 def extract_params_from_node(node: BaseNode, params_schema: type[NodeParams]) -> dict[str, Any]:

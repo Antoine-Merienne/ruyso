@@ -6,6 +6,7 @@ downstream nodes (or the UI canvas) can display or export.
 from typing import Any, Literal
 
 from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.params import column_field
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
 
@@ -21,8 +22,8 @@ class MatplotlibPlotParams(NodeParams):
         title: Optional plot title.
     """
 
-    x: str
-    y: str
+    x: str = column_field(dtypes=("any",), description="Column for the x-axis.")
+    y: str = column_field(dtypes=("numeric",), description="Column for the y-axis.")
     kind: Literal["scatter", "line", "bar"] = "scatter"
     title: str | None = None
 

@@ -6,6 +6,7 @@ scikit-learn estimators on it.
 from typing import Any
 
 from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.params import column_field
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
 
@@ -21,7 +22,9 @@ class TrainTestSplitParams(NodeParams):
         random_state: Seed for the split, for reproducibility.
     """
 
-    target_column: str
+    target_column: str = column_field(
+        dtypes=("any",), description="Column to use as the target (y)."
+    )
     test_size: float = 0.2
     random_state: int = 42
 

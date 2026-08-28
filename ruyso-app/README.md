@@ -60,7 +60,8 @@ toolbar; every action is in a menu:
   - **Run Pipeline** (shortcut **F5**) — execute the canvas on a
     background thread; results land in the run log and the on-canvas
     figure previews.
-- **Node** menu (Pipeline tab): **New Node ▸ _macro type_**, and
+- **Node** menu (Pipeline tab): **New Node ▸ _macro type_** (chord
+  shortcuts `Cmd/Ctrl+P` then `L`/`T`/`M`/`S`/`G`/`E`), and
   **Selected Node ▸ Delete Node** (`Ctrl/Cmd+Backspace`).
 - **Dashboard** menu (Dashboard tab): **Exporter…**.
 - **View** menu: **Toggle Dark / Light Theme** — re-applies the
@@ -68,12 +69,20 @@ toolbar; every action is in a menu:
 
 **Adding a node:** right-click the canvas → **New Node ▸ _macro type_**
 (same as the Node menu). A node of that macro type appears and is
-selected; the Options panel on the right then shows a **micro type**
-dropdown to pick the concrete node, plus its parameter form. Wire
-nodes together by dragging between ports (unchanged NodeGraphQt
-behaviour). Grapher / figure nodes carry a small floating preview
-that, after a run, shows the figure; click it to open a resizable
-window sized to the figure.
+selected; the Options panel on the right then shows a **macro type**
+and a **micro type** dropdown (changing either recreates the node in
+place — see `ui/node_editing.py`), plus its parameter form. Wire nodes
+together by dragging between ports. Grapher / figure nodes carry a
+small floating preview that, after a run, shows the figure; click it
+to open a resizable window sized to the figure.
+
+**Parameter form niceties:** file-path fields get a **Browse…** button
+(open dialog for loaders, save dialog for exporters). Column-name
+fields (marked with `core.params.column_field`) become a dropdown of
+the input DataFrame's columns once the pipeline has been run — you can
+still type any name, but a warning appears below the field if the name
+isn't a column, or if that column's type isn't accepted by the
+parameter.
 
 To change how the app looks (colors, node macro-type colors, window
 stylesheet, fonts), edit `src/ruyso_app/ui/theme.py` — it is the only
@@ -116,12 +125,33 @@ phases. Decisions taken so far (spec section 8):
   `FigureWindow` sized to the figure's aspect ratio. See
   `ui/node_preview.py`. The old bottom "Figure Preview" pane is gone.
 - **Panels are resizable** via splitter handles: canvas ↔ run log,
-  canvas ↔ Options panel (Pipeline and Dashboard tabs).
+  canvas ↔ Options panel (Pipeline and Dashboard tabs), navigator ↔
+  data grid (Table tab).
+- **Path parameters get a Browse… button** (loaders open, exporters
+  save; filters in `ui/file_filters.py`) and a full-width text field.
+- **Table tab navigator is a flat list, not a node diagram.** Steps
+  appear in execution order; a step with several output tables (e.g.
+  `train_test_split`) lists each one (`step / port`). Entries are
+  greyed out until the pipeline has been run and produced that table.
+  Selecting one fills the **Table description** panel and shows the
+  data in a grid with mouse-resizable columns. The description has a
+  scalar summary (kind of table — plain / geo / time-indexed /
+  geo+time — row count, variable count, missing/empty-value count)
+  plus two tables: **numeric variables** (`variable | type | mean |
+  std. dev | min | max`; datetime columns included here) and **string
+  / categorical variables** (`variable | type | # distinct values`;
+  bool columns included here). See `ui/table_description.py`.
+- **The Table tab keeps showing the last successful run.** Editing the
+  pipeline afterwards does not blank the tables; instead a step whose
+  type, parameters or wiring changed since that run — or anything
+  downstream of such a step — is tagged **· modified** (pale yellow)
+  in the navigator, so a stale table is never mistaken for the current
+  result. Detection lives in `ui/run_snapshot.py`; the snapshot is
+  reset when a pipeline file is opened.
 
-Still to come in later phases: the Table tab (mini pipeline diagram,
-table description, data grid); the Dashboard tab (figure/title/text
-blocks, "add to dashboard", PDF/PNG export); the statistical-test node
-type and its preview.
+Still to come: the Dashboard tab (figure/title/text blocks, "add to
+dashboard", PDF/PNG export); the statistical-test node type and its
+preview.
 
 > Packaging the app into a standalone executable (PyInstaller/Nuitka)
 > is intentionally not set up yet — planned for once more features

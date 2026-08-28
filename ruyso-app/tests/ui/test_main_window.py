@@ -117,11 +117,46 @@ def test_micro_type_change_recreates_the_underlying_node(window):
     original_type = type(node).CORE_NODE_TYPE
     other_type = "standard_scaler" if original_type == "drop_na" else "drop_na"
 
-    window._pipeline_page.options_panel.micro_type_change_requested.emit(other_type)
+    window._pipeline_page.options_panel.node_type_change_requested.emit(other_type)
 
     remaining = window._canvas.graph.all_nodes()
     assert len(remaining) == 1
     assert type(remaining[0]).CORE_NODE_TYPE == other_type
+
+
+def test_new_node_actions_have_cmd_p_chord_shortcuts(window):
+    new_node_menu = next(
+        a.menu() for a in window._node_menu.actions() if a.text() == "New Node"
+    )
+    shortcuts = {a.text(): a.shortcut().toString() for a in new_node_menu.actions()}
+    assert shortcuts[theme.MACRO_TYPE_LABELS["loading"]] == "Ctrl+P, L"
+    assert shortcuts[theme.MACRO_TYPE_LABELS["grapher"]] == "Ctrl+P, G"
+
+
+def test_changing_macro_type_recreates_node_in_new_category(window):
+    window._on_pick_macro_type("loading")
+    node = window._canvas.graph.all_nodes()[0]
+    assert type(node).CORE_NODE_CLASS.category == "loading"
+
+    # Emulate the Options panel asking for a transformer.
+    window._on_node_type_change("drop_na")
+
+    remaining = window._canvas.graph.all_nodes()
+    assert len(remaining) == 1
+    assert type(remaining[0]).CORE_NODE_CLASS.category == "transform"
+
+
+def test_switching_to_table_tab_populates_the_navigator_from_the_canvas(window):
+    window._on_pick_macro_type("loading")
+    window._on_pick_macro_type("transform")
+
+    window._tab_bar.set_current_key("table")
+
+    labels = [
+        window._table_page._nav.item(i).text()
+        for i in range(window._table_page._nav.count())
+    ]
+    assert len(labels) == 2  # one table each for the loader and the transformer
 
 
 def test_statistical_test_macro_type_has_no_enabled_new_node_action(window):

@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import Field
 
 from ruyso_app.core.node import Node, NodeParams
+from ruyso_app.core.params import column_field
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
 
@@ -25,7 +26,7 @@ class DropNAParams(NodeParams):
             "all" drops a row only if every relevant value is NA.
     """
 
-    columns: list[str] | None = None
+    columns: list[str] | None = column_field(dtypes=("any",), default=None)
     how: str = Field(default="any", pattern="^(any|all)$")
 
 
@@ -66,7 +67,7 @@ class StandardScalerParams(NodeParams):
             numeric column in the DataFrame is scaled.
     """
 
-    columns: list[str] | None = None
+    columns: list[str] | None = column_field(dtypes=("numeric",), default=None)
 
 
 @register_node

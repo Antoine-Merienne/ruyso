@@ -24,9 +24,18 @@ Modules:
     figure_viewer.py       -> Embeds a matplotlib Figure output in a widget.
     tab_bar.py             -> The Pipeline / Table / Dashboard tab band.
     options_panel.py       -> Right-hand settings panel: selected-node
-                             editor (macro label + micro dropdown + form).
+                             editor (macro + micro dropdowns + form,
+                             Browse... for path fields, column pickers).
+    file_filters.py        -> node_type -> file-dialog filter map.
+    column_spec.py         -> Resolve/validate column-name parameters
+                             against the input DataFrame's columns.
+    run_snapshot.py        -> Detect steps changed since the last run.
     pipeline_page.py       -> The Pipeline tab (canvas + run log + options).
     table_page.py          -> The Table tab (step output inspector).
+    table_nav.py           -> Flat, execution-ordered list of a
+                             pipeline's output tables.
+    table_description.py   -> Summarise a table (type, vars, missing...).
+    dataframe_model.py     -> Read-only QAbstractTableModel over a df.
     dashboard_page.py      -> The Dashboard tab (report canvas + export).
     main_window.py         -> Assembles everything into the app window.
     app.py                 -> Entry point (QApplication + event loop).
