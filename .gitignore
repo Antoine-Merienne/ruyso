@@ -27,6 +27,17 @@ ENV/
 htmlcov/
 
 # =========================
+# Data files
+# =========================
+*.csv
+*.xlsx
+*.parquet
+
+# Generated outputs
+*.png
+*.pdf
+
+# =========================
 # IDEs / Editors
 # =========================
 
