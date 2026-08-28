@@ -18,7 +18,9 @@ itself on a dark/light theme toggle with no code here.
 from __future__ import annotations
 
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QWidget
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+
+from ruyso_app.ui.run_progress import RunProgressBar
 
 
 class TabBar(QWidget):
@@ -56,6 +58,12 @@ class TabBar(QWidget):
             layout.addWidget(button)
 
         layout.addStretch(1)
+
+        #: Pipeline-run progress indicator, shown at the far right of
+        #: the band (vertically centred, away from the tab buttons).
+        self.progress = RunProgressBar(self)
+        layout.addWidget(self.progress, 0, Qt.AlignVCenter)
+        layout.addSpacing(14)
 
         if tabs:
             self._current_key = tabs[0][0]

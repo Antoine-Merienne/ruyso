@@ -19,14 +19,16 @@ def _graph(qapp):
     return graph
 
 
-def test_swap_preserves_name_and_position(qapp):
+def test_swap_adopts_new_type_name_and_keeps_position(qapp):
     graph = _graph(qapp)
     node = graph.create_node(qt_type_for("drop_na"), name="clean", pos=(123.0, 45.0))
 
     new_node = change_node_micro_type(graph, node, "standard_scaler")
 
     assert type(new_node).CORE_NODE_TYPE == "standard_scaler"
-    assert new_node.name() == "clean"
+    # name follows the new type, not the old node's name
+    assert new_node.name() != "clean"
+    assert "Standard Scaler" in new_node.name()
     assert new_node.pos() == [123.0, 45.0]
     assert len(graph.all_nodes()) == 1
 

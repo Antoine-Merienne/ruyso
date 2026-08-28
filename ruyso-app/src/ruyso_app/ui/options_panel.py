@@ -34,11 +34,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -166,6 +164,18 @@ class OptionsPanel(QWidget):
 
     def current_category(self) -> str | None:
         return self._category
+
+    def set_input_columns(self, input_columns: dict[str, str] | None) -> None:
+        """
+        Update the column pickers in place (e.g. after a background
+        auto-run made the input DataFrame available) without rebuilding
+        the whole form, so the user's focus and half-typed text survive.
+        """
+        self._input_columns = input_columns
+        columns = sorted(input_columns or {})
+        for name, entry in self._column_fields.items():
+            entry[4](columns)  # set_items
+            self._revalidate(name)
 
     def apply_theme(self) -> None:
         """Recompute the background tint from the current theme + category."""
@@ -297,34 +307,45 @@ class OptionsPanel(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(2)
 
+        # Both single- and multi-column fields use the same widget as the
+        # grapher / model column fields: one editable combo box with a
+        # single dropdown arrow. For a list-valued field, picking an item
+        # from the dropdown toggles it in/out of the comma-separated
+        # value instead of replacing it; free text is always allowed.
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.addItems(columns)
+        combo.setCurrentText("" if current is None else str(current))
+        combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+        combo.currentTextChanged.connect(lambda _v, n=name: self._revalidate(n))
+        box.addWidget(combo)
+        value_getter = combo.currentText
+
         if spec.is_column_list:
-            edit = QLineEdit("" if current is None else str(current))
-            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            edit.setPlaceholderText("comma-separated column names")
-            edit.textChanged.connect(lambda v, n=name: node.set_property(n, v))
-            edit.textChanged.connect(lambda _v, n=name: self._revalidate(n))
+            combo.lineEdit().setPlaceholderText("comma-separated column names")
 
-            picker = QToolButton()
-            picker.setText("Columns ▾")
-            picker.setPopupMode(QToolButton.InstantPopup)
-            picker.setEnabled(bool(columns))
-            picker.setMenu(self._build_columns_menu(columns, edit))
+            def _toggle_picked(index: int, _c=combo) -> None:
+                picked = _c.itemText(index)
+                if not picked:
+                    return
+                items = [c.strip() for c in _c.currentText().split(",") if c.strip()]
+                if picked in items:
+                    items.remove(picked)
+                else:
+                    items.append(picked)
+                _c.setCurrentText(", ".join(items))
 
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.addWidget(edit, 1)
-            row.addWidget(picker, 0)
-            box.addLayout(row)
-            value_getter = edit.text
-        else:
-            combo = QComboBox()
-            combo.setEditable(True)
-            combo.addItems(columns)
-            combo.setCurrentText("" if current is None else str(current))
-            combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
-            combo.currentTextChanged.connect(lambda _v, n=name: self._revalidate(n))
-            box.addWidget(combo)
-            value_getter = combo.currentText
+            combo.activated.connect(_toggle_picked)
+
+        def set_items(cols: list[str], _c=combo) -> None:
+            _c.blockSignals(True)
+            kept = _c.currentText()
+            _c.clear()
+            _c.addItems(cols)
+            _c.setCurrentText(kept)
+            _c.blockSignals(False)
 
         box.addWidget(warning)
         self._column_fields[name] = (
@@ -332,39 +353,16 @@ class OptionsPanel(QWidget):
             spec.column_dtypes,
             spec.is_column_list,
             value_getter,
+            set_items,
         )
         self._revalidate(name)
         return container
-
-    def _build_columns_menu(self, columns: list[str], edit: QLineEdit) -> QMenu:
-        menu = QMenu(self)
-
-        def rebuild() -> None:
-            menu.clear()
-            selected = {c.strip() for c in edit.text().split(",") if c.strip()}
-            for column in columns:
-                action = menu.addAction(column)
-                action.setCheckable(True)
-                action.setChecked(column in selected)
-                action.toggled.connect(lambda _c, col=column: _toggle(col))
-
-        def _toggle(column: str) -> None:
-            items = [c.strip() for c in edit.text().split(",") if c.strip()]
-            if column in items:
-                items.remove(column)
-            else:
-                items.append(column)
-            edit.setText(", ".join(items))
-
-        menu.aboutToShow.connect(rebuild)
-        rebuild()
-        return menu
 
     def _revalidate(self, field_name: str) -> None:
         entry = self._column_fields.get(field_name)
         if entry is None:
             return
-        warning, accepted, is_list, value_getter = entry
+        warning, accepted, is_list, value_getter, _set_items = entry
         raw = value_getter() or ""
         values = (
             [v.strip() for v in raw.split(",") if v.strip()] if is_list else [raw.strip()]

@@ -297,4 +297,24 @@ QPushButton#ruysoTabButton:checked {{
     background-color: {theme.panel_background};
     font-weight: bold;
 }}
+
+/* Pipeline-run progress bar, right-aligned in the tab band
+   (see ui/run_progress.py). The fill colour switches on a dynamic
+   "state" property: neutral blue while running, green on success,
+   red on failure. */
+QProgressBar#ruysoRunProgress {{
+    background-color: {theme.panel_background};
+    border: 1px solid {theme.border_color};
+    border-radius: 7px;
+}}
+QProgressBar#ruysoRunProgress::chunk {{
+    border-radius: 6px;
+    background-color: #4a90d9;
+}}
+QProgressBar#ruysoRunProgress[state="success"]::chunk {{
+    background-color: #3fae5a;
+}}
+QProgressBar#ruysoRunProgress[state="error"]::chunk {{
+    background-color: #d9534f;
+}}
 """

@@ -124,6 +124,44 @@ def test_micro_type_change_recreates_the_underlying_node(window):
     assert type(remaining[0]).CORE_NODE_TYPE == other_type
 
 
+def test_pick_macro_type_places_node_at_given_position(window):
+    window._on_pick_macro_type("loading", [140.0, -25.0])
+    node = window._canvas.graph.all_nodes()[0]
+    assert node.pos() == [140.0, -25.0]
+
+
+def test_retype_via_options_updates_the_node_name(window):
+    window._on_pick_macro_type("transform")
+    node = window._canvas.graph.all_nodes()[0]
+    start_type = type(node).CORE_NODE_TYPE
+    other = "standard_scaler" if start_type == "drop_na" else "drop_na"
+
+    window._on_node_type_change(other)
+
+    new_node = window._canvas.graph.all_nodes()[0]
+    assert type(new_node).CORE_NODE_TYPE == other
+    expected = other.replace("_", " ").title()
+    assert expected in new_node.name()
+
+
+def test_run_pipeline_drives_the_tab_band_progress_bar(window, tmp_path):
+    import pandas as pd
+
+    csv = tmp_path / "d.csv"
+    pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_csv(csv, index=False)
+    window._on_pick_macro_type("loading")
+    loader = window._canvas.graph.all_nodes()[0]
+    loader.set_property("filepath", str(csv))
+
+    window._on_run_pipeline()
+    window._worker.wait(5000)
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.processEvents()
+
+    assert window._tab_bar.progress.property("state") == "success"
+
+
 def test_new_node_actions_have_cmd_p_chord_shortcuts(window):
     new_node_menu = next(
         a.menu() for a in window._node_menu.actions() if a.text() == "New Node"

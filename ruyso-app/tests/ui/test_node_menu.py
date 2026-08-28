@@ -16,7 +16,7 @@ NodeRegistry.discover_package(ruyso_app.nodes)
 def test_new_node_submenu_has_one_entry_per_macro_type(qapp):
     graph = NodeGraph()
     register_all_nodes(graph)
-    install_new_node_menu(graph, lambda _c: None)
+    install_new_node_menu(graph, lambda _c, _pos: None)
 
     graph_qmenu = graph.get_context_menu("graph").qmenu
     submenu = next(
@@ -34,7 +34,7 @@ def test_choosing_a_macro_type_calls_back(qapp):
     graph = NodeGraph()
     register_all_nodes(graph)
     picked = []
-    install_new_node_menu(graph, picked.append)
+    install_new_node_menu(graph, lambda category, pos: picked.append((category, pos)))
 
     graph_qmenu = graph.get_context_menu("graph").qmenu
     submenu = next(a.menu() for a in graph_qmenu.actions() if a.text() == "New Node")
@@ -44,14 +44,15 @@ def test_choosing_a_macro_type_calls_back(qapp):
     )
     grapher_action.trigger()
 
-    assert picked == ["grapher"]
+    assert len(picked) == 1
+    assert picked[0][0] == "grapher"  # (category, cursor-pos-or-None)
 
 
 def test_install_is_idempotent(qapp):
     graph = NodeGraph()
     register_all_nodes(graph)
-    install_new_node_menu(graph, lambda _c: None)
-    install_new_node_menu(graph, lambda _c: None)
+    install_new_node_menu(graph, lambda _c, _pos: None)
+    install_new_node_menu(graph, lambda _c, _pos: None)
 
     graph_qmenu = graph.get_context_menu("graph").qmenu
     new_node_actions = [a for a in graph_qmenu.actions() if a.text() == "New Node"]

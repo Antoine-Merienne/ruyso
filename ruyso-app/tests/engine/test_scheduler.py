@@ -128,3 +128,53 @@ def test_cached_execution_returns_identical_result_without_recomputation(tmp_pat
 def test_execute_node_validates_required_inputs():
     with pytest.raises(ValueError, match="missing required input"):
         _execute_node("drop_na", {}, {})
+
+
+def test_progress_callback_reports_each_node(sample_csv, no_cache_scheduler):
+    graph = _regression_graph(sample_csv)
+    seen: list[tuple[int, int]] = []
+
+    no_cache_scheduler.run(graph, progress_callback=lambda d, t: seen.append((d, t)))
+
+    assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
+def test_run_available_runs_a_lone_loader(sample_csv, no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": sample_csv})
+    )
+    outputs, errors = no_cache_scheduler.run_available(graph)
+
+    assert "df" in outputs["load"]
+    assert errors == {}
+
+
+def test_run_available_skips_unwired_and_downstream_nodes(sample_csv, no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": sample_csv})
+    )
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
+    graph.add_node(
+        NodeSpec(id="split", node_type="train_test_split", params={"target_column": "target"})
+    )
+    # "clean" has no incoming df wire -> skipped; "split" depends on it -> skipped too.
+    graph.add_connection(
+        Connection(source_node="clean", source_port="df", target_node="split", target_port="df")
+    )
+    outputs, errors = no_cache_scheduler.run_available(graph)
+
+    assert set(outputs) == {"load"}
+    assert errors == {}
+
+
+def test_run_available_records_a_failing_node_without_raising(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": "/no/such/file.csv"})
+    )
+    outputs, errors = no_cache_scheduler.run_available(graph)
+
+    assert outputs == {}
+    assert "load" in errors

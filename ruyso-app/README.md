@@ -68,21 +68,40 @@ toolbar; every action is in a menu:
   palette to the window stylesheet, canvas background, and every node.
 
 **Adding a node:** right-click the canvas → **New Node ▸ _macro type_**
-(same as the Node menu). A node of that macro type appears and is
-selected; the Options panel on the right then shows a **macro type**
-and a **micro type** dropdown (changing either recreates the node in
-place — see `ui/node_editing.py`), plus its parameter form. Wire nodes
-together by dragging between ports. Grapher / figure nodes carry a
-small floating preview that, after a run, shows the figure; click it
+— the node appears **under the cursor**. (The Node menu and the
+`Cmd/Ctrl+P` chords drop it in the middle of the view instead.) A node
+of that macro type appears and is selected; the Options panel on the
+right then shows a **macro type** and a **micro type** dropdown
+(changing either recreates the node in place — its name follows the
+new type; see `ui/node_editing.py`), plus its parameter form. Wire
+nodes together by dragging between ports. Grapher / figure nodes carry
+a small floating preview that, after a run, shows the figure; click it
 to open a resizable window sized to the figure.
+
+**Automatic background runs:** whenever you set a data file, wire up a
+node, or edit a parameter, the app runs whatever part of the pipeline
+is ready, on a background thread (`ui/auto_run.py`,
+`PipelineScheduler.run_available`). Data files load without pressing
+Run, so column pickers and previews populate on their own; unfinished
+or broken branches are skipped silently (no error dialog). An explicit
+**Run Pipeline** still runs everything and reports errors.
+
+**Run progress:** a slim progress bar sits at the right of the tab
+band. During a manual run it fills node-by-node; it settles solid
+**green** on success or **red** on failure and stays there until the
+next run.
 
 **Parameter form niceties:** file-path fields get a **Browse…** button
 (open dialog for loaders, save dialog for exporters). Column-name
-fields (marked with `core.params.column_field`) become a dropdown of
-the input DataFrame's columns once the pipeline has been run — you can
-still type any name, but a warning appears below the field if the name
-isn't a column, or if that column's type isn't accepted by the
-parameter.
+fields (marked with `core.params.column_field`) become a single
+editable dropdown of the input DataFrame's columns — the same widget
+for every node. For a multi-column field (e.g. `standard_scaler.columns`,
+`drop_na.columns`), picking an item from the dropdown toggles it in or
+out of the comma-separated value; you can still type any name. A
+warning appears below the field if a name isn't a column, or if that
+column's type isn't accepted by the parameter. Acceptable types are
+declared per field on the node (e.g. `standard_scaler.columns` needs
+numeric; `matplotlib_plot.x/y` accept anything).
 
 To change how the app looks (colors, node macro-type colors, window
 stylesheet, fonts), edit `src/ruyso_app/ui/theme.py` — it is the only

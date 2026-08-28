@@ -30,6 +30,8 @@ Modules:
     column_spec.py         -> Resolve/validate column-name parameters
                              against the input DataFrame's columns.
     run_snapshot.py        -> Detect steps changed since the last run.
+    auto_run.py            -> Debounced background "run what's ready".
+    run_progress.py        -> The run progress bar in the tab band.
     pipeline_page.py       -> The Pipeline tab (canvas + run log + options).
     table_page.py          -> The Table tab (step output inspector).
     table_nav.py           -> Flat, execution-ordered list of a

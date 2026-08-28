@@ -11,12 +11,15 @@ Chosen mechanism (spec section 8): **recreate**. The old canvas node
 is deleted and a fresh node of the new micro type is created in its
 place, preserving:
 
-* the display name (so pipeline JSON ids stay stable);
 * the canvas position;
 * every wire whose port still exists, by name, on the new node
   (an incompatible wire is simply dropped);
 * the value of any parameter whose field name is shared by both micro
   types.
+
+The display name is **not** preserved: the new node takes the new
+type's default name (e.g. "Drop Na" -> "Standard Scaler"), so the
+label on the canvas always matches what the node actually is.
 
 This is a plain function on the NodeGraphQt graph -- no UI widgets --
 so it is straightforward to test headlessly.
@@ -48,7 +51,6 @@ def change_node_micro_type(
     if current_type == new_node_type:
         return node
 
-    name = node.name()
     pos = node.pos()
     old_schema = type(node).CORE_NODE_CLASS.params_schema
     saved_params = {
@@ -68,7 +70,7 @@ def change_node_micro_type(
 
     graph.delete_node(node, push_undo=False)
     new_node = graph.create_node(
-        qt_type_for(new_node_type), name=name, pos=pos, push_undo=False
+        qt_type_for(new_node_type), pos=pos, push_undo=False
     )
 
     new_schema = type(new_node).CORE_NODE_CLASS.params_schema

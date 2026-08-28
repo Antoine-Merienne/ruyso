@@ -22,8 +22,13 @@ class MatplotlibPlotParams(NodeParams):
         title: Optional plot title.
     """
 
+    # Both axes accept any column type: matplotlib happily plots
+    # categorical / text axes (bar charts, categorical scatter), so a
+    # numeric-only restriction here would be a false constraint. A node
+    # that genuinely needs numeric columns (e.g. standard_scaler)
+    # declares that on its own field.
     x: str = column_field(dtypes=("any",), description="Column for the x-axis.")
-    y: str = column_field(dtypes=("numeric",), description="Column for the y-axis.")
+    y: str = column_field(dtypes=("any",), description="Column for the y-axis.")
     kind: Literal["scatter", "line", "bar"] = "scatter"
     title: str | None = None
 

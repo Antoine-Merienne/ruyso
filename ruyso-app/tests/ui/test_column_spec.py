@@ -26,8 +26,12 @@ NodeRegistry.discover_package(ruyso_app.nodes)
 def test_core_marks_column_params():
     plot = NodeRegistry.get("matplotlib_plot")
     assert column_ref_dtypes(plot.params_schema.model_fields["x"]) == ["any"]
-    assert column_ref_dtypes(plot.params_schema.model_fields["y"]) == ["numeric"]
+    assert column_ref_dtypes(plot.params_schema.model_fields["y"]) == ["any"]
     assert column_ref_dtypes(plot.params_schema.model_fields["kind"]) is None
+
+    # standard_scaler genuinely needs numeric columns.
+    scaler = NodeRegistry.get("standard_scaler")
+    assert column_ref_dtypes(scaler.params_schema.model_fields["columns"]) == ["numeric"]
 
 
 def test_dtype_kind_and_kind_accepted():

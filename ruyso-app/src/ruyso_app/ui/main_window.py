@@ -38,6 +38,7 @@ from ruyso_app.engine.codegen import save_script
 from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
 from ruyso_app.engine.serialization import load_graph, save_graph
 from ruyso_app.ui import theme
+from ruyso_app.ui.auto_run import AutoRunController
 from ruyso_app.ui.canvas import PipelineCanvas
 from ruyso_app.ui.column_spec import input_dataframe_columns
 from ruyso_app.ui.dashboard_page import DashboardPage
@@ -123,6 +124,19 @@ class MainWindow(QMainWindow):
             self._graph, self._on_ctx_delete, self._on_ctx_add_to_dashboard
         )
 
+        # Background auto-run: reload data / recompute whatever is ready
+        # whenever the canvas changes, so results appear without Run.
+        self._auto_run = AutoRunController(lambda: canvas_to_pipeline(self._graph), self)
+        self._auto_run.finished.connect(self._on_auto_run_finished)
+        for signal in (
+            self._graph.node_created,
+            self._graph.nodes_deleted,
+            self._graph.port_connected,
+            self._graph.port_disconnected,
+            self._graph.property_changed,
+        ):
+            signal.connect(self._auto_run.schedule)
+
         self._build_menus()
         self._on_tab_changed(self._tab_bar.current_key())
 
@@ -153,7 +167,7 @@ class MainWindow(QMainWindow):
                 action.setShortcut(QKeySequence(f"Ctrl+P, {letter}"))
             if category in available:
                 action.triggered.connect(
-                    lambda _checked=False, c=category: self._on_pick_macro_type(c)
+                    lambda _checked=False, c=category: self._on_pick_macro_type(c, None)
                 )
             else:
                 action.setEnabled(False)
@@ -191,18 +205,27 @@ class MainWindow(QMainWindow):
 
     # -- node creation / selection ---------------------------------------
 
-    def _on_pick_macro_type(self, category: str) -> None:
+    def _on_pick_macro_type(
+        self, category: str, pos: list[float] | None = None
+    ) -> None:
         """
         Step 1 of the two-step flow: a macro type was chosen (from the
         canvas right-click menu or the Node menu). Create the first
         concrete node of that macro type and select it, so the Options
         panel opens with the micro-type dropdown ready to refine it.
+
+        Args:
+            category: The chosen macro type.
+            pos: ``[x, y]`` scene position to place the node at -- the
+                cursor position when invoked from the canvas right-click
+                menu; ``None`` (from the Node menu / a shortcut) drops
+                it in the middle of the view.
         """
         node_types = core_node_types_by_category().get(category, [])
         if not node_types:
             return
         node = self._graph.create_node(
-            qt_type_for(node_types[0]), pos=self._new_node_pos()
+            qt_type_for(node_types[0]), pos=pos or self._new_node_pos()
         )
         self._select_only(node)
 
@@ -335,22 +358,30 @@ class MainWindow(QMainWindow):
             return
 
         self._run_action.setEnabled(False)
+        self._auto_run.set_enabled(False)  # don't compete with the real run
         self.statusBar().showMessage("Running pipeline...")
         self._pipeline_page.clear_log()
+        self._tab_bar.progress.start(len(pipeline.nodes))
         # Remember exactly what is being run; promoted to _run_snapshot
         # only if this run succeeds.
         self._pending_snapshot = pipeline_signatures(pipeline)
 
         self._worker = PipelineExecutionWorker(pipeline)
+        self._worker.progress.connect(self._tab_bar.progress.set_progress)
         self._worker.succeeded.connect(self._on_run_succeeded)
         self._worker.failed.connect(self._on_run_failed)
-        self._worker.finished.connect(lambda: self._run_action.setEnabled(True))
+        self._worker.finished.connect(self._on_run_finished)
         self._worker.start()
+
+    def _on_run_finished(self) -> None:
+        self._run_action.setEnabled(True)
+        self._auto_run.set_enabled(True)
 
     # -- execution callbacks (GUI thread, via Qt signals) ---------------
 
     def _on_run_succeeded(self, outputs: dict[str, dict]) -> None:
         self.statusBar().showMessage("Pipeline finished.", 5000)
+        self._tab_bar.progress.finish_success()
         for node_id, node_outputs in outputs.items():
             for port_name, value in node_outputs.items():
                 self._pipeline_page.append_log(f"[{node_id}] {port_name} = {value!r}")
@@ -361,8 +392,42 @@ class MainWindow(QMainWindow):
 
     def _on_run_failed(self, message: str) -> None:
         self.statusBar().showMessage("Pipeline failed.", 5000)
+        self._tab_bar.progress.finish_error()
         self._pipeline_page.append_log(f"ERROR: {message}")
         self._show_error("Pipeline execution failed", message)
+
+    def _on_auto_run_finished(self, outputs: dict[str, dict], _errors: dict) -> None:
+        """Merge a background auto-run's results without any dialog/log noise."""
+        if not outputs:
+            return
+        self._last_outputs = {**self._last_outputs, **outputs}
+        try:
+            signatures = pipeline_signatures(canvas_to_pipeline(self._graph))
+        except Exception:  # noqa: BLE001
+            signatures = {}
+        for node_id in outputs:
+            if node_id in signatures:
+                # Auto-run just recomputed this node -> it is current.
+                self._run_snapshot[node_id] = signatures[node_id]
+
+        self._preview_overlay.set_run_outputs(self._last_outputs)
+        node = self._options.current_node()
+        if node is not None:
+            self._options.set_input_columns(
+                input_dataframe_columns(node, self._last_outputs)
+            )
+        if self.current_tab() == "table":
+            self._table_page.refresh(
+                self._graph, self._last_outputs, self._table_modified_set()
+            )
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Let any in-flight background run finish before the window dies."""
+        self._auto_run.set_enabled(False)
+        for worker in (self._worker, getattr(self._auto_run, "_worker", None)):
+            if worker is not None and worker.isRunning():
+                worker.wait(3000)
+        super().closeEvent(event)
 
     # -- helpers --------------------------------------------------------
 

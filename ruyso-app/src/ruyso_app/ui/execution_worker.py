@@ -39,6 +39,9 @@ class PipelineExecutionWorker(QThread):
     #: Emitted on failure, with a human-readable error message.
     failed = Signal(str)
 
+    #: Emitted as nodes finish, with ``(done, total)`` counts.
+    progress = Signal(int, int)
+
     def __init__(
         self,
         pipeline: PipelineGraph,
@@ -60,7 +63,10 @@ class PipelineExecutionWorker(QThread):
     def run(self) -> None:
         """Entry point invoked by Qt on the background thread (do not call directly)."""
         try:
-            outputs = self._scheduler.run(self._pipeline)
+            outputs = self._scheduler.run(
+                self._pipeline,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+            )
         except Exception as exc:  # noqa: BLE001 - reported to the UI, never swallowed
             self.failed.emit(str(exc))
         else:
