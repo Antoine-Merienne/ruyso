@@ -78,3 +78,17 @@ def test_discover_package_registers_all_beta_nodes():
         "matplotlib_plot",
     }
     assert expected_node_types.issubset(NodeRegistry.all().keys())
+
+
+def test_by_category_groups_registered_nodes_by_macro_type():
+    import ruyso_app.nodes as nodes_package
+
+    NodeRegistry.discover_package(nodes_package)
+    grouped = NodeRegistry.by_category()
+
+    assert grouped["loading"] == ["csv_loader"]
+    assert grouped["grapher"] == ["matplotlib_plot"]
+    assert set(grouped["transform"]) == {"drop_na", "standard_scaler"}
+    # No statistical_test node exists yet in this beta -- must simply
+    # be absent, not present with an empty list.
+    assert "statistical_test" not in grouped

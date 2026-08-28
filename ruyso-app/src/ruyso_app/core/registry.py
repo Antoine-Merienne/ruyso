@@ -97,6 +97,23 @@ class NodeRegistry:
         return dict(cls._nodes)
 
     @classmethod
+    def by_category(cls) -> dict[str, list[str]]:
+        """
+        Group every registered node_type by its ``category`` (macro type).
+
+        Returns:
+            Mapping of category -> sorted list of node_type identifiers
+            in that category. A category with no registered node is
+            simply absent from the result (callers building a menu of
+            macro types should treat a missing key as "nothing to show
+            here yet", not as an error).
+        """
+        grouped: dict[str, list[str]] = {}
+        for node_type, node_cls in cls._nodes.items():
+            grouped.setdefault(node_cls.category, []).append(node_type)
+        return {category: sorted(node_types) for category, node_types in grouped.items()}
+
+    @classmethod
     def discover_package(cls, package: ModuleType) -> None:
         """
         Import every submodule of ``package`` so that any

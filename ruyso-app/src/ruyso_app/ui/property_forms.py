@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import types
 import typing
-from typing import Any, get_args, get_origin
+from dataclasses import dataclass
+from typing import Any, get_args, get_origin, Iterator
 
 from NodeGraphQt import BaseNode
 from NodeGraphQt.constants import NodePropWidgetEnum
@@ -68,6 +69,30 @@ def add_properties_to_node(node: BaseNode, params_schema: type[NodeParams]) -> N
             widget_type=widget_type.value,
             tab="Parameters",
         )
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """A rendering-agnostic description of one parameter field.
+
+    Produced by :func:`iter_field_specs` so a form can be built with
+    plain Qt widgets (e.g. the Options panel) without re-deriving the
+    pydantic-field -> widget mapping that :func:`_infer_widget` already
+    encodes. ``widget`` is a ``NodePropWidgetEnum`` value; ``choices``
+    is populated only for ``QCOMBO_BOX``.
+    """
+
+    name: str
+    widget: NodePropWidgetEnum
+    default: Any
+    choices: list[str] | None
+
+
+def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
+    """Yield one :class:`FieldSpec` per field of ``params_schema``, in order."""
+    for field_name, field_info in params_schema.model_fields.items():
+        widget_type, default_value, items = _infer_widget(field_name, field_info)
+        yield FieldSpec(field_name, widget_type, default_value, items)
 
 
 def extract_params_from_node(node: BaseNode, params_schema: type[NodeParams]) -> dict[str, Any]:

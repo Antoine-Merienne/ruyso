@@ -38,7 +38,7 @@ class MatplotlibPlot(Node):
     """
 
     node_type = "matplotlib_plot"
-    category = "viz"
+    category = "grapher"
     inputs = [Port(name="df", dtype="dataframe")]
     outputs = [Port(name="figure", dtype="figure")]
     params_schema = MatplotlibPlotParams

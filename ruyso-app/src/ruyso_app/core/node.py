@@ -57,7 +57,7 @@ class Node(ABC):
             (e.g. "csv_loader"). Used as the key in the NodeRegistry
             and stored in the serialized graph JSON.
         category: Logical grouping for UI menus / project organization
-            (e.g. "loading", "transform", "model", "viz", "export").
+            (e.g. "loading", "transform", "model", "grapher", "export").
         inputs: List of Port objects this node expects as input.
         outputs: List of Port objects this node produces as output.
         params_schema: The NodeParams subclass describing this node's

@@ -47,24 +47,81 @@ pip install -e ".[ui]"
 python -m ruyso_app.ui
 ```
 
-This opens the node-graph canvas with a node palette (drag nodes in,
-or press Tab on the canvas to search), a properties panel for the
-selected node (auto-generated from each node's parameters — no manual
-form-building), a run log, and a live preview of the last figure
-produced. The toolbar lets you:
+This opens a single window with a three-tab band — **Pipeline**,
+**Table**, **Dashboard** — over a global menu bar. There is no
+toolbar; every action is in a menu:
 
-- **Load Pipeline...** / **Save Pipeline...** — read/write the exact
-  same JSON format used by the headless CLI below, so a pipeline built
-  visually can be run from the command line and vice versa.
-- **Export as Script...** — write the current pipeline out as a
-  standalone `.py` file (see below).
-- **Run Pipeline** — execute the current canvas on a background
-  thread (the UI stays responsive) and show results in the run log
-  and figure preview.
+- **Pipeline** menu (always available, on every tab):
+  - **Open Pipeline (JSON)…** / **Save Pipeline (JSON)…** — read/write
+    the exact same JSON format used by the headless CLI below, so a
+    pipeline built visually runs from the command line and vice versa.
+  - **Export as Script (.py)…** — write the pipeline out as a
+    standalone `.py` file (see below).
+  - **Run Pipeline** (shortcut **F5**) — execute the canvas on a
+    background thread; results land in the run log and the on-canvas
+    figure previews.
+- **Node** menu (Pipeline tab): **New Node ▸ _macro type_**, and
+  **Selected Node ▸ Delete Node** (`Ctrl/Cmd+Backspace`).
+- **Dashboard** menu (Dashboard tab): **Exporter…**.
+- **View** menu: **Toggle Dark / Light Theme** — re-applies the
+  palette to the window stylesheet, canvas background, and every node.
 
-To change how the app looks (colors, node category colors, window
-stylesheet), edit `src/ruyso_app/ui/theme.py` — it is the only file
-that needs touching for purely visual changes.
+**Adding a node:** right-click the canvas → **New Node ▸ _macro type_**
+(same as the Node menu). A node of that macro type appears and is
+selected; the Options panel on the right then shows a **micro type**
+dropdown to pick the concrete node, plus its parameter form. Wire
+nodes together by dragging between ports (unchanged NodeGraphQt
+behaviour). Grapher / figure nodes carry a small floating preview
+that, after a run, shows the figure; click it to open a resizable
+window sized to the figure.
+
+To change how the app looks (colors, node macro-type colors, window
+stylesheet, fonts), edit `src/ruyso_app/ui/theme.py` — it is the only
+file that needs touching for purely visual changes.
+
+### UI restructure — status and decisions
+
+The UI is being reworked to match the `ruyso_ui_principles` mockups in
+phases. Decisions taken so far (spec section 8):
+
+- **Macro types & palette.** The six macro types are `loading`,
+  `transform`, `model`, `statistical_test`, `grapher`, `export`
+  (`viz` was split into `grapher` + `statistical_test`). Each maps to
+  one Matplotlib *tab10* color, identical in both themes so a node
+  stays recognizable across a theme toggle; the map is in
+  `theme._MACRO_TYPE_COLORS`. `statistical_test` has no concrete node
+  yet — its "New Node" entry is shown **disabled** rather than
+  omitted or crashing.
+- **Palette hex values.** Dark and light chrome palettes are the
+  `DARK_THEME` / `LIGHT_THEME` dataclasses in `theme.py` (window,
+  panel, text, border, accent, canvas-background values).
+- **Options panel background.** A lightened, ~92%-opaque tint of the
+  selected node's macro-type color (`theme.options_panel_background`),
+  falling back to an opaque panel color when nothing is selected.
+- **Fonts.** `Helvetica, Arial, sans-serif` everywhere except the run
+  console and any library/class name, which use
+  `Consolas, Menlo, 'Courier New', monospace`.
+- **Node creation is right-click**, not a left-click popup: the empty
+  canvas shows a centered `+` and "Right-click to add a node".
+- **Micro-type change after creation = recreate.** Node classes are
+  fully typed at instantiation (ports/params differ per micro type),
+  so changing the Options dropdown deletes the node and builds a new
+  one in place, keeping its name, position, every still-valid wire,
+  and any parameter whose field name is shared. See
+  `ui/node_editing.py`.
+- **On-canvas figure preview** is a floating thumbnail parented to the
+  viewport and re-synced to its node on a light timer (Qt paints child
+  widgets over the `QGraphicsScene`, so a true "behind the node" is not
+  possible — it sits attached just beneath). Click → resizable
+  `FigureWindow` sized to the figure's aspect ratio. See
+  `ui/node_preview.py`. The old bottom "Figure Preview" pane is gone.
+- **Panels are resizable** via splitter handles: canvas ↔ run log,
+  canvas ↔ Options panel (Pipeline and Dashboard tabs).
+
+Still to come in later phases: the Table tab (mini pipeline diagram,
+table description, data grid); the Dashboard tab (figure/title/text
+blocks, "add to dashboard", PDF/PNG export); the statistical-test node
+type and its preview.
 
 > Packaging the app into a standalone executable (PyInstaller/Nuitka)
 > is intentionally not set up yet — planned for once more features

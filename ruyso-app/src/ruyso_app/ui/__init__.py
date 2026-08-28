@@ -6,16 +6,28 @@ ruyso_app.core and ruyso_app.engine remain fully usable (and are fully
 tested) with no GUI toolkit installed at all.
 
 Modules:
-    theme.py             -> All colors and the Qt stylesheet in one
-                             place; the file to edit to re-skin the app.
+    theme.py             -> All colors (dark + light) and the Qt
+                             stylesheet in one place; the file to edit
+                             to re-skin the app.
     property_forms.py    -> pydantic params_schema <-> NodeGraphQt
                              editable properties.
     node_factory.py       -> Builds one NodeGraphQt node class per node
                              registered in ruyso_app.core.registry.
     canvas.py             -> Themed NodeGraphQt canvas wrapper.
+    canvas_overlay.py      -> "Right-click to add a node" empty-state hint.
+    node_menu.py           -> Canvas right-click "New Node" macro menu.
+    node_editing.py        -> Recreate a node under a new micro type.
+    node_preview.py        -> Floating on-canvas figure preview + pop-out
+                             window for grapher / figure nodes.
     graph_bridge.py        -> Canvas <-> engine.PipelineGraph conversion.
     execution_worker.py    -> Runs a pipeline on a background QThread.
     figure_viewer.py       -> Embeds a matplotlib Figure output in a widget.
+    tab_bar.py             -> The Pipeline / Table / Dashboard tab band.
+    options_panel.py       -> Right-hand settings panel: selected-node
+                             editor (macro label + micro dropdown + form).
+    pipeline_page.py       -> The Pipeline tab (canvas + run log + options).
+    table_page.py          -> The Table tab (step output inspector).
+    dashboard_page.py      -> The Dashboard tab (report canvas + export).
     main_window.py         -> Assembles everything into the app window.
     app.py                 -> Entry point (QApplication + event loop).
 

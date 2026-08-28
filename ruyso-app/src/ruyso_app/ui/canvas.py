@@ -23,10 +23,27 @@ class PipelineCanvas:
 
     def __init__(self) -> None:
         self.graph = NodeGraph()
-        self.graph.set_background_color(*theme.CANVAS_BACKGROUND_COLOR)
         register_all_nodes(self.graph)
+        self.apply_theme()
 
     @property
     def widget(self):
         """The QWidget to embed in the main window (the visible canvas area)."""
         return self.graph.widget
+
+    def apply_theme(self) -> None:
+        """Re-read colors from the current :mod:`ui.theme` and repaint.
+
+        Repaints the canvas background and recolors every node already
+        on the canvas by its macro type, so a live theme toggle (see
+        ``MainWindow._apply_theme``) takes effect immediately without
+        rebuilding the graph. Node classes carry ``CORE_NODE_CLASS``
+        (set by ``node_factory``); a node without it is a NodeGraphQt
+        built-in and is left untouched.
+        """
+        active = theme.current_theme()
+        self.graph.set_background_color(*active.canvas_background)
+        for node in self.graph.all_nodes():
+            core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
+            if core_cls is not None:
+                node.set_color(*theme.color_for_category(core_cls.category, active))
