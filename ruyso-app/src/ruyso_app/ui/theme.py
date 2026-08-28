@@ -298,17 +298,32 @@ QPushButton#ruysoTabButton:checked {{
     font-weight: bold;
 }}
 
-/* Pipeline-run progress bar, right-aligned in the tab band
-   (see ui/run_progress.py). The fill colour switches on a dynamic
+/* Pipeline-run controls, right-aligned in the tab band
+   (see ui/run_progress.py): a Run button, a slim progress bar, and a
+   percentage label. The bar's fill colour switches on a dynamic
    "state" property: neutral blue while running, green on success,
    red on failure. */
-QProgressBar#ruysoRunProgress {{
-    background-color: {theme.panel_background};
+QPushButton#ruysoRunButton {{
+    background-color: {theme.accent_color};
+    color: {theme.text_color};
     border: 1px solid {theme.border_color};
-    border-radius: 7px;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-weight: bold;
+}}
+QPushButton#ruysoRunButton:hover {{
+    background-color: {theme.border_color};
+}}
+QPushButton#ruysoRunButton:disabled {{
+    color: {theme.border_color};
+}}
+QProgressBar#ruysoRunProgress {{
+    background-color: {theme.border_color};
+    border: none;
+    border-radius: 2px;
 }}
 QProgressBar#ruysoRunProgress::chunk {{
-    border-radius: 6px;
+    border-radius: 2px;
     background-color: #4a90d9;
 }}
 QProgressBar#ruysoRunProgress[state="success"]::chunk {{
@@ -316,5 +331,9 @@ QProgressBar#ruysoRunProgress[state="success"]::chunk {{
 }}
 QProgressBar#ruysoRunProgress[state="error"]::chunk {{
     background-color: #d9534f;
+}}
+QLabel#ruysoRunPercent {{
+    color: {theme.text_color};
+    font-size: 10px;
 }}
 """

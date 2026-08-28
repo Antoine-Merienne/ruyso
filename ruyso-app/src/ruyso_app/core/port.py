@@ -16,7 +16,13 @@ from pydantic import BaseModel
 # Allowed data kinds flowing between nodes.
 # Kept as a closed set (Literal) so that the engine and UI can safely
 # switch/validate on it without guessing at arbitrary strings.
-PortDType = Literal["dataframe", "array", "model", "figure", "scalar"]
+# "geodataframe" is a specialisation of "dataframe": a geopandas
+# GeoDataFrame is a pandas DataFrame subclass, so a "geodataframe"
+# output may feed a plain "dataframe" input (but not the reverse) --
+# see ``engine.graph`` for that compatibility rule.
+PortDType = Literal[
+    "dataframe", "geodataframe", "array", "model", "figure", "scalar"
+]
 
 
 class Port(BaseModel):

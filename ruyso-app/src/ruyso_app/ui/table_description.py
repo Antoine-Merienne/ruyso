@@ -107,17 +107,20 @@ def describe_table(df: object) -> TableDescription:
     """
     columns = list(df.columns)
 
+    # Iterate by position, not label: a DataFrame can have duplicate
+    # column names (e.g. after a column-wise concat), in which case
+    # ``df[label]`` returns a DataFrame rather than a Series.
     n_missing = int(df.isna().sum().sum())
-    for col in columns:
+    for i in range(len(columns)):
         try:
-            n_missing += int((df[col] == "").sum())
+            n_missing += int((df.iloc[:, i] == "").sum())
         except (TypeError, ValueError):
             pass
 
     numeric_vars: list[NumericVar] = []
     categorical_vars: list[CategoricalVar] = []
-    for col in columns:
-        series = df[col]
+    for i, col in enumerate(columns):
+        series = df.iloc[:, i]
         dtype_name = str(series.dtype)
         if not is_bool_dtype(series) and (
             is_numeric_dtype(series) or is_datetime64_any_dtype(series)

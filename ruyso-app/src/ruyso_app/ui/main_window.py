@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._tab_bar.tab_changed.connect(self._on_tab_changed)
+        self._tab_bar.run_button.clicked.connect(self._on_run_pipeline)
         self._dashboard_page.export_requested.connect(self._on_export_dashboard)
         self._options.node_type_change_requested.connect(self._on_node_type_change)
         self._graph.node_selection_changed.connect(self._on_selection_changed)
@@ -133,9 +134,12 @@ class MainWindow(QMainWindow):
             self._graph.nodes_deleted,
             self._graph.port_connected,
             self._graph.port_disconnected,
-            self._graph.property_changed,
         ):
             signal.connect(self._auto_run.schedule)
+        # Param edits usually schedule an auto-run too -- except tickbox
+        # edits, which the Options panel batches until it loses focus.
+        self._graph.property_changed.connect(self._on_property_changed)
+        self._options.recompute_requested.connect(self._auto_run.schedule)
 
         self._build_menus()
         self._on_tab_changed(self._tab_bar.current_key())
@@ -189,7 +193,13 @@ class MainWindow(QMainWindow):
 
     # -- tab / menu state ------------------------------------------------
 
+    def _on_property_changed(self, *_args: object) -> None:
+        """Schedule an auto-run for a param edit, unless it's a batched tick."""
+        if not self._options.autorun_suppressed():
+            self._auto_run.schedule()
+
     def _on_tab_changed(self, key: str) -> None:
+        self._options.flush_recompute()  # commit any pending tickbox edits
         self._stack.setCurrentIndex(self._tab_index[key])
         self._node_menu.setEnabled(key == "pipeline")
         self._dashboard_menu.setEnabled(key == "dashboard")
@@ -351,6 +361,7 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             return  # a run is already in progress
 
+        self._options.flush_recompute()  # fold in any pending tickbox edits
         try:
             pipeline = self._build_pipeline_or_raise()
         except Exception as exc:  # noqa: BLE001
@@ -358,6 +369,7 @@ class MainWindow(QMainWindow):
             return
 
         self._run_action.setEnabled(False)
+        self._tab_bar.run_button.setEnabled(False)
         self._auto_run.set_enabled(False)  # don't compete with the real run
         self.statusBar().showMessage("Running pipeline...")
         self._pipeline_page.clear_log()
@@ -375,6 +387,7 @@ class MainWindow(QMainWindow):
 
     def _on_run_finished(self) -> None:
         self._run_action.setEnabled(True)
+        self._tab_bar.run_button.setEnabled(True)
         self._auto_run.set_enabled(True)
 
     # -- execution callbacks (GUI thread, via Qt signals) ---------------

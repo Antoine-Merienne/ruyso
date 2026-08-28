@@ -84,6 +84,15 @@ def test_geo_and_time_dataframe():
     assert describe_table(df).table_type == GEO_TIME
 
 
+def test_describe_table_handles_duplicate_column_names():
+    # A column-wise concat can produce repeated labels; df["x"] then
+    # returns a DataFrame, not a Series. describe_table must not choke.
+    df = pd.DataFrame([[1, 2, 3], [4, 5, 6]], columns=["x", "y", "x"])
+    d = describe_table(df)
+    assert d.n_variables == 3
+    assert [v.name for v in d.numeric_vars] == ["x", "y", "x"]
+
+
 def test_looks_like_dataframe():
     assert looks_like_dataframe(_frame())
     assert not looks_like_dataframe([1, 2, 3])

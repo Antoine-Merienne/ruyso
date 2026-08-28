@@ -28,6 +28,11 @@ def test_node_with_no_table_output_is_skipped():
     assert entries == []
 
 
+def test_geodataframe_output_counts_as_a_table():
+    entries = build_table_entries(["geo"], {"geo": "geojson_loader"})
+    assert [(e.node_id, e.port) for e in entries] == [("geo", "gdf")]
+
+
 def test_execution_order_is_preserved():
     order = ["load", "clean", "split"]
     node_types = {

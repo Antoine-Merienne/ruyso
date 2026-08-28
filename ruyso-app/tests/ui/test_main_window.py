@@ -144,7 +144,7 @@ def test_retype_via_options_updates_the_node_name(window):
     assert expected in new_node.name()
 
 
-def test_run_pipeline_drives_the_tab_band_progress_bar(window, tmp_path):
+def test_tab_band_run_button_runs_the_pipeline_and_drives_progress(window, tmp_path):
     import pandas as pd
 
     csv = tmp_path / "d.csv"
@@ -153,13 +153,16 @@ def test_run_pipeline_drives_the_tab_band_progress_bar(window, tmp_path):
     loader = window._canvas.graph.all_nodes()[0]
     loader.set_property("filepath", str(csv))
 
-    window._on_run_pipeline()
+    window._tab_bar.run_button.click()  # the button, not the menu action
+    assert not window._tab_bar.run_button.isEnabled()  # disabled while running
     window._worker.wait(5000)
     from PySide6.QtWidgets import QApplication
 
     QApplication.processEvents()
 
     assert window._tab_bar.progress.property("state") == "success"
+    assert window._tab_bar.progress.percent_text() == "100%"
+    assert window._tab_bar.run_button.isEnabled()  # re-enabled after
 
 
 def test_new_node_actions_have_cmd_p_chord_shortcuts(window):

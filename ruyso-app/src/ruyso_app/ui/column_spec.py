@@ -29,7 +29,8 @@ OK = None
 UNKNOWN_COLUMN = "unknown_column"
 UNSUPPORTED_TYPE = "unsupported_type"
 
-_DATAFRAME_DTYPE = "dataframe"
+#: Port dtypes whose values carry named columns.
+_TABLE_DTYPES = frozenset({"dataframe", "geodataframe"})
 
 
 def dtype_kind(dtype: object) -> str:
@@ -50,35 +51,54 @@ def kind_accepted(accepted: list[str] | None, kind: str) -> bool:
     return kind in accepted
 
 
+def _columns_of(df: object) -> dict[str, str] | None:
+    if df is None or not hasattr(df, "columns") or not hasattr(df, "dtypes"):
+        return None
+    return {str(name): dtype_kind(dtype) for name, dtype in df.dtypes.items()}
+
+
 def input_dataframe_columns(
     node: BaseNode, outputs: dict[str, dict]
 ) -> dict[str, str] | None:
     """
-    ``{column name: column kind}`` for the DataFrame(s) feeding ``node``.
+    ``{column name: column kind}`` available to ``node``'s column params.
 
-    Returns ``None`` when no upstream table is available (the node has
-    no connected dataframe input, or the pipeline has not produced one
-    yet) -- the caller then offers free text with no validation.
+    For a node with a table input this is the upstream table's columns;
+    for a *source* node (a loader, no table inputs) it is that node's
+    own last-run output columns -- so a loader's ``datetime_columns``
+    picker fills in once the file has been read. ``None`` when nothing
+    is available yet, so the caller offers free text with no validation.
     """
     core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
     if core_cls is None:
         return None
 
-    columns: dict[str, str] = {}
-    found = False
-    for port in core_cls.inputs:
-        if getattr(port, "dtype", None) != _DATAFRAME_DTYPE:
-            continue
-        canvas_port = node.inputs().get(port.name)
-        if canvas_port is None:
-            continue
-        for connected in canvas_port.connected_ports():
-            df = outputs.get(connected.node().name(), {}).get(connected.name())
-            if df is not None and hasattr(df, "columns") and hasattr(df, "dtypes"):
-                found = True
-                for name, dtype in df.dtypes.items():
-                    columns[str(name)] = dtype_kind(dtype)
-    return columns if found else None
+    table_inputs = [
+        p for p in core_cls.inputs if getattr(p, "dtype", None) in _TABLE_DTYPES
+    ]
+    if table_inputs:
+        columns: dict[str, str] = {}
+        found = False
+        for port in table_inputs:
+            canvas_port = node.inputs().get(port.name)
+            if canvas_port is None:
+                continue
+            for connected in canvas_port.connected_ports():
+                upstream = outputs.get(connected.node().name(), {}).get(connected.name())
+                cols = _columns_of(upstream)
+                if cols is not None:
+                    found = True
+                    columns.update(cols)
+        return columns if found else None
+
+    # Source node: use its own produced table, if it has run.
+    own = outputs.get(node.name(), {})
+    for port in core_cls.outputs:
+        if getattr(port, "dtype", None) in _TABLE_DTYPES:
+            cols = _columns_of(own.get(port.name))
+            if cols is not None:
+                return cols
+    return None
 
 
 def validate_column_value(

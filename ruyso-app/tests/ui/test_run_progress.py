@@ -16,9 +16,11 @@ def test_start_and_progress(qapp):
     bar.start(4)
     assert bar.property("state") == "running"
     assert bar.maximum() == 4 and bar.value() == 0
+    assert bar.percent_text() == "0%"
 
     bar.set_progress(3, 4)
     assert bar.value() == 3
+    assert bar.percent_text() == "75%"
 
 
 def test_success_fills_and_turns_green(qapp):
@@ -27,6 +29,7 @@ def test_success_fills_and_turns_green(qapp):
     bar.finish_success()
     assert bar.property("state") == "success"
     assert bar.value() == bar.maximum()
+    assert bar.percent_text() == "100%"
 
 
 def test_error_state(qapp):

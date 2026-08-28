@@ -43,7 +43,13 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from ruyso_app.core.node import NodeParams
-from ruyso_app.core.params import column_ref_dtypes
+from ruyso_app.core.params import (
+    checkbox_list_spec,
+    column_ref_dtypes,
+    field_suggestions,
+    reactive_choice_spec,
+    visible_when,
+)
 
 # Both spellings of "optional union" need to be recognized: pydantic
 # models in this project use the modern `X | None` syntax (PEP 604,
@@ -92,6 +98,16 @@ class FieldSpec:
     column_dtypes: list[str] | None = None
     #: True when the field holds a list of column names, not just one.
     is_column_list: bool = False
+    #: Non-binding suggested values for a free-text string field, or None.
+    suggestions: list[str] | None = None
+    #: ``{"options": <generator>, "depends_on": <field>}`` for a dropdown
+    #: whose choices are recomputed from another field, or None.
+    reactive_choice: dict | None = None
+    #: ``{"source": ..., "choices": [...]}`` for a tickbox-list field, or None.
+    checkbox_list: dict | None = None
+    #: ``(field, value)`` -- this row is shown only while ``field`` holds
+    #: ``value`` -- or None.
+    visible_when: tuple[str, str] | None = None
 
 
 def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
@@ -107,6 +123,10 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             items,
             column_dtypes=column_dtypes,
             is_column_list=column_dtypes is not None and _is_str_list(annotation),
+            suggestions=field_suggestions(field_info),
+            reactive_choice=reactive_choice_spec(field_info),
+            checkbox_list=checkbox_list_spec(field_info),
+            visible_when=visible_when(field_info),
         )
 
 

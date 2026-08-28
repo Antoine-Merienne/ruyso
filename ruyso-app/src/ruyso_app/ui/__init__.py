@@ -29,6 +29,8 @@ Modules:
     file_filters.py        -> node_type -> file-dialog filter map.
     column_spec.py         -> Resolve/validate column-name parameters
                              against the input DataFrame's columns.
+    column_ops.py          -> Option lists for reactive dropdowns
+                             (castable types / operators by column kind).
     run_snapshot.py        -> Detect steps changed since the last run.
     auto_run.py            -> Debounced background "run what's ready".
     run_progress.py        -> The run progress bar in the tab band.

@@ -10,7 +10,16 @@ from __future__ import annotations
 
 #: ``node_type`` -> Qt ``QFileDialog`` filter string.
 FILE_FILTERS: dict[str, str] = {
-    "csv_loader": "CSV files (*.csv);;All files (*)",
+    "csv_loader": "CSV / text (*.csv *.tsv *.txt);;All files (*)",
+    "fixed_width_loader": "Text (*.txt *.dat *.prn);;All files (*)",
+    "excel_loader": "Excel (*.xlsx *.xlsm *.xls);;All files (*)",
+    "json_loader": "JSON (*.json *.jsonl *.ndjson);;All files (*)",
+    "parquet_loader": "Parquet (*.parquet *.pq);;All files (*)",
+    "feather_loader": "Feather (*.feather *.arrow);;All files (*)",
+    "stata_loader": "Stata (*.dta);;All files (*)",
+    "geojson_loader": "GeoJSON (*.geojson *.json);;All files (*)",
+    "shapefile_loader": "Shapefile (*.shp);;All files (*)",
+    "geopackage_loader": "GeoPackage (*.gpkg);;All files (*)",
     "figure_export": "Images (*.png *.pdf *.svg *.jpg *.jpeg);;All files (*)",
 }
 

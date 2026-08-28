@@ -70,6 +70,19 @@ class GraphValidationError(ValueError):
     """Raised when a PipelineGraph fails structural or type validation."""
 
 
+#: dtype -> dtypes it may also be connected into (subtype relationships).
+#: A geopandas GeoDataFrame *is* a pandas DataFrame, so a "geodataframe"
+#: output can feed any "dataframe" input; the reverse is not allowed.
+_DTYPE_SUPERTYPES: dict[str, set[str]] = {"geodataframe": {"dataframe"}}
+
+
+def _dtype_assignable(source_dtype: str, target_dtype: str) -> bool:
+    """Whether a ``source_dtype`` value may be fed into a ``target_dtype`` port."""
+    return source_dtype == target_dtype or target_dtype in _DTYPE_SUPERTYPES.get(
+        source_dtype, set()
+    )
+
+
 class PipelineGraph:
     """
     A validated, executable description of a data pipeline.
@@ -220,7 +233,7 @@ class PipelineGraph:
                     f"no input port named {conn.target_port!r}."
                 )
 
-            if source_port.dtype != target_port.dtype:
+            if not _dtype_assignable(source_port.dtype, target_port.dtype):
                 raise GraphValidationError(
                     f"Type mismatch: {conn.source_node}.{conn.source_port} "
                     f"({source_port.dtype}) -> {conn.target_node}.{conn.target_port} "

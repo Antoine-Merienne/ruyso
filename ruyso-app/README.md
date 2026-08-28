@@ -8,7 +8,7 @@ The codebase is split into three independently testable layers:
 
 | Layer | Package | Depends on | Status |
 |---|---|---|---|
-| 1. Node model | `ruyso_app.core`, `ruyso_app.nodes` | pydantic only | done |
+| 1. Node model | `ruyso_app.core`, `ruyso_app.nodes` | pydantic (+ the libs each node uses: pandas, geopandas, scikit-learn, matplotlib) | done |
 | 2. Execution engine | `ruyso_app.engine` | Layer 1, networkx, joblib | done |
 | 3. UI | `ruyso_app.ui` | Layers 1 & 2, PySide6, NodeGraphQt | done (beta) |
 
@@ -86,10 +86,11 @@ Run, so column pickers and previews populate on their own; unfinished
 or broken branches are skipped silently (no error dialog). An explicit
 **Run Pipeline** still runs everything and reports errors.
 
-**Run progress:** a slim progress bar sits at the right of the tab
-band. During a manual run it fills node-by-node; it settles solid
+**Run controls:** the right of the tab band holds a **Run Pipeline**
+button, a slim progress bar, and a percentage. During a run the bar
+fills node-by-node with the percent to its right; it settles solid
 **green** on success or **red** on failure and stays there until the
-next run.
+next run. The button is disabled while a run is in progress.
 
 **Parameter form niceties:** file-path fields get a **Browse…** button
 (open dialog for loaders, save dialog for exporters). Column-name
@@ -167,6 +168,41 @@ phases. Decisions taken so far (spec section 8):
   in the navigator, so a stale table is never mistaken for the current
   result. Detection lives in `ui/run_snapshot.py`; the snapshot is
   reset when a pipeline file is opened.
+- **Data-loader family.** The `loading` macro type has one micro type
+  per file format: `csv_loader`, `fixed_width_loader`, `excel_loader`,
+  `json_loader`, `parquet_loader`, `feather_loader`, `stata_loader`
+  (all -> `dataframe`), plus `geojson_loader`, `shapefile_loader`,
+  `geopackage_loader` (-> `geodataframe`). Every loader shares two
+  parameters, applied after load: `datetime_columns` and
+  `datetime_format`. In the Options panel both are editable dropdowns
+  (same widget as the model/grapher/transform column pickers):
+  `datetime_columns` lists the loaded file's own columns once the file
+  has been read, with an italic-grey **None** entry that clears it;
+  `datetime_format` offers a few common `strptime` patterns (declared
+  via `core.params.suggestions_field`) but accepts any text, with an
+  italic-grey **infer** entry for "let pandas guess". A `geodataframe`
+  output may be wired into any node that expects a plain `dataframe`
+  (a GeoDataFrame is one); the reverse is rejected by
+  `PipelineGraph.validate()`.
+- **Transformer family.** `standard_scaler`; `drop_na` and `fill_na`
+  (pick columns via a **tickbox list**; `drop_na` chooses `how` =
+  any/all, `fill_na` a method — forward/backward fill, mean, median,
+  most frequent, zero, or a constant value that reveals a value box;
+  an empty tick list is a pass-through, and mean/median on a
+  non-numeric column raises); `change_type` (cast one column; the
+  target-type dropdown re-filters to the casts that make sense for the
+  chosen column); `column_filter` and `dtype_filter` (keep columns via
+  a tickbox list); `row_filter` (a mode-aware form: filter by row
+  position *or* by a column value — the operator dropdown re-filters
+  to what's valid for the column's type); `concat` (two DataFrame
+  inputs, the second optional; `axis` / `join` dropdowns + a reset-index
+  checkbox); plus geo transforms `geo_to_dataframe`, `dataframe_to_geo`
+  and `reproject` (CRS from the same suggestions dropdown as the
+  datetime-format field). The reactive behaviour is
+  new Options-panel machinery: `core.params` markers
+  (`reactive_choice_field`, `checkbox_list_field`, `visible_field` /
+  `visible_when=`) drive per-row visibility and dependent dropdowns
+  in `ui/options_panel.py`, with option lists in `ui/column_ops.py`.
 
 Still to come: the Dashboard tab (figure/title/text blocks, "add to
 dashboard", PDF/PNG export); the statistical-test node type and its
@@ -220,7 +256,7 @@ off as ordinary, readable Python code.
 ```
 src/ruyso_app/
 ├── core/     # Node/Port/NodeParams contracts + NodeRegistry
-├── nodes/    # Concrete nodes (loaders, transforms, models, viz, export)
+├── nodes/    # Concrete nodes (file + geo loaders, transforms, models, viz, export)
 ├── engine/   # PipelineGraph, serialization, cache, scheduler, codegen
 └── ui/       # NodeGraphQt canvas, property forms, main window
 ```

@@ -86,9 +86,11 @@ def test_by_category_groups_registered_nodes_by_macro_type():
     NodeRegistry.discover_package(nodes_package)
     grouped = NodeRegistry.by_category()
 
-    assert grouped["loading"] == ["csv_loader"]
+    assert "csv_loader" in grouped["loading"]
+    assert {"excel_loader", "parquet_loader", "geojson_loader"} <= set(grouped["loading"])
     assert grouped["grapher"] == ["matplotlib_plot"]
-    assert set(grouped["transform"]) == {"drop_na", "standard_scaler"}
+    assert {"drop_na", "standard_scaler", "change_type", "column_filter",
+            "row_filter", "dtype_filter"} <= set(grouped["transform"])
     # No statistical_test node exists yet in this beta -- must simply
     # be absent, not present with an empty list.
     assert "statistical_test" not in grouped

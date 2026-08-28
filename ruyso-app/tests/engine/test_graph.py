@@ -99,6 +99,45 @@ def test_validate_rejects_dtype_mismatch():
         graph.validate()
 
 
+def test_geodataframe_output_may_feed_a_dataframe_input():
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="geo", node_type="geojson_loader", params={"filepath": "x.geojson"})
+    )
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
+    graph.add_connection(
+        Connection(source_node="geo", source_port="gdf", target_node="clean", target_port="df")
+    )
+    graph.validate()  # geodataframe -> dataframe is allowed (subtype)
+
+
+def test_dtype_assignability_is_one_directional():
+    from ruyso_app.engine.graph import _dtype_assignable
+
+    assert _dtype_assignable("dataframe", "dataframe")
+    assert _dtype_assignable("geodataframe", "dataframe")  # subtype -> supertype
+    assert not _dtype_assignable("dataframe", "geodataframe")  # not the reverse
+    assert not _dtype_assignable("array", "dataframe")
+
+
+def test_geo_and_plain_transforms_validate_across_the_boundary():
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="geo", node_type="geojson_loader", params={"filepath": "x.geojson"})
+    )
+    graph.add_node(NodeSpec(id="to_df", node_type="geo_to_dataframe", params={}))
+    graph.add_node(
+        NodeSpec(id="to_geo", node_type="dataframe_to_geo", params={"x_column": "x", "y_column": "y"})
+    )
+    graph.add_connection(
+        Connection(source_node="geo", source_port="gdf", target_node="to_df", target_port="gdf")
+    )
+    graph.add_connection(
+        Connection(source_node="to_df", source_port="df", target_node="to_geo", target_port="df")
+    )
+    graph.validate()  # geodataframe -> geodataframe input, dataframe -> dataframe input
+
+
 def test_validate_rejects_missing_required_input():
     graph = PipelineGraph()
     # drop_na requires a "df" input, but nothing feeds it here.

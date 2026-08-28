@@ -22,7 +22,7 @@ from ruyso_app.core.registry import NodeRegistry
 from ruyso_app.ui.graph_bridge import canvas_to_pipeline
 
 #: Port dtypes considered "an inspectable table".
-TABLE_DTYPES = frozenset({"dataframe"})
+TABLE_DTYPES = frozenset({"dataframe", "geodataframe"})
 
 
 @dataclass(frozen=True)

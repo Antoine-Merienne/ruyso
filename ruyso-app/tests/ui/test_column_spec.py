@@ -61,6 +61,19 @@ def test_input_dataframe_columns_follows_the_wire(qapp):
     assert input_dataframe_columns(plot, {}) is None
 
 
+def test_source_node_uses_its_own_produced_columns(qapp):
+    graph = NodeGraph()
+    register_all_nodes(graph)
+    loader = graph.create_node(qt_type_for("csv_loader"), name="load")
+
+    # A loader has no table inputs -> its column params draw from its
+    # own last-run output.
+    df = pd.DataFrame({"when": ["2020-01-01"], "value": [1.0]})
+    cols = input_dataframe_columns(loader, {"load": {"df": df}})
+    assert cols == {"when": "categorical", "value": "numeric"}
+    assert input_dataframe_columns(loader, {}) is None
+
+
 def test_validate_column_value_codes():
     columns = {"age": "numeric", "city": "categorical"}
     assert validate_column_value("age", ["numeric"], columns) is None

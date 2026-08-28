@@ -1,8 +1,11 @@
 """
 Concrete node implementations, grouped by category:
 
-- loaders.py     -> data loading nodes (e.g. CSVLoader)
-- transforms.py  -> data cleaning / transformation nodes (e.g. DropNA, StandardScaler)
+- loaders.py       -> tabular file loaders (CSV, Excel, JSON, Parquet, ...)
+- geo_loaders.py   -> geospatial file loaders (GeoJSON, Shapefile, GeoPackage)
+- transforms.py    -> cleaning / reshaping (DropNA, StandardScaler,
+                      ChangeType, ColumnFilter, RowFilter, DtypeFilter)
+- geo_transforms.py -> GeoDataFrame <-> DataFrame + reproject
 - models.py      -> modeling nodes (e.g. TrainTestSplit, LinearRegressionFit)
 - viz.py         -> visualization nodes (e.g. MatplotlibPlot)
 - export.py      -> artifact export nodes (e.g. FigureExport)

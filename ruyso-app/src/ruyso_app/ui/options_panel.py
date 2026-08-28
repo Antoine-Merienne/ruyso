@@ -24,8 +24,10 @@ from __future__ import annotations
 
 from NodeGraphQt import BaseNode
 from NodeGraphQt.constants import NodePropWidgetEnum
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -56,6 +59,24 @@ MIN_PANEL_WIDTH = 240
 
 _WARNING_STYLE = "color: #d9822b; font-size: 11px;"
 
+#: Label of the italic-grey "clear this field" entry at the top of a
+#: column / suggestions dropdown, and the colour it is drawn in.
+_CLEAR_SENTINELS = frozenset({"None", "infer"})
+_SENTINEL_COLOR = QColor(150, 150, 150)
+
+
+def _prepend_clear_sentinel(combo: QComboBox, label: str) -> None:
+    """Insert an italic, grey '<label>' row at the top of ``combo``.
+
+    Choosing it clears the field (handled by the combo's ``activated``
+    slot); it is never itself a value.
+    """
+    combo.insertItem(0, label)
+    font = combo.font()
+    font.setItalic(True)
+    combo.setItemData(0, font, Qt.FontRole)
+    combo.setItemData(0, _SENTINEL_COLOR, Qt.ForegroundRole)
+
 
 class OptionsPanel(QWidget):
     """Right-hand settings panel for the selected node / dashboard element."""
@@ -63,6 +84,10 @@ class OptionsPanel(QWidget):
     #: Emitted with a core node_type when the macro or micro dropdown is
     #: changed by the user (never when repopulated programmatically).
     node_type_change_requested = Signal(str)
+
+    #: Emitted when tickbox edits made since the last flush should now
+    #: drive a downstream recompute (the panel lost focus / moved on).
+    recompute_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,8 +98,20 @@ class OptionsPanel(QWidget):
         self._node: BaseNode | None = None
         self._suppress_type_signal = False
         self._input_columns: dict[str, str] | None = None
-        # field name -> (warning label, accepted kinds, is_list, value getter)
+        # True while writing a tickbox edit: MainWindow skips the
+        # per-change auto-run so ticks are batched until focus-out.
+        self._suppress_autorun = False
+        self._pending_recompute = False
+        # field name -> (warning label, accepted kinds, is_list, value getter, set_items)
         self._column_fields: dict[str, tuple] = {}
+        # field name -> widget, for controller wiring
+        self._field_widgets: dict[str, QWidget] = {}
+        # controlling field name -> [(form row index, required value)]
+        self._visibility_rules: dict[str, list[tuple[int, str]]] = {}
+        # reactive-choice field name -> (combo, generator key, depends-on field)
+        self._reactive_choices: dict[str, tuple] = {}
+        # checkbox-list field name (source="columns" only) -> repopulate()
+        self._checkbox_lists: dict[str, object] = {}
 
         self._title = QLabel("Options", self)
         self._title.setStyleSheet("font-weight: bold;")
@@ -111,6 +148,42 @@ class OptionsPanel(QWidget):
         self._set_editor_visible(False)
         self.apply_theme()
 
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_app_focus_changed)
+
+    # -- batched-recompute plumbing --------------------------------------
+
+    def autorun_suppressed(self) -> bool:
+        """True while a tickbox edit is being written (see ``_suppress_autorun``)."""
+        return self._suppress_autorun
+
+    def flush_recompute(self) -> None:
+        """Emit ``recompute_requested`` if tickbox edits are pending."""
+        if self._pending_recompute:
+            self._pending_recompute = False
+            self.recompute_requested.emit()
+
+    def _write_batched(self, node: BaseNode, name: str, value: str) -> None:
+        """Write a param without triggering the per-change auto-run."""
+        self._suppress_autorun = True
+        try:
+            node.set_property(name, value)
+        finally:
+            self._suppress_autorun = False
+        self._pending_recompute = True
+
+    def _on_app_focus_changed(self, _old: object, new: object) -> None:
+        if self._pending_recompute and not self._descends_from_panel(new):
+            self.flush_recompute()
+
+    def _descends_from_panel(self, widget: object) -> bool:
+        while widget is not None:
+            if widget is self:
+                return True
+            widget = widget.parent() if hasattr(widget, "parent") else None
+        return False
+
     # -- public API ---------------------------------------------------------
 
     def show_node(
@@ -129,6 +202,7 @@ class OptionsPanel(QWidget):
             input_columns: ``{column: kind}`` of the node's input
                 DataFrame from the last run, or ``None`` if unavailable.
         """
+        self.flush_recompute()  # commit the previous node's pending ticks
         core_cls = type(node).CORE_NODE_CLASS
         core_type = type(node).CORE_NODE_TYPE
         self._node = node
@@ -151,6 +225,7 @@ class OptionsPanel(QWidget):
 
     def clear(self) -> None:
         """Show the empty state (nothing selected)."""
+        self.flush_recompute()
         self._node = None
         self._set_editor_visible(False)
 
@@ -176,6 +251,9 @@ class OptionsPanel(QWidget):
         for name, entry in self._column_fields.items():
             entry[4](columns)  # set_items
             self._revalidate(name)
+        for repopulate in self._checkbox_lists.values():
+            repopulate()
+        self._refresh_all_reactive_choices()
 
     def apply_theme(self) -> None:
         """Recompute the background tint from the current theme + category."""
@@ -229,11 +307,86 @@ class OptionsPanel(QWidget):
         while self._params_form.rowCount():
             self._params_form.removeRow(0)
         self._column_fields.clear()
+        self._field_widgets.clear()
+        self._visibility_rules.clear()
+        self._reactive_choices.clear()
+        self._checkbox_lists.clear()
 
-        schema = type(node).CORE_NODE_CLASS.params_schema
-        for spec in iter_field_specs(schema):
+        specs = list(iter_field_specs(type(node).CORE_NODE_CLASS.params_schema))
+        controllers = {sp.visible_when[0] for sp in specs if sp.visible_when}
+        controllers |= {
+            sp.reactive_choice["depends_on"] for sp in specs if sp.reactive_choice
+        }
+
+        for spec in specs:
             widget = self._build_field_widget(node, spec)
+            row = self._params_form.rowCount()
             self._params_form.addRow(spec.name.replace("_", " "), widget)
+            self._field_widgets[spec.name] = widget
+            if spec.visible_when:
+                self._visibility_rules.setdefault(spec.visible_when[0], []).append(
+                    (row, spec.visible_when[1])
+                )
+
+        for cname in controllers:
+            self._connect_controller(cname)
+        for cname in self._visibility_rules:
+            self._apply_visibility(cname)
+        self._refresh_all_reactive_choices()
+
+    # -- reactive form behaviour ------------------------------------------
+
+    def _connect_controller(self, cname: str) -> None:
+        widget = self._field_widgets.get(cname)
+        if widget is None:
+            return
+        combo = getattr(widget, "_combo", widget)
+        if isinstance(combo, QComboBox):
+            combo.currentTextChanged.connect(
+                lambda *_a, c=cname: self._on_controller_changed(c)
+            )
+
+    def _on_controller_changed(self, cname: str) -> None:
+        if cname in self._visibility_rules:
+            self._apply_visibility(cname)
+        for name, (_combo, _key, depends_on) in list(self._reactive_choices.items()):
+            if depends_on == cname:
+                self._refresh_reactive_choice(name)
+
+    def _apply_visibility(self, cname: str) -> None:
+        if self._node is None:
+            return
+        current = str(self._node.get_property(cname))
+        for row, required in self._visibility_rules.get(cname, []):
+            self._params_form.setRowVisible(row, current == required)
+
+    def _refresh_all_reactive_choices(self) -> None:
+        for name in list(self._reactive_choices):
+            self._refresh_reactive_choice(name)
+
+    def _refresh_reactive_choice(self, name: str) -> None:
+        from ruyso_app.ui.column_ops import options_for
+
+        combo, generator, depends_on = self._reactive_choices[name]
+        dep_value = (
+            str(self._node.get_property(depends_on)) if self._node is not None else ""
+        )
+        kind = (self._input_columns or {}).get(dep_value)
+        options = options_for(generator, kind)
+
+        combo.blockSignals(True)
+        kept = combo.currentText()
+        combo.clear()
+        combo.addItems(options)
+        if kept in options:
+            combo.setCurrentText(kept)
+        elif options:
+            combo.setCurrentText(options[0])
+            if self._node is not None:
+                self._node.set_property(name, options[0])
+        combo.blockSignals(False)
+
+    # -- per-field widgets ----------------------------------------------
 
     def _build_field_widget(self, node: BaseNode, spec) -> QWidget:
         """One editor widget bound to ``node``'s NodeGraphQt property."""
@@ -241,8 +394,17 @@ class OptionsPanel(QWidget):
         current = node.get_property(name)
         enum = NodePropWidgetEnum
 
+        if spec.checkbox_list is not None:
+            return self._build_checkbox_list_widget(node, spec)
+
+        if spec.reactive_choice is not None:
+            return self._build_reactive_choice_widget(node, spec)
+
         if spec.column_dtypes is not None:
             return self._build_column_widget(node, spec, current)
+
+        if spec.suggestions is not None:
+            return self._build_suggestions_widget(node, spec, current)
 
         if spec.widget == enum.QCOMBO_BOX:
             combo = QComboBox()
@@ -292,6 +454,32 @@ class OptionsPanel(QWidget):
         row_layout.addWidget(browse, 0)
         return row
 
+    # -- free-text fields with a suggestion dropdown ------------------
+
+    def _build_suggestions_widget(self, node: BaseNode, spec, current) -> QWidget:
+        """
+        An editable combo (single down arrow, like the column pickers)
+        pre-filled with a few suggested values. Any text is accepted;
+        the italic-grey top row clears the field.
+        """
+        name = spec.name
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.addItems(spec.suggestions or [])
+        _prepend_clear_sentinel(combo, "infer")
+        combo.setCurrentText("" if current in (None, "") else str(current))
+
+        combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+
+        def _on_activated(index: int, _c=combo) -> None:
+            if _c.itemText(index) in _CLEAR_SENTINELS:
+                _c.setCurrentText("")
+
+        combo.activated.connect(_on_activated)
+        return combo
+
     # -- column-reference fields ---------------------------------------
 
     def _build_column_widget(self, node: BaseNode, spec, current) -> QWidget:
@@ -307,45 +495,81 @@ class OptionsPanel(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(2)
 
-        # Both single- and multi-column fields use the same widget as the
-        # grapher / model column fields: one editable combo box with a
-        # single dropdown arrow. For a list-valued field, picking an item
-        # from the dropdown toggles it in/out of the comma-separated
-        # value instead of replacing it; free text is always allowed.
+        # Same widget as the grapher / model column fields: one editable
+        # combo box with a single dropdown arrow.
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         combo.addItems(columns)
-        combo.setCurrentText("" if current is None else str(current))
-        combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
-        combo.currentTextChanged.connect(lambda _v, n=name: self._revalidate(n))
         box.addWidget(combo)
         value_getter = combo.currentText
 
-        if spec.is_column_list:
-            combo.lineEdit().setPlaceholderText("comma-separated column names")
+        if not spec.is_column_list:
+            # Single value: the combo's text *is* the value.
+            combo.setCurrentText("" if current is None else str(current))
+            combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+            combo.currentTextChanged.connect(lambda _v, n=name: self._revalidate(n))
 
-            def _toggle_picked(index: int, _c=combo) -> None:
-                picked = _c.itemText(index)
-                if not picked:
-                    return
-                items = [c.strip() for c in _c.currentText().split(",") if c.strip()]
-                if picked in items:
-                    items.remove(picked)
+            def set_items(cols: list[str], _c=combo) -> None:
+                _c.blockSignals(True)
+                kept = _c.currentText()
+                _c.clear()
+                _c.addItems(cols)
+                _c.setCurrentText(kept)
+                _c.blockSignals(False)
+        else:
+            # Multi value: the source of truth is ``selected``, NOT the
+            # combo text (QComboBox overwrites its text with the picked
+            # item on every activation, which would immediately toggle
+            # that item back off if we read it here). Picking an item
+            # toggles it; the italic "None" row clears; typing still
+            # edits the list.
+            _prepend_clear_sentinel(combo, "None")
+            combo.lineEdit().setPlaceholderText("none")
+            selected: list[str] = [
+                c.strip() for c in str(current or "").split(",") if c.strip()
+            ]
+
+            def _show() -> None:
+                combo.blockSignals(True)
+                combo.setCurrentText(", ".join(selected))
+                combo.blockSignals(False)
+
+            def _commit() -> None:
+                node.set_property(name, ", ".join(selected))
+                self._revalidate(name)
+
+            def _toggle_picked(index: int) -> None:
+                picked = combo.itemText(index)
+                if picked in _CLEAR_SENTINELS:
+                    selected.clear()
+                elif picked:
+                    if picked in selected:
+                        selected.remove(picked)
+                    else:
+                        selected.append(picked)
                 else:
-                    items.append(picked)
-                _c.setCurrentText(", ".join(items))
+                    return
+                _show()
+                _commit()
+
+            def _on_typed(text: str) -> None:
+                selected[:] = [c.strip() for c in text.split(",") if c.strip()]
+                node.set_property(name, text)
+                self._revalidate(name)
 
             combo.activated.connect(_toggle_picked)
+            combo.lineEdit().textEdited.connect(_on_typed)
+            _show()
 
-        def set_items(cols: list[str], _c=combo) -> None:
-            _c.blockSignals(True)
-            kept = _c.currentText()
-            _c.clear()
-            _c.addItems(cols)
-            _c.setCurrentText(kept)
-            _c.blockSignals(False)
+            def set_items(cols: list[str], _c=combo) -> None:
+                _c.blockSignals(True)
+                _c.clear()
+                _c.addItems(cols)
+                _prepend_clear_sentinel(_c, "None")
+                _c.setCurrentText(", ".join(selected))
+                _c.blockSignals(False)
 
         box.addWidget(warning)
         self._column_fields[name] = (
@@ -356,7 +580,111 @@ class OptionsPanel(QWidget):
             set_items,
         )
         self._revalidate(name)
+        container._combo = combo  # for _connect_controller
         return container
+
+    # -- reactive-choice + checkbox-list fields ------------------------
+
+    def _build_reactive_choice_widget(self, node: BaseNode, spec) -> QWidget:
+        """
+        A plain dropdown (no free text) whose options are recomputed
+        from the value of another field -- see
+        ``core.params.reactive_choice_field``. Populated by
+        ``_refresh_reactive_choice`` once registered.
+        """
+        name = spec.name
+        combo = QComboBox()
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+        self._reactive_choices[name] = (
+            combo,
+            spec.reactive_choice["options"],
+            spec.reactive_choice["depends_on"],
+        )
+        return combo
+
+    def _build_checkbox_list_widget(self, node: BaseNode, spec) -> QWidget:
+        """
+        A scrollable column of tickboxes. ``source="columns"`` fills it
+        from the input DataFrame's columns (and re-fills on
+        ``set_input_columns``, in place -- no rebuild when the columns
+        are unchanged); a fixed ``choices`` list is static. The checked
+        labels are stored as the field's comma-separated value; a tick
+        does not fire the auto-run until the panel loses focus.
+        """
+        name = spec.name
+        fixed: list[str] | None = spec.checkbox_list.get("choices")
+
+        inner = QWidget()
+        vbox = QVBoxLayout(inner)
+        vbox.setContentsMargins(4, 6, 4, 6)
+        vbox.setSpacing(9)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        scroll.setMaximumHeight(200)
+        scroll.setMinimumHeight(48)
+
+        hint = QLabel("run the pipeline to list columns")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        boxes: dict[str, QCheckBox] = {}
+        shown: list[str] | None = None  # last rendered label list (identity guard)
+
+        def checked_set() -> set[str]:
+            raw = node.get_property(name) or ""
+            return {c.strip() for c in str(raw).split(",") if c.strip()}
+
+        def on_toggle(checked: bool, label: str) -> None:
+            values = checked_set() | {label} if checked else checked_set() - {label}
+            self._write_batched(node, name, ", ".join(sorted(values)))
+
+        def make_box(label: str) -> QCheckBox:
+            box = QCheckBox(label)
+            box.setChecked(label in checked_set())
+            box.toggled.connect(lambda on, lbl=label: on_toggle(on, lbl))
+            return box
+
+        def repopulate(labels: list[str] | None = None) -> None:
+            nonlocal shown
+            if labels is None:
+                labels = fixed if fixed is not None else sorted(self._input_columns or {})
+            labels = list(labels)
+            if shown == labels:
+                return  # nothing changed -> no rebuild, no flicker
+            shown = labels
+
+            # Detach everything (kept checkboxes survive; the spacer /
+            # hint are value items we simply drop).
+            while vbox.count():
+                vbox.takeAt(0)
+            hint.setParent(None)
+            for gone in [lbl for lbl in boxes if lbl not in labels]:
+                widget = boxes.pop(gone)
+                widget.setParent(None)
+                widget.deleteLater()
+
+            if not labels:
+                vbox.addWidget(hint)
+                vbox.addStretch(1)
+                return
+
+            current = checked_set()
+            for label in labels:
+                box = boxes.get(label)
+                if box is None:
+                    box = make_box(label)
+                    boxes[label] = box
+                box.blockSignals(True)
+                box.setChecked(label in current)
+                box.blockSignals(False)
+                vbox.addWidget(box)
+            vbox.addStretch(1)
+
+        repopulate()
+        if fixed is None:
+            self._checkbox_lists[name] = repopulate
+        return scroll
 
     def _revalidate(self, field_name: str) -> None:
         entry = self._column_fields.get(field_name)
