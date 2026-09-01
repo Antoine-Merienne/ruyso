@@ -89,3 +89,43 @@ def test_optional_str_left_blank_parses_back_to_none(qapp):
 
     params = extract_params_from_node(node, MatplotlibPlotParams)
     assert params["title"] is None
+
+
+def test_grapher_field_specs_carry_the_new_markers():
+    from ruyso_app.ui.property_forms import iter_field_specs
+
+    specs = {sp.name: sp for sp in iter_field_specs(MatplotlibPlotParams)}
+
+    assert specs["color_by"].column_allow_none is True
+    assert specs["color_by"].is_column_list is False
+
+    assert specs["single_color"].color_choices  # colour picker widget
+    assert specs["single_color"].visible_when == ("color_by", "")
+
+    assert specs["colormap"].reactive_choice["options"] == "colormaps"
+    assert specs["colormap"].visible_when_set == "color_by"
+
+    assert specs["point_size"].visible_when == ("kind", "scatter")
+    assert specs["show_legend"].visible_when_set == "color_by"
+
+    # bar_mode has BOTH conditions -> shown only for a coloured bar chart
+    assert specs["bar_mode"].visible_when == ("kind", "bar")
+    assert specs["bar_mode"].visible_when_set == "color_by"
+
+
+def test_bin_field_specs_carry_visible_unless():
+    from ruyso_app.nodes.transforms import BinParams
+    from ruyso_app.ui.property_forms import iter_field_specs
+
+    specs = {sp.name: sp for sp in iter_field_specs(BinParams)}
+    assert specs["bin_count"].visible_unless == ("method", "explicit")
+    assert specs["cut_points"].visible_when == ("method", "explicit")
+    assert specs["labels"].visible_when == ("output_type", "string")
+
+
+def test_rename_categories_renames_field_is_a_category_map():
+    from ruyso_app.nodes.transforms import RenameCategoriesParams
+    from ruyso_app.ui.property_forms import iter_field_specs
+
+    specs = {sp.name: sp for sp in iter_field_specs(RenameCategoriesParams)}
+    assert specs["renames"].category_map == {"column": "column"}

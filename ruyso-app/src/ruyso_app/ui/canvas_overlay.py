@@ -32,10 +32,10 @@ class EmptyCanvasHint(QLabel):
         super().__init__(viewer)
         self._graph = graph
 
+        self.setObjectName("ruysoEmptyHint")  # styled in theme.stylesheet_for
         self.setText(HINT_TEXT)
         self.setAlignment(Qt.AlignCenter)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setStyleSheet("color: rgba(255, 255, 255, 90); font-size: 22px;")
 
         viewer.installEventFilter(self)
         graph.node_created.connect(self._refresh)

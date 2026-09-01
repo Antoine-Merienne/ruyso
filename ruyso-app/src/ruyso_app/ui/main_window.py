@@ -23,7 +23,7 @@ Menus:
 from __future__ import annotations
 
 from NodeGraphQt import BaseNode
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -40,7 +40,7 @@ from ruyso_app.engine.serialization import load_graph, save_graph
 from ruyso_app.ui import theme
 from ruyso_app.ui.auto_run import AutoRunController
 from ruyso_app.ui.canvas import PipelineCanvas
-from ruyso_app.ui.column_spec import input_dataframe_columns
+from ruyso_app.ui.column_spec import input_column_values, input_dataframe_columns
 from ruyso_app.ui.dashboard_page import DashboardPage
 from ruyso_app.ui.execution_worker import PipelineExecutionWorker
 from ruyso_app.ui.graph_bridge import canvas_to_pipeline, pipeline_to_canvas
@@ -144,6 +144,13 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._on_tab_changed(self._tab_bar.current_key())
 
+        # Follow the OS light/dark setting live while mode is "system".
+        app = QApplication.instance()
+        hints = app.styleHints() if app is not None else None
+        if hints is not None and hasattr(hints, "colorSchemeChanged"):
+            hints.colorSchemeChanged.connect(self._on_system_color_scheme_changed)
+        self._apply_theme()
+
     # -- construction ------------------------------------------------------
 
     def _build_menus(self) -> None:
@@ -189,7 +196,17 @@ class MainWindow(QMainWindow):
 
         # -- View menu (always) --------------------------------------
         view_menu = menu_bar.addMenu("View")
-        view_menu.addAction("Toggle Dark / Light Theme", self._toggle_theme)
+        theme_menu = view_menu.addMenu("Theme")
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        for label, mode in (("System", "system"), ("Dark", "dark"), ("Light", "light")):
+            action = theme_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(theme.theme_mode() == mode)
+            self._theme_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, m=mode: self._set_theme_mode(m)
+            )
 
     # -- tab / menu state ------------------------------------------------
 
@@ -259,6 +276,7 @@ class MainWindow(QMainWindow):
                 node,
                 core_node_types_by_category(),
                 input_dataframe_columns(node, self._last_outputs),
+                input_column_values(node, self._last_outputs),
             )
         else:
             self._options.clear()
@@ -303,14 +321,19 @@ class MainWindow(QMainWindow):
 
     # -- View menu actions -----------------------------------------------
 
-    def _toggle_theme(self) -> None:
-        theme.toggle_theme()
+    def _set_theme_mode(self, mode: str) -> None:
+        theme.set_theme_mode(mode)
         self._apply_theme()
+
+    def _on_system_color_scheme_changed(self, *_args: object) -> None:
+        if theme.theme_mode() == "system":
+            theme.refresh_from_system()
+            self._apply_theme()
 
     def _apply_theme(self) -> None:
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(theme.stylesheet_for())
+            theme.apply_to_app(app)
         self._pipeline_page.apply_theme()
         self._table_page.apply_theme()
         self._dashboard_page.apply_theme()
@@ -427,7 +450,8 @@ class MainWindow(QMainWindow):
         node = self._options.current_node()
         if node is not None:
             self._options.set_input_columns(
-                input_dataframe_columns(node, self._last_outputs)
+                input_dataframe_columns(node, self._last_outputs),
+                input_column_values(node, self._last_outputs),
             )
         if self.current_tab() == "table":
             self._table_page.refresh(

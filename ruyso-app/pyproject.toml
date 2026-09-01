@@ -12,6 +12,7 @@ dependencies = [
     "pandas",
     "scikit-learn",
     "matplotlib",
+    "seaborn>=0.13",
     "networkx",
     "joblib",
     "geopandas>=1",

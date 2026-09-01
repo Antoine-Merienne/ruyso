@@ -44,11 +44,16 @@ from pydantic_core import PydanticUndefined
 
 from ruyso_app.core.node import NodeParams
 from ruyso_app.core.params import (
+    category_map_spec,
     checkbox_list_spec,
+    color_field_values,
+    column_ref_allow_none,
     column_ref_dtypes,
     field_suggestions,
     reactive_choice_spec,
+    visible_unless,
     visible_when,
+    visible_when_set,
 )
 
 # Both spellings of "optional union" need to be recognized: pydantic
@@ -56,6 +61,16 @@ from ruyso_app.core.params import (
 # `types.UnionType`), but `typing.Optional[X]` / `typing.Union[X, None]`
 # are equivalent and may appear in nodes written elsewhere.
 _UNION_ORIGINS = (typing.Union, types.UnionType)
+
+# NodeGraphQt keeps these property names for a node's own built-ins;
+# a param field cannot reuse one (it would raise deep in the UI).
+_RESERVED_PROPERTY_NAMES = frozenset(
+    {
+        "name", "color", "border_color", "text_color", "type_", "selected",
+        "disabled", "visible", "width", "height", "pos", "layout_direction",
+        "id", "icon", "inputs", "outputs",
+    }
+)
 
 
 def add_properties_to_node(node: BaseNode, params_schema: type[NodeParams]) -> None:
@@ -68,6 +83,11 @@ def add_properties_to_node(node: BaseNode, params_schema: type[NodeParams]) -> N
         params_schema: The node's parameter pydantic model.
     """
     for field_name, field_info in params_schema.model_fields.items():
+        if field_name in _RESERVED_PROPERTY_NAMES:
+            raise ValueError(
+                f"{params_schema.__name__}.{field_name!r} clashes with a "
+                f"NodeGraphQt built-in property; rename the parameter."
+            )
         widget_type, default_value, items = _infer_widget(field_name, field_info)
         node.create_property(
             field_name,
@@ -98,16 +118,29 @@ class FieldSpec:
     column_dtypes: list[str] | None = None
     #: True when the field holds a list of column names, not just one.
     is_column_list: bool = False
+    #: True when a single-value column picker offers a "None" clear row.
+    column_allow_none: bool = False
     #: Non-binding suggested values for a free-text string field, or None.
     suggestions: list[str] | None = None
+    #: Common colour names for a colour field (rendered with a picker
+    #: button), or None if this is not a colour field.
+    color_choices: list[str] | None = None
     #: ``{"options": <generator>, "depends_on": <field>}`` for a dropdown
     #: whose choices are recomputed from another field, or None.
     reactive_choice: dict | None = None
     #: ``{"source": ..., "choices": [...]}`` for a tickbox-list field, or None.
     checkbox_list: dict | None = None
+    #: ``{"column": <field>}`` for a rename-categories table field, or None.
+    category_map: dict | None = None
     #: ``(field, value)`` -- this row is shown only while ``field`` holds
     #: ``value`` -- or None.
     visible_when: tuple[str, str] | None = None
+    #: Name of a field this row is shown only while that field holds any
+    #: non-empty value -- or None.
+    visible_when_set: str | None = None
+    #: ``(field, value)`` -- this row is shown only while ``field`` does
+    #: *not* hold ``value`` -- or None.
+    visible_unless: tuple[str, str] | None = None
 
 
 def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
@@ -123,10 +156,15 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             items,
             column_dtypes=column_dtypes,
             is_column_list=column_dtypes is not None and _is_str_list(annotation),
+            column_allow_none=column_ref_allow_none(field_info),
             suggestions=field_suggestions(field_info),
+            color_choices=color_field_values(field_info),
             reactive_choice=reactive_choice_spec(field_info),
             checkbox_list=checkbox_list_spec(field_info),
+            category_map=category_map_spec(field_info),
             visible_when=visible_when(field_info),
+            visible_when_set=visible_when_set(field_info),
+            visible_unless=visible_unless(field_info),
         )
 
 

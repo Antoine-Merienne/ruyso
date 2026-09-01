@@ -88,7 +88,9 @@ def test_by_category_groups_registered_nodes_by_macro_type():
 
     assert "csv_loader" in grouped["loading"]
     assert {"excel_loader", "parquet_loader", "geojson_loader"} <= set(grouped["loading"])
-    assert grouped["grapher"] == ["matplotlib_plot"]
+    assert {"matplotlib_plot", "box_plot", "histogram_plot", "heatmap_plot"} == set(
+        grouped["grapher"]
+    )
     assert {"drop_na", "standard_scaler", "change_type", "column_filter",
             "row_filter", "dtype_filter"} <= set(grouped["transform"])
     # No statistical_test node exists yet in this beta -- must simply

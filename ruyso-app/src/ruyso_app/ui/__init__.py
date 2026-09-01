@@ -14,6 +14,7 @@ Modules:
     node_factory.py       -> Builds one NodeGraphQt node class per node
                              registered in ruyso_app.core.registry.
     canvas.py             -> Themed NodeGraphQt canvas wrapper.
+    canvas_nav.py          -> Trackpad pan / pinch-zoom remap for the canvas.
     canvas_overlay.py      -> "Right-click to add a node" empty-state hint.
     node_menu.py           -> Canvas right-click "New Node" macro menu.
     node_editing.py        -> Recreate a node under a new micro type.

@@ -30,9 +30,25 @@ _ROW_OPERATORS: dict[str | None, list[str]] = {
     None: [">", ">=", "<", "<=", "==", "!=", "contains"],
 }
 
+#: matplotlib_plot "colour by" colormap: qualitative maps for a column
+#: whose values fall into buckets (text / category / bool), sequential
+#: & diverging maps for a continuous column (numeric / datetime).
+_DISCRETE_COLORMAPS = ["tab10", "tab20", "Set1", "Set2", "Set3", "Paired", "Dark2", "Accent"]
+_CONTINUOUS_COLORMAPS = [
+    "viridis", "plasma", "cividis", "magma", "coolwarm", "Spectral", "Blues", "Greens",
+]
+_COLORMAPS: dict[str | None, list[str]] = {
+    "boolean": _DISCRETE_COLORMAPS,
+    "categorical": _DISCRETE_COLORMAPS,
+    "numeric": _CONTINUOUS_COLORMAPS,
+    "datetime": _CONTINUOUS_COLORMAPS,
+    None: _CONTINUOUS_COLORMAPS,
+}
+
 _GENERATORS = {
     "cast_types": _CAST_TARGET_TYPES,
     "row_operators": _ROW_OPERATORS,
+    "colormaps": _COLORMAPS,
 }
 
 

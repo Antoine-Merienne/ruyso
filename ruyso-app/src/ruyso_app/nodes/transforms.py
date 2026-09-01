@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
+    category_map_field,
     checkbox_list_field,
     column_field,
     reactive_choice_field,
@@ -496,3 +497,750 @@ class Concat(Node):
             ignore_index=self.params.reset_index,
         )
         return {"df": result}
+
+
+# --------------------------------------------------------------------------
+# Sample / Head / Tail
+# --------------------------------------------------------------------------
+
+
+class SampleParams(NodeParams):
+    """
+    Parameters for Sample.
+
+    Attributes:
+        mode: "count" draws ``n`` rows; "fraction" draws a share ``frac``.
+        n / frac: how much to draw.
+        replace: sample with replacement.
+        random_state: seed, for a reproducible draw.
+    """
+
+    mode: Literal["count", "fraction"] = "count"
+    n: int = visible_field(100, visible_when=("mode", "count"))
+    frac: float = visible_field(0.1, visible_when=("mode", "fraction"))
+    replace: bool = False
+    random_state: int = 0
+
+
+@register_node
+class Sample(Node):
+    """Draw a random sample of rows."""
+
+    node_type = "sample"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = SampleParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        p = self.params
+        kwargs: dict[str, Any] = {
+            "replace": p.replace,
+            "random_state": p.random_state,
+        }
+        if p.mode == "fraction":
+            kwargs["frac"] = p.frac
+        else:
+            kwargs["n"] = min(p.n, len(df)) if not p.replace else p.n
+        return {"df": df.sample(**kwargs)}
+
+
+class HeadParams(NodeParams):
+    """Parameters for Head. ``n``: number of leading rows to keep."""
+
+    n: int = 5
+
+
+@register_node
+class Head(Node):
+    """Keep the first ``n`` rows."""
+
+    node_type = "head"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = HeadParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        return {"df": inputs["df"].head(self.params.n)}
+
+
+class TailParams(NodeParams):
+    """Parameters for Tail. ``n``: number of trailing rows to keep."""
+
+    n: int = 5
+
+
+@register_node
+class Tail(Node):
+    """Keep the last ``n`` rows."""
+
+    node_type = "tail"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = TailParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        return {"df": inputs["df"].tail(self.params.n)}
+
+
+# --------------------------------------------------------------------------
+# Sort
+# --------------------------------------------------------------------------
+
+
+class SortParams(NodeParams):
+    """
+    Parameters for Sort.
+
+    Attributes:
+        columns: Sort keys, in priority order (chosen via tickboxes).
+            An empty selection is a pass-through.
+        ascending: sort ascending (unchecked = descending), for all keys.
+        na_position: put missing values "last" or "first".
+    """
+
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    ascending: bool = True
+    na_position: Literal["last", "first"] = "last"
+
+
+@register_node
+class Sort(Node):
+    """Sort rows by one or more columns."""
+
+    node_type = "sort"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = SortParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        keys = [c for c in (self.params.columns or []) if c in df.columns]
+        if not keys:
+            return {"df": df}
+        return {
+            "df": df.sort_values(
+                by=keys,
+                ascending=self.params.ascending,
+                na_position=self.params.na_position,
+            )
+        }
+
+
+# --------------------------------------------------------------------------
+# ResetIndex
+# --------------------------------------------------------------------------
+
+
+class ResetIndexParams(NodeParams):
+    """
+    Parameters for ResetIndex.
+
+    Attributes:
+        drop: discard the current index (checked) or turn it into a
+            column (unchecked).
+        index_name: name for that column, when the index is kept.
+    """
+
+    drop: bool = True
+    index_name: str = visible_field("index", visible_when=("drop", "False"))
+
+
+@register_node
+class ResetIndex(Node):
+    """Replace the index with a fresh 0..n-1 range."""
+
+    node_type = "reset_index"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = ResetIndexParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        if self.params.drop:
+            return {"df": df.reset_index(drop=True)}
+        out = df.reset_index(drop=False)
+        name = (self.params.index_name or "").strip()
+        if name and "index" in out.columns:
+            out = out.rename(columns={"index": name})
+        return {"df": out}
+
+
+# --------------------------------------------------------------------------
+# GroupBy
+# --------------------------------------------------------------------------
+
+_GROUP_METHODS = [
+    "sum", "mean", "count", "min", "max", "median", "std", "size", "first", "last",
+]
+_GROUP_NUMERIC_ONLY = {"sum", "mean", "median", "std"}
+
+
+class GroupByParams(NodeParams):
+    """
+    Parameters for GroupBy.
+
+    Attributes:
+        by: Key columns to group on (tickboxes). Empty = pass-through.
+        method: A single reduction applied to every other column.
+        dropna: drop groups whose key is missing.
+    """
+
+    by: list[str] | None = checkbox_list_field(source="columns", default=None)
+    method: Literal[
+        "sum", "mean", "count", "min", "max", "median", "std", "size", "first", "last"
+    ] = "sum"
+    dropna: bool = True
+
+
+@register_node
+class GroupBy(Node):
+    """Group rows by key columns and reduce each other column with one function."""
+
+    node_type = "group_by"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = GroupByParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        by = [c for c in (self.params.by or []) if c in df.columns]
+        if not by:
+            return {"df": df}
+
+        grouped = df.groupby(by, dropna=self.params.dropna, as_index=False)
+        method = self.params.method
+        if method == "size":
+            return {"df": grouped.size()}
+        func = getattr(grouped, method)
+        try:
+            result = func(numeric_only=True) if method in _GROUP_NUMERIC_ONLY else func()
+        except TypeError:
+            result = func()
+        return {"df": result}
+
+
+# --------------------------------------------------------------------------
+# Aggregate
+# --------------------------------------------------------------------------
+
+_AGG_FUNCTIONS = [
+    "sum", "mean", "count", "min", "max", "median", "std", "var",
+    "first", "last", "nunique",
+]
+
+
+class AggregateParams(NodeParams):
+    """
+    Parameters for Aggregate.
+
+    Attributes:
+        by: Optional group-key columns (tickboxes). Empty = aggregate
+            the whole frame into a single row.
+        columns: Columns to aggregate (tickboxes). Empty = every
+            non-key column.
+        functions: One or more aggregation functions (tickboxes). The
+            output has one ``column_function`` column per pair.
+    """
+
+    by: list[str] | None = checkbox_list_field(source="columns", default=None)
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    functions: list[str] | None = checkbox_list_field(
+        choices=_AGG_FUNCTIONS, default=None
+    )
+
+
+def _flatten_agg_columns(columns: Any) -> list[str]:
+    flat = []
+    for col in columns:
+        if isinstance(col, tuple):
+            head, tail = col[0], col[1] if len(col) > 1 else ""
+            flat.append(str(head) if tail in ("", None) else f"{head}_{tail}")
+        else:
+            flat.append(str(col))
+    return flat
+
+
+@register_node
+class Aggregate(Node):
+    """Aggregate columns with one or more functions, optionally per group."""
+
+    node_type = "aggregate"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = AggregateParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        df = inputs["df"]
+        functions = list(self.params.functions or [])
+        if not functions:
+            return {"df": df}
+
+        by = [c for c in (self.params.by or []) if c in df.columns]
+        columns = [
+            c
+            for c in (self.params.columns or [])
+            if c in df.columns and c not in by
+        ] or [c for c in df.columns if c not in by]
+        spec = {c: functions for c in columns}
+
+        if by:
+            out = df.groupby(by, as_index=False).agg(spec)
+            out.columns = _flatten_agg_columns(out.columns)
+            return {"df": out}
+
+        aggregated = df[columns].agg(functions)
+        row: dict[str, Any] = {}
+        for c in columns:
+            for f in functions:
+                if isinstance(aggregated, pd.Series):  # single function
+                    row[f"{c}_{f}"] = [aggregated[c]]
+                else:
+                    row[f"{c}_{f}"] = [aggregated.loc[f, c]]
+        return {"df": pd.DataFrame(row)}
+
+
+# --------------------------------------------------------------------------
+# Merge
+# --------------------------------------------------------------------------
+
+
+class MergeParams(NodeParams):
+    """
+    Parameters for Merge (SQL-style join).
+
+    Attributes:
+        on: Key column(s) present in both frames (tickboxes). Empty =
+            join on the row index.
+        how: join type -- inner / left / right / outer.
+        suffix_left / suffix_right: appended to overlapping non-key
+            column names.
+    """
+
+    on: list[str] | None = checkbox_list_field(source="columns", default=None)
+    how: Literal["inner", "left", "right", "outer"] = "inner"
+    suffix_left: str = "_x"
+    suffix_right: str = "_y"
+
+
+@register_node
+class Merge(Node):
+    """Join two DataFrames on key columns (or on the index)."""
+
+    node_type = "merge"
+    category = "transform"
+    inputs = [
+        Port(name="df1", dtype="dataframe"),
+        Port(name="df2", dtype="dataframe"),
+    ]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = MergeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        left = inputs["df1"]
+        right = inputs["df2"]
+        p = self.params
+        keys = [c for c in (p.on or []) if c in left.columns and c in right.columns]
+        kwargs = dict(how=p.how, suffixes=(p.suffix_left, p.suffix_right))
+        if keys:
+            return {"df": pd.merge(left, right, on=keys, **kwargs)}
+        return {
+            "df": pd.merge(left, right, left_index=True, right_index=True, **kwargs)
+        }
+
+
+# --------------------------------------------------------------------------
+# Pivot / Unpivot / PivotTable
+# --------------------------------------------------------------------------
+
+
+def _flatten_columns(columns: Any) -> list[str]:
+    """Join any MultiIndex column tuple into a single ``a_b_c`` string."""
+    flat = []
+    for col in columns:
+        if isinstance(col, tuple):
+            parts = [str(p) for p in col if p not in ("", None)]
+            flat.append("_".join(parts) if parts else "")
+        else:
+            flat.append(str(col))
+    return flat
+
+
+class PivotParams(NodeParams):
+    """
+    Parameters for Pivot (``DataFrame.pivot`` -- no aggregation).
+
+    Attributes:
+        index: Column(s) whose values become the new row labels.
+        columns: Column(s) whose values become the new column headers.
+        values: Column(s) to fill the cells with (empty = every
+            remaining column). The result is flattened and its index
+            reset so the pivot keys come back as plain columns.
+    """
+
+    index: list[str] | None = checkbox_list_field(source="columns", default=None)
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    values: list[str] | None = checkbox_list_field(source="columns", default=None)
+
+
+@register_node
+class Pivot(Node):
+    """Reshape long -> wide with unique index/column pairs (no aggregation)."""
+
+    node_type = "pivot"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = PivotParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        index = [c for c in (self.params.index or []) if c in df.columns]
+        columns = [c for c in (self.params.columns or []) if c in df.columns]
+        if not index or not columns:
+            return {"df": df}
+        values = [c for c in (self.params.values or []) if c in df.columns] or None
+
+        try:
+            result = df.pivot(
+                index=index if len(index) > 1 else index[0],
+                columns=columns if len(columns) > 1 else columns[0],
+                values=values if not values or len(values) > 1 else values[0],
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"pivot: index/columns pairs are not unique -- use pivot_table "
+                f"to aggregate the duplicates instead ({exc})"
+            ) from exc
+
+        result = result.reset_index()
+        result.columns = _flatten_columns(result.columns)
+        return {"df": result}
+
+
+class UnpivotParams(NodeParams):
+    """
+    Parameters for Unpivot (``DataFrame.melt``).
+
+    Attributes:
+        id_vars: Columns kept as identifiers (empty = none).
+        value_vars: Columns to unpivot into rows (empty = every
+            non-id column).
+        var_name / value_name: names for the two produced columns.
+    """
+
+    id_vars: list[str] | None = checkbox_list_field(source="columns", default=None)
+    value_vars: list[str] | None = checkbox_list_field(source="columns", default=None)
+    var_name: str = "variable"
+    value_name: str = "value"
+
+
+@register_node
+class Unpivot(Node):
+    """Reshape wide -> long (melt)."""
+
+    node_type = "unpivot"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = UnpivotParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        df = inputs["df"]
+        id_vars = [c for c in (self.params.id_vars or []) if c in df.columns] or None
+        value_vars = [c for c in (self.params.value_vars or []) if c in df.columns] or None
+        return {
+            "df": df.melt(
+                id_vars=id_vars,
+                value_vars=value_vars,
+                var_name=self.params.var_name or "variable",
+                value_name=self.params.value_name or "value",
+            )
+        }
+
+
+_PIVOT_TABLE_FUNCTIONS = ["mean", "sum", "count", "min", "max", "median", "std"]
+
+
+class PivotTableParams(NodeParams):
+    """
+    Parameters for PivotTable (``pandas.pivot_table`` -- with aggregation).
+
+    Attributes:
+        index / columns: pivot keys (tickboxes). At least one is needed.
+        values: columns to aggregate (empty = every numeric column).
+        functions: one or more aggregations (tickboxes); each adds its
+            own set of value columns.
+        fill_value: value for empty cells (blank = leave NaN).
+        margins: add an "All" totals row and column.
+        dropna: drop columns whose entries are all NaN.
+        observed: for categorical keys, only keep combinations that
+            occur in the data.
+    """
+
+    index: list[str] | None = checkbox_list_field(source="columns", default=None)
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    values: list[str] | None = checkbox_list_field(source="columns", default=None)
+    functions: list[str] | None = checkbox_list_field(
+        choices=_PIVOT_TABLE_FUNCTIONS, default=None
+    )
+    fill_value: str = ""
+    margins: bool = False
+    dropna: bool = True
+    observed: bool = False
+
+
+@register_node
+class PivotTable(Node):
+    """Cross-tabulate and aggregate (long -> wide, with a reduction)."""
+
+    node_type = "pivot_table"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = PivotTableParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        df = inputs["df"]
+        p = self.params
+        index = [c for c in (p.index or []) if c in df.columns]
+        columns = [c for c in (p.columns or []) if c in df.columns]
+        if not index and not columns:
+            return {"df": df}
+        values = [c for c in (p.values or []) if c in df.columns] or None
+        functions = list(p.functions or []) or ["mean"]
+
+        raw_fill = (p.fill_value or "").strip()
+        if not raw_fill:
+            fill_value: Any = None
+        else:
+            try:
+                fill_value = float(raw_fill)
+            except ValueError:
+                fill_value = raw_fill
+
+        result = pd.pivot_table(
+            df,
+            index=index or None,
+            columns=columns or None,
+            values=values,
+            aggfunc=functions if len(functions) > 1 else functions[0],
+            fill_value=fill_value,
+            margins=p.margins,
+            dropna=p.dropna,
+            observed=p.observed,
+        )
+
+        if index:
+            result = result.reset_index()
+        result.columns = _flatten_columns(result.columns)
+        return {"df": result}
+
+
+class BinParams(NodeParams):
+    """
+    Parameters for Bin.
+
+    Attributes:
+        column: Numeric column to group into bins.
+        output_name: Name of the new column (blank -> "<column>_bin").
+        method: How the cut points are chosen -- "equal_width" splits
+            the value range into equal intervals, "quantile" makes
+            equal-count bins, "explicit" uses the cutoff points typed
+            into ``cut_points``.
+        bin_count: Number of bins for the equal_width / quantile methods.
+        cut_points: Cutoff points for the "explicit" method, separated
+            by semicolons (e.g. ``10; 20; 30``). Values up to and
+            including the first cutoff go in the first bin, values above
+            the last cutoff in the last bin -- so n cutoffs make n+1
+            bins.
+        output_type: dtype of the new column -- "category" (interval
+            labels), "bool" (only for 2 bins: lower=False, upper=True),
+            "integer" (0-based bin index) or "string" (the names typed
+            into ``labels``).
+        labels: Comma-separated names for the bins, used when
+            ``output_type`` is "string" (must match the bin count).
+    """
+
+    column: str = column_field(dtypes=("numeric",), description="Numeric column to bin.")
+    output_name: str = ""
+    method: Literal["equal_width", "quantile", "explicit"] = "equal_width"
+    bin_count: int = visible_field(
+        4, visible_unless=("method", "explicit"), description="Number of bins."
+    )
+    cut_points: str = visible_field(
+        "",
+        visible_when=("method", "explicit"),
+        description="Cutoff points separated by semicolons, e.g. '10; 20; 30' "
+        "(n cutoffs -> n+1 bins).",
+    )
+    output_type: Literal["category", "bool", "integer", "string"] = "category"
+    labels: str = visible_field(
+        "",
+        visible_when=("output_type", "string"),
+        description="Comma-separated bin names, one per bin.",
+    )
+
+
+@register_node
+class Bin(Node):
+    """Group a numeric column's values into a new categorical column."""
+
+    node_type = "bin"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = BinParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(f"Bin: column {p.column!r} is not in the input data.")
+
+        series = pd.to_numeric(df[p.column], errors="coerce")
+
+        if p.method == "explicit":
+            tokens = [v.strip() for v in p.cut_points.split(";") if v.strip()]
+            try:
+                cutoffs = sorted({float(v) for v in tokens})
+            except ValueError:
+                raise ValueError(
+                    f"Bin: could not read cutoff points {p.cut_points!r}; separate "
+                    f"them with semicolons, e.g. '10; 20; 30'."
+                ) from None
+            if not cutoffs:
+                raise ValueError("Bin: 'explicit' method needs at least one cutoff point.")
+            # A cutoff at x sends values <= x to the bin on its left; the
+            # open ends catch everything below / above the given points.
+            binned = pd.cut(series, bins=[float("-inf"), *cutoffs, float("inf")])
+        elif p.method == "quantile":
+            binned = pd.qcut(series, q=max(int(p.bin_count), 2), duplicates="drop")
+        else:  # equal_width
+            binned = pd.cut(series, bins=max(int(p.bin_count), 2))
+
+        binned = pd.Categorical(binned, ordered=True)
+        n_bins = len(binned.categories)
+        codes = pd.Series(binned.codes, index=df.index)
+
+        if p.output_type == "bool":
+            if n_bins != 2:
+                raise ValueError(f"Bin: 'bool' output needs exactly 2 bins, got {n_bins}.")
+            result = codes.map({0: False, 1: True}).astype("boolean")
+        elif p.output_type == "integer":
+            result = codes.where(codes >= 0).astype("Int64")
+        else:
+            if p.output_type == "string":
+                names = [
+                    s.strip() for s in p.labels.replace(";", ",").split(",") if s.strip()
+                ]
+                if len(names) != n_bins:
+                    raise ValueError(
+                        f"Bin: 'string' output needs {n_bins} names in 'labels', "
+                        f"got {len(names)}."
+                    )
+            else:  # category -- readable interval labels, kept in bin order
+                names = [str(c) for c in binned.categories]
+            result = pd.Categorical.from_codes(binned.codes, categories=names, ordered=True)
+
+        out_name = (p.output_name or "").strip() or f"{p.column}_bin"
+        out = df.copy()
+        out[out_name] = result
+        return {"df": out}
+
+
+class RenameCategoriesParams(NodeParams):
+    """
+    Parameters for RenameCategories.
+
+    Attributes:
+        column: The categorical / boolean column to relabel.
+        renames: JSON ``{old category: new name}`` mapping, edited in
+            the Options panel as a table of the column's distinct
+            values. Any value left blank keeps its old name; two old
+            values mapped to the same new name are merged.
+    """
+
+    column: str = column_field(
+        dtypes=("categorical", "boolean"), description="Column whose categories to rename."
+    )
+    renames: str = category_map_field(
+        column="column",
+        default="{}",
+        description="Map of old category -> new name (blank keeps the old name).",
+    )
+
+
+@register_node
+class RenameCategories(Node):
+    """Relabel the categories of a categorical column."""
+
+    node_type = "rename_categories"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = RenameCategoriesParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import json
+
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(
+                f"RenameCategories: column {p.column!r} is not in the input data."
+            )
+
+        try:
+            raw = json.loads(p.renames or "{}")
+        except (ValueError, TypeError):
+            raw = {}
+        mapping = {
+            str(old): str(new).strip()
+            for old, new in raw.items()
+            if str(new).strip() and str(new).strip() != str(old)
+        }
+        if not mapping:
+            return {"df": df}
+
+        out = df.copy()
+        was_category = str(out[p.column].dtype) == "category"
+        remapped = out[p.column].astype("object").map(
+            lambda v: mapping.get(str(v), v) if pd.notna(v) else v
+        )
+        if was_category:
+            ordered = [v for v in pd.unique(remapped) if pd.notna(v)]
+            out[p.column] = pd.Categorical(remapped, categories=ordered)
+        else:
+            out[p.column] = remapped
+        return {"df": out}

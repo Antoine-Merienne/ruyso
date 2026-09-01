@@ -26,7 +26,8 @@ def main() -> int:
         The process exit code from the Qt event loop.
     """
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setStyleSheet(theme.stylesheet_for())
+    theme.set_theme_mode("system")
+    theme.apply_to_app(app)
  
     window = MainWindow()
     window.show()

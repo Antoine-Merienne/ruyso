@@ -21,7 +21,7 @@ from ruyso_app.ui.table_page import TablePage
 def _reset_theme():
     theme.set_current_theme("dark")
     yield
-    theme.set_current_theme("dark")
+    theme.set_theme_mode("system")
 
 
 @pytest.fixture
@@ -62,22 +62,33 @@ def test_options_panel_present_on_pipeline_and_dashboard_not_table(window):
     assert not hasattr(window._table_page, "options_panel")
 
 
-def test_toggle_theme_repaints_canvas_background(window):
+def test_setting_theme_mode_repaints_canvas_background(window):
+    window._set_theme_mode("dark")
     before = window._canvas.graph.background_color()
-    window._toggle_theme()
+    window._set_theme_mode("light")
     after = window._canvas.graph.background_color()
     assert theme.current_theme().name == "light"
     assert tuple(before) != tuple(after)
     assert tuple(after) == theme.LIGHT_THEME.canvas_background
 
 
-def test_toggle_theme_recolors_existing_nodes(window):
+def test_setting_theme_mode_recolors_existing_nodes(window):
     window._on_pick_macro_type("loading")  # creates a "loading" category node
     node = window._canvas.graph.all_nodes()[0]
     # Node color is palette-independent by design, so it should stay the
-    # category color across a toggle (and definitely not crash).
-    window._toggle_theme()
+    # category color across a theme change (and definitely not crash).
+    window._set_theme_mode("light")
     assert node.color() == theme.color_for_category("loading")
+
+
+def test_view_menu_has_a_three_way_theme_submenu(window):
+    view_menu = next(
+        a.menu() for a in window.menuBar().actions() if a.text() == "View"
+    )
+    theme_menu = next(a.menu() for a in view_menu.actions() if a.text() == "Theme")
+    labels = [a.text() for a in theme_menu.actions()]
+    assert labels == ["System", "Dark", "Light"]
+    assert all(a.isCheckable() for a in theme_menu.actions())
 
 
 def test_new_node_action_creates_a_node(window):

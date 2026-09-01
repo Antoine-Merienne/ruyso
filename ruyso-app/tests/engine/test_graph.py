@@ -120,6 +120,21 @@ def test_dtype_assignability_is_one_directional():
     assert not _dtype_assignable("array", "dataframe")
 
 
+def test_two_input_merge_node_validates_and_runs():
+    from ruyso_app.engine.scheduler import PipelineScheduler
+
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="a", node_type="csv_loader", params={"filepath": "?"}))
+    graph.add_node(NodeSpec(id="b", node_type="csv_loader", params={"filepath": "?"}))
+    graph.add_node(NodeSpec(id="m", node_type="merge", params={"on": ["k"], "how": "inner"}))
+    graph.add_connection(Connection(source_node="a", source_port="df", target_node="m", target_port="df1"))
+    graph.add_connection(Connection(source_node="b", source_port="df", target_node="m", target_port="df2"))
+    graph.validate()  # both required inputs satisfied
+
+    outs, errs = PipelineScheduler().run_available(graph)
+    assert "m" not in outs  # loaders fail on the bogus path -> merge skipped, no crash
+
+
 def test_geo_and_plain_transforms_validate_across_the_boundary():
     graph = PipelineGraph()
     graph.add_node(

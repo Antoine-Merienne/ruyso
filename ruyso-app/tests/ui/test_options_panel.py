@@ -242,7 +242,7 @@ def test_background_tint_follows_selected_macro_type(qapp):
     panel = OptionsPanel()
     panel.show_node(node, BY_CAT)
 
-    assert "rgba(" in panel.styleSheet()
+    assert "background-color: rgb(" in panel.styleSheet()
 
 
 def test_loader_datetime_columns_is_a_column_dropdown_with_a_none_entry(qapp):
@@ -414,3 +414,242 @@ def test_dtype_filter_has_four_fixed_tickboxes(qapp):
     assert [b.text() for b in boxes] == ["str", "category", "numeric", "other"]
     boxes[2].setChecked(True)
     assert node.get_property("kinds") == "numeric"
+
+
+# -- grapher "colour by" section -------------------------------------
+
+
+def _grapher(qapp, cols):
+    graph = _graph(qapp)
+    plot = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(plot, BY_CAT, input_columns=cols)
+    return panel, plot
+
+
+def test_grapher_color_by_is_a_single_picker_with_a_none_clear_row(qapp):
+    panel, plot = _grapher(qapp, {"team": "categorical", "score": "numeric"})
+
+    combo = panel._field_widgets["color_by"]._combo
+    assert [combo.itemText(i) for i in range(combo.count())] == ["None", "score", "team"]
+
+    combo.setCurrentText("team")
+    assert plot.get_property("color_by") == "team"
+    combo.activated.emit(0)  # the "None" row clears the field
+    assert plot.get_property("color_by") == ""
+
+
+def test_grapher_single_colour_field_has_a_choose_button(qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    panel, _plot = _grapher(qapp, None)
+
+    combo = panel._field_widgets["single_color"]._combo
+    assert combo.currentText() == "darkblue"
+    assert "darkblue" in [combo.itemText(i) for i in range(combo.count())]
+    row = panel._field_widgets["single_color"]
+    assert any(b.text() == "Choose..." for b in row.findChildren(QPushButton))
+
+
+def test_grapher_colour_section_visibility_follows_color_by(qapp):
+    panel, _plot = _grapher(qapp, {"team": "categorical"})
+    rows = _rows(panel)
+    # nothing chosen -> single colour visible, colormap + legend hidden
+    assert rows["single color"] is True
+    assert rows["colormap"] is False and rows["show legend"] is False
+
+    panel._field_widgets["color_by"]._combo.setCurrentText("team")
+    rows = _rows(panel)
+    assert rows["single color"] is False
+    assert rows["colormap"] is True and rows["show legend"] is True
+
+
+def test_grapher_colormap_options_follow_the_color_by_column_type(qapp):
+    panel, _plot = _grapher(qapp, {"team": "categorical", "score": "numeric"})
+    cmap = panel._reactive_choices["colormap"][0]
+
+    panel._field_widgets["color_by"]._combo.setCurrentText("team")
+    assert "tab10" in [cmap.itemText(i) for i in range(cmap.count())]
+
+    panel._field_widgets["color_by"]._combo.setCurrentText("score")
+    got = [cmap.itemText(i) for i in range(cmap.count())]
+    assert "viridis" in got and "tab10" not in got
+
+
+def test_grapher_mark_size_row_follows_the_kind(qapp):
+    panel, _plot = _grapher(qapp, None)
+    rows = _rows(panel)
+    assert rows["point size"] is True and rows["line width"] is False
+
+    panel._field_widgets["kind"].setCurrentText("line")
+    rows = _rows(panel)
+    assert rows["point size"] is False and rows["line width"] is True
+
+
+def test_grapher_colormap_survives_a_form_rebuild(qapp):
+    # Regression: reselecting the node used to reset the colormap combo
+    # to the first option ("tab10") and overwrite the saved value.
+    panel, plot = _grapher(qapp, {"team": "categorical"})
+    panel._field_widgets["color_by"]._combo.setCurrentText("team")
+
+    cmap = panel._reactive_choices["colormap"][0]
+    cmap.setCurrentText("Set2")
+    assert plot.get_property("colormap") == "Set2"
+
+    panel.show_node(plot, BY_CAT, input_columns={"team": "categorical"})  # deselect+reselect
+    assert plot.get_property("colormap") == "Set2"
+    assert panel._reactive_choices["colormap"][0].currentText() == "Set2"
+
+
+def test_grapher_bar_mode_needs_bar_kind_and_a_colour_by_column(qapp):
+    panel, _plot = _grapher(qapp, {"team": "categorical"})
+    assert _rows(panel)["bar mode"] is False  # scatter, no colour-by
+
+    panel._field_widgets["kind"].setCurrentText("bar")
+    assert _rows(panel)["bar mode"] is False  # bar, but still no colour-by
+
+    panel._field_widgets["color_by"]._combo.setCurrentText("team")
+    assert _rows(panel)["bar mode"] is True  # bar + colour-by -> shown
+
+    panel._field_widgets["kind"].setCurrentText("line")
+    assert _rows(panel)["bar mode"] is False  # colour-by set but not a bar
+
+
+# -- visible_unless (Bin transformer) --------------------------------
+
+
+def test_bin_count_row_hides_for_the_explicit_method(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("bin"), name="bin")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"score": "numeric"})
+
+    rows = _rows(panel)
+    assert rows["bin count"] is True and rows["cut points"] is False
+
+    panel._field_widgets["method"].setCurrentText("explicit")
+    rows = _rows(panel)
+    assert rows["bin count"] is False and rows["cut points"] is True
+
+    panel._field_widgets["method"].setCurrentText("quantile")
+    assert _rows(panel)["bin count"] is True
+
+
+def test_bin_labels_row_only_shows_for_string_output(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("bin"), name="bin")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"score": "numeric"})
+
+    assert _rows(panel)["labels"] is False
+    panel._field_widgets["output_type"].setCurrentText("string")
+    assert _rows(panel)["labels"] is True
+
+
+# -- new stat grapher nodes build a working form --------------------
+
+
+def test_box_plot_options_form_has_the_colour_by_section(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("box_plot"), name="box")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"team": "categorical", "score": "numeric"})
+
+    rows = _rows(panel)
+    assert rows["single color"] is True and rows["colormap"] is False
+
+    panel._field_widgets["color_by"]._combo.setCurrentText("team")
+    rows = _rows(panel)
+    assert rows["single color"] is False
+    assert rows["colormap"] is True and rows["show legend"] is True
+
+
+def test_histogram_bins_row_hides_for_pure_kde(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("histogram_plot"), name="hist")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"n": "numeric"})
+
+    assert _rows(panel)["bins"] is True and _rows(panel)["stat"] is True
+    panel._field_widgets["mode"].setCurrentText("kde")
+    assert _rows(panel)["bins"] is False and _rows(panel)["stat"] is False
+
+
+def test_heatmap_value_column_row_only_shows_for_aggregate(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("heatmap_plot"), name="hm")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "categorical", "b": "categorical"})
+
+    assert _rows(panel)["value column"] is False
+    panel._field_widgets["statistic"].setCurrentText("aggregate")
+    rows = _rows(panel)
+    assert rows["value column"] is True and rows["aggregate"] is True
+
+
+# -- rename_categories: the category-map table --------------------------
+
+
+def test_rename_categories_shows_a_hint_until_data_is_available(qapp):
+    from PySide6.QtWidgets import QLabel, QScrollArea
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("rename_categories"), name="rn")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"grp": "categorical"}, column_values={})
+
+    scroll = panel._field_widgets["renames"]
+    assert isinstance(scroll, QScrollArea)
+    hints = [w for w in scroll.findChildren(QLabel) if "run the pipeline" in w.text()]
+    assert hints
+
+
+def test_rename_categories_builds_one_row_per_category_and_writes_json(qapp):
+    import json
+
+    from PySide6.QtWidgets import QLineEdit, QScrollArea
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("rename_categories"), name="rn")
+    panel = OptionsPanel()
+    panel.show_node(
+        node,
+        BY_CAT,
+        input_columns={"grp": "categorical"},
+        column_values={"grp": ["a", "b", "c"]},
+    )
+    node.set_property("column", "grp")
+    panel._on_controller_changed("column")
+
+    scroll = panel._field_widgets["renames"]
+    edits = scroll.findChildren(QLineEdit)
+    assert [e.placeholderText() for e in edits] == ["a", "b", "c"]  # old names as hints
+
+    edits[0].setText("Alpha")
+    edits[2].setText("Gamma")
+    assert json.loads(node.get_property("renames")) == {"a": "Alpha", "c": "Gamma"}
+
+    edits[0].clear()  # blank again -> dropped from the map
+    assert json.loads(node.get_property("renames")) == {"c": "Gamma"}
+
+
+def test_rename_categories_table_reacts_to_the_chosen_column(qapp):
+    from PySide6.QtWidgets import QLineEdit, QScrollArea
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("rename_categories"), name="rn")
+    panel = OptionsPanel()
+    panel.show_node(
+        node,
+        BY_CAT,
+        input_columns={"grp": "categorical", "team": "categorical"},
+        column_values={"grp": ["a", "b"], "team": ["x", "y", "z"]},
+    )
+    node.set_property("column", "grp")
+    panel._on_controller_changed("column")
+    scroll = panel._field_widgets["renames"]
+    assert len(scroll.findChildren(QLineEdit)) == 2
+
+    node.set_property("column", "team")
+    panel._on_controller_changed("column")
+    assert len(scroll.findChildren(QLineEdit)) == 3

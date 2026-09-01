@@ -51,10 +51,42 @@ def kind_accepted(accepted: list[str] | None, kind: str) -> bool:
     return kind in accepted
 
 
-def _columns_of(df: object) -> dict[str, str] | None:
-    if df is None or not hasattr(df, "columns") or not hasattr(df, "dtypes"):
-        return None
-    return {str(name): dtype_kind(dtype) for name, dtype in df.dtypes.items()}
+def _is_dataframe(df: object) -> bool:
+    return df is not None and hasattr(df, "columns") and hasattr(df, "dtypes")
+
+
+def _input_dataframes(node: BaseNode, outputs: dict[str, dict]) -> list:
+    """The DataFrame(s) feeding ``node``'s table inputs.
+
+    For a *source* node (a loader, no table inputs) this is instead its
+    own last-run output. Empty when nothing has run yet.
+    """
+    core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
+    if core_cls is None:
+        return []
+
+    table_inputs = [
+        p for p in core_cls.inputs if getattr(p, "dtype", None) in _TABLE_DTYPES
+    ]
+    frames: list = []
+    if table_inputs:
+        for port in table_inputs:
+            canvas_port = node.inputs().get(port.name)
+            if canvas_port is None:
+                continue
+            for connected in canvas_port.connected_ports():
+                df = outputs.get(connected.node().name(), {}).get(connected.name())
+                if _is_dataframe(df):
+                    frames.append(df)
+        return frames
+
+    own = outputs.get(node.name(), {})
+    for port in core_cls.outputs:
+        if getattr(port, "dtype", None) in _TABLE_DTYPES and _is_dataframe(
+            own.get(port.name)
+        ):
+            frames.append(own[port.name])
+    return frames
 
 
 def input_dataframe_columns(
@@ -69,36 +101,42 @@ def input_dataframe_columns(
     picker fills in once the file has been read. ``None`` when nothing
     is available yet, so the caller offers free text with no validation.
     """
-    core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
-    if core_cls is None:
+    frames = _input_dataframes(node, outputs)
+    if not frames:
         return None
+    columns: dict[str, str] = {}
+    for df in frames:
+        columns.update(
+            {str(name): dtype_kind(dtype) for name, dtype in df.dtypes.items()}
+        )
+    return columns
 
-    table_inputs = [
-        p for p in core_cls.inputs if getattr(p, "dtype", None) in _TABLE_DTYPES
-    ]
-    if table_inputs:
-        columns: dict[str, str] = {}
-        found = False
-        for port in table_inputs:
-            canvas_port = node.inputs().get(port.name)
-            if canvas_port is None:
+
+#: Cap on distinct values surfaced per categorical column (keeps the
+#: rename-categories editor bounded on messy data).
+_MAX_DISTINCT_VALUES = 200
+
+
+def input_column_values(
+    node: BaseNode, outputs: dict[str, dict]
+) -> dict[str, list[str]]:
+    """
+    ``{column: [distinct string values]}`` for the categorical / bool
+    columns of ``node``'s input DataFrame -- powers the
+    rename-categories editor. Empty dict when nothing has run yet.
+    """
+    result: dict[str, list[str]] = {}
+    for df in _input_dataframes(node, outputs):
+        for name, dtype in df.dtypes.items():
+            key = str(name)
+            if key in result or dtype_kind(dtype) not in (CATEGORICAL, BOOLEAN):
                 continue
-            for connected in canvas_port.connected_ports():
-                upstream = outputs.get(connected.node().name(), {}).get(connected.name())
-                cols = _columns_of(upstream)
-                if cols is not None:
-                    found = True
-                    columns.update(cols)
-        return columns if found else None
-
-    # Source node: use its own produced table, if it has run.
-    own = outputs.get(node.name(), {})
-    for port in core_cls.outputs:
-        if getattr(port, "dtype", None) in _TABLE_DTYPES:
-            cols = _columns_of(own.get(port.name))
-            if cols is not None:
-                return cols
-    return None
+            try:
+                uniques = df[name].dropna().unique()
+            except Exception:  # noqa: BLE001
+                continue
+            result[key] = sorted(str(v) for v in list(uniques)[:_MAX_DISTINCT_VALUES])
+    return result
 
 
 def validate_column_value(

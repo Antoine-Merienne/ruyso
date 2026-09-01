@@ -13,6 +13,7 @@ from ruyso_app.ui.column_spec import (
     UNKNOWN_COLUMN,
     UNSUPPORTED_TYPE,
     dtype_kind,
+    input_column_values,
     input_dataframe_columns,
     kind_accepted,
     validate_column_value,
@@ -59,6 +60,24 @@ def test_input_dataframe_columns_follows_the_wire(qapp):
 
     # No run output yet -> None (free text, no validation).
     assert input_dataframe_columns(plot, {}) is None
+
+
+def test_input_column_values_lists_distinct_categories_of_the_input(qapp):
+    graph = NodeGraph()
+    register_all_nodes(graph)
+    loader = graph.create_node(qt_type_for("csv_loader"), name="load")
+    rn = graph.create_node(qt_type_for("rename_categories"), name="rn")
+    loader.set_output(0, rn.input(0))
+
+    df = pd.DataFrame(
+        {"grp": ["b", "a", "b", "a"], "flag": [True, False, True, True], "n": [1, 2, 3, 4]}
+    )
+    values = input_column_values(rn, {"load": {"df": df}})
+    assert values["grp"] == ["a", "b"]  # sorted, distinct
+    assert values["flag"] == ["False", "True"]  # bools stringified
+    assert "n" not in values  # numeric columns are skipped
+
+    assert input_column_values(rn, {}) == {}  # nothing has run yet
 
 
 def test_source_node_uses_its_own_produced_columns(qapp):
