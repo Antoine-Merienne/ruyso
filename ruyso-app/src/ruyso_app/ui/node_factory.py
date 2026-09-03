@@ -32,10 +32,18 @@ from ruyso_app.ui.property_forms import add_properties_to_node
 # package name to avoid any confusion between the two.
 GRAPH_NODE_IDENTIFIER = "ruyso"
 
+# One generated Qt class per node_type, reused across every graph.
+# Rebuilding it on each ``register_all_nodes`` call (once per canvas)
+# spawns hundreds of throwaway ``type`` objects over a test run, which
+# inflates GC work and, colliding with NodeGraphQt's QUndoStack
+# teardown, can crash PySide6. The wrapper only depends on the core
+# node class, so caching it is safe.
+_QT_CLASS_CACHE: dict[str, type[BaseNode]] = {}
+
 
 def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNode]:
     """
-    Build a NodeGraphQt.BaseNode subclass wrapping ``node_cls``.
+    Build (or return a cached) NodeGraphQt.BaseNode subclass wrapping ``node_cls``.
 
     Args:
         node_type: The registered node_type identifier (e.g. "csv_loader").
@@ -67,11 +75,15 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
 
         add_properties_to_node(self, node_cls.params_schema)
 
-        # Figure-bearing nodes (grapher / statistical_test, and figure
+        # Figure-bearing nodes (grapher, and figure
         # sinks like figure_export) get an on-canvas preview, but it is
         # a floating thumbnail managed by ui.node_preview.NodePreviewOverlay
         # -- not a widget embedded in the node here.
         self.is_figure_node = is_figure_core_class(node_cls)
+
+    cached = _QT_CLASS_CACHE.get(node_type)
+    if cached is not None and cached.CORE_NODE_CLASS is node_cls:
+        return cached
 
     attrs: dict[str, Any] = {
         "__identifier__": GRAPH_NODE_IDENTIFIER,
@@ -80,7 +92,9 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
         "CORE_NODE_CLASS": node_cls,
         "__init__": __init__,
     }
-    return type(_class_name_for(node_type), (BaseNode,), attrs)
+    qt_class = type(_class_name_for(node_type), (BaseNode,), attrs)
+    _QT_CLASS_CACHE[node_type] = qt_class
+    return qt_class
 
 
 def register_all_nodes(graph: NodeGraph) -> None:
@@ -146,7 +160,7 @@ def core_node_types_by_category() -> dict[str, list[str]]:
 
     Used by the "New Node" menu / Options panel micro-type dropdown to
     know which macro types actually have a node behind them: a macro
-    type absent from this mapping (e.g. "statistical_test", which has no
+    type absent from this mapping (a macro type with no
     concrete node yet) is shown disabled rather than offered as an
     empty submenu.
 

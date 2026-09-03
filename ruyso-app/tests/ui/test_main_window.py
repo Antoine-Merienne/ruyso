@@ -211,13 +211,13 @@ def test_switching_to_table_tab_populates_the_navigator_from_the_canvas(window):
     assert len(labels) == 2  # one table each for the loader and the transformer
 
 
-def test_statistical_test_macro_type_has_no_enabled_new_node_action(window):
-    # "statistical_test" has no concrete node yet -> its New Node entry
-    # must be present but disabled, never missing or crashing.
+def test_every_macro_type_has_an_enabled_new_node_action(window):
+    # Every macro type now has at least one concrete node, so every
+    # New Node entry is present and enabled.
     new_node_menu = None
     for action in window._node_menu.actions():
         if action.text() == "New Node":
             new_node_menu = action.menu()
     labels = {a.text(): a.isEnabled() for a in new_node_menu.actions()}
-    assert labels[theme.MACRO_TYPE_LABELS["statistical_test"]] is False
-    assert labels[theme.MACRO_TYPE_LABELS["grapher"]] is True
+    for label in theme.MACRO_TYPE_LABELS.values():
+        assert labels.get(label) is True

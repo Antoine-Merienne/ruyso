@@ -135,9 +135,11 @@ def test_unknown_datetime_column_raises(frame):
         )
 
 
-def test_every_loading_node_shares_the_datetime_params():
+def test_every_file_loading_node_shares_the_datetime_params():
+    # ``example_data`` is a loader with no file / no datetime parsing; the
+    # shared params are for the file-path loaders (they subclass LoaderParams).
     for node_type, cls in NodeRegistry.all().items():
-        if cls.category != "loading":
+        if cls.category != "loading" or node_type == "example_data":
             continue
         fields = cls.params_schema.model_fields
         assert "datetime_columns" in fields

@@ -26,8 +26,7 @@ def test_new_node_submenu_has_one_entry_per_macro_type(qapp):
 
     for label in theme.MACRO_TYPE_LABELS.values():
         assert label in labels
-    assert labels[theme.MACRO_TYPE_LABELS["statistical_test"]] is False
-    assert labels[theme.MACRO_TYPE_LABELS["grapher"]] is True
+        assert labels[label] is True  # every macro type has a concrete node now
 
 
 def test_choosing_a_macro_type_calls_back(qapp):

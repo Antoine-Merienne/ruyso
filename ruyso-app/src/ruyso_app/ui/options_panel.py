@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -66,6 +67,9 @@ _WARNING_STYLE = "color: #d9822b; font-size: 11px;"
 #: column / suggestions dropdown, and the colour it is drawn in.
 _CLEAR_SENTINELS = frozenset({"None", "infer"})
 _SENTINEL_COLOR = QColor(150, 150, 150)
+
+#: "no column" row in a column-map table dropdown.
+_BLANK = "—"
 
 
 def _prepend_clear_sentinel(combo: QComboBox, label: str) -> None:
@@ -123,6 +127,8 @@ class OptionsPanel(QWidget):
         self._checkbox_lists: dict[str, object] = {}
         # category-map field name -> (repopulate(), source-column field name)
         self._category_maps: dict[str, tuple] = {}
+        # column-map field name -> repopulate()  (key -> input-column table)
+        self._column_maps: dict[str, object] = {}
 
         self._title = QLabel("Options", self)
         self._title.setStyleSheet("font-weight: bold;")
@@ -285,7 +291,12 @@ class OptionsPanel(QWidget):
             repopulate()
         for repopulate, _src in self._category_maps.values():
             repopulate()
+        for repopulate in self._column_maps.values():
+            repopulate()
         self._refresh_all_reactive_choices()
+        # kind-conditioned rows depend on the freshly-learnt column kinds
+        for row in self._row_conditions:
+            self._apply_row_visibility(row)
 
     def apply_theme(self) -> None:
         """Recompute the background tint from the current theme + category."""
@@ -345,6 +356,7 @@ class OptionsPanel(QWidget):
         self._reactive_choices.clear()
         self._checkbox_lists.clear()
         self._category_maps.clear()
+        self._column_maps.clear()
 
         specs = list(iter_field_specs(type(node).CORE_NODE_CLASS.params_schema))
         controllers = {
@@ -365,6 +377,12 @@ class OptionsPanel(QWidget):
                 conditions.append((spec.visible_when[0], "eq", spec.visible_when[1]))
             if spec.visible_when_set:
                 conditions.append((spec.visible_when_set, "set", None))
+            if spec.visible_when_unset:
+                conditions.append((spec.visible_when_unset, "unset", None))
+            if spec.visible_when_kind:
+                conditions.append(
+                    (spec.visible_when_kind[0], "colkind", spec.visible_when_kind[1])
+                )
             if spec.visible_unless:
                 conditions.append((spec.visible_unless[0], "ne", spec.visible_unless[1]))
             if conditions:
@@ -416,8 +434,16 @@ class OptionsPanel(QWidget):
         visible = True
         for field, kind, target in self._row_conditions.get(row, ()):
             current = self._field_current_str(field)
+            is_set = bool(current.strip()) and current not in ("None", "False")
             if kind == "set":
-                ok = bool(current.strip()) and current not in ("None", "False")
+                ok = is_set
+            elif kind == "unset":
+                ok = not is_set
+            elif kind == "colkind":
+                col_kind = (self._input_columns or {}).get(current)
+                # permissive while the run output (and hence the kind) is
+                # not available yet
+                ok = is_set and (col_kind is None or col_kind in target)
             elif kind == "ne":
                 ok = current != target
             else:
@@ -473,6 +499,9 @@ class OptionsPanel(QWidget):
         if spec.category_map is not None:
             return self._build_category_map_widget(node, spec)
 
+        if spec.column_map is not None:
+            return self._build_column_map_widget(node, spec)
+
         if spec.reactive_choice is not None:
             return self._build_reactive_choice_widget(node, spec)
 
@@ -484,6 +513,9 @@ class OptionsPanel(QWidget):
 
         if spec.suggestions is not None:
             return self._build_suggestions_widget(node, spec, current)
+
+        if spec.unit_interval is not None:
+            return self._build_slider_widget(node, spec, current)
 
         if spec.widget == enum.QCOMBO_BOX:
             combo = QComboBox()
@@ -558,6 +590,50 @@ class OptionsPanel(QWidget):
 
         combo.activated.connect(_on_activated)
         return combo
+
+    # -- bounded-float slider ----------------------------------------
+
+    def _build_slider_widget(self, node: BaseNode, spec, current) -> QWidget:
+        """
+        A horizontal slider over ``[lo, hi]`` (``core.params.unit_interval_field``)
+        plus a small read-out label. Replaces the free-text spin box for
+        ratio / fraction parameters.
+        """
+        name = spec.name
+        lo = float(spec.unit_interval["lo"])
+        hi = float(spec.unit_interval["hi"])
+        step = float(spec.unit_interval["step"]) or 0.01
+        steps = max(int(round((hi - lo) / step)), 1)
+        decimals = max(len(f"{step:.10f}".rstrip("0").split(".")[-1]), 1)
+
+        def to_slider(value: float) -> int:
+            return int(round((max(lo, min(hi, value)) - lo) / step))
+
+        def to_value(pos: int) -> float:
+            return round(lo + pos * step, decimals)
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, steps)
+        slider.setValue(to_slider(float(current if current is not None else lo)))
+
+        readout = QLabel(f"{to_value(slider.value()):.{decimals}f}")
+        readout.setMinimumWidth(44)
+        readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        def _on_change(pos: int) -> None:
+            value = to_value(pos)
+            readout.setText(f"{value:.{decimals}f}")
+            node.set_property(name, value)
+
+        slider.valueChanged.connect(_on_change)
+
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(slider, 1)
+        layout.addWidget(readout, 0)
+        row._slider = slider  # noqa: SLF001 - for controller wiring / tests
+        return row
 
     # -- colour fields ------------------------------------------------
 
@@ -890,6 +966,70 @@ class OptionsPanel(QWidget):
 
         repopulate()
         self._category_maps[name] = (repopulate, source_field)
+        return scroll
+
+    def _build_column_map_widget(self, node: BaseNode, spec) -> QWidget:
+        """
+        A scrollable table: each fixed key in ``spec.column_map["keys"]``
+        faces a dropdown of the input DataFrame's columns (blank =
+        unmapped). Stored as a JSON ``{key: column}`` string; refreshed
+        in place when the input columns arrive.
+        """
+        name = spec.name
+        keys: list[str] = list(spec.column_map["keys"])
+
+        inner = QWidget()
+        form = QFormLayout(inner)
+        form.setContentsMargins(4, 6, 4, 6)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        scroll.setMaximumHeight(240)
+        scroll.setMinimumHeight(48)
+
+        combos: dict[str, QComboBox] = {}
+
+        def stored_map() -> dict[str, str]:
+            try:
+                data = json.loads(node.get_property(name) or "{}")
+            except (ValueError, TypeError):
+                return {}
+            return (
+                {str(k): str(v) for k, v in data.items()}
+                if isinstance(data, dict)
+                else {}
+            )
+
+        def commit() -> None:
+            mapping = {
+                key: c.currentText()
+                for key, c in combos.items()
+                if c.currentText() and c.currentText() != _BLANK
+            }
+            node.set_property(name, json.dumps(mapping, ensure_ascii=False))
+
+        def repopulate() -> None:
+            columns = sorted(self._input_columns or {})
+            current = stored_map()
+            if not combos:  # first build
+                for key in keys:
+                    combo = QComboBox()
+                    combo.currentTextChanged.connect(lambda _t: commit())
+                    combos[key] = combo
+                    form.addRow(key, combo)
+            for key, combo in combos.items():
+                combo.blockSignals(True)
+                kept = current.get(key, combo.currentText())
+                combo.clear()
+                combo.addItems([_BLANK, *columns])
+                combo.setCurrentText(kept if kept in columns else _BLANK)
+                combo.blockSignals(False)
+
+        repopulate()
+        self._column_maps[name] = repopulate
         return scroll
 
     def _revalidate(self, field_name: str) -> None:

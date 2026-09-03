@@ -1,6 +1,6 @@
 """
 On-canvas figure previews for nodes that produce or consume a figure
-(grapher / statistical_test nodes, and figure sinks such as
+(grapher nodes, and figure sinks such as
 ``figure_export``).
 
 Design decision (spec section 8 -- "a window appears behind / attached
@@ -43,7 +43,7 @@ FIGURE_DTYPE = "figure"
 
 #: Macro types that always get a preview even if their ports are not
 #: figure-typed (a statistical test renders a table/plot of results).
-_ALWAYS_PREVIEW_CATEGORIES = frozenset({"grapher", "statistical_test"})
+_ALWAYS_PREVIEW_CATEGORIES = frozenset({"grapher"})
 
 #: Thumbnail size on screen at 1:1 zoom, in pixels.
 _THUMB_W = 180
@@ -77,9 +77,9 @@ def placeholder_text_for_category(category: str) -> str:
     """
     Placeholder shown before the pipeline has been run, per the spec:
     "run pipeline to render graph" for grapher nodes, "run pipeline to
-    render test" for statistical_test nodes.
+    render graph".
     """
-    kind = "test" if category == "statistical_test" else "graph"
+    kind = "graph"
     return f"run pipeline to render {kind}"
 
 

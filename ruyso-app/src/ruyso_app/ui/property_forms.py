@@ -45,6 +45,8 @@ from pydantic_core import PydanticUndefined
 from ruyso_app.core.node import NodeParams
 from ruyso_app.core.params import (
     category_map_spec,
+    column_map_spec,
+    unit_interval_spec,
     checkbox_list_spec,
     color_field_values,
     column_ref_allow_none,
@@ -53,7 +55,9 @@ from ruyso_app.core.params import (
     reactive_choice_spec,
     visible_unless,
     visible_when,
+    visible_when_kind,
     visible_when_set,
+    visible_when_unset,
 )
 
 # Both spellings of "optional union" need to be recognized: pydantic
@@ -132,12 +136,22 @@ class FieldSpec:
     checkbox_list: dict | None = None
     #: ``{"column": <field>}`` for a rename-categories table field, or None.
     category_map: dict | None = None
+    #: ``{"keys": [...]}`` for a key -> column mapping table, or None.
+    column_map: dict | None = None
+    #: ``{"lo":.., "hi":.., "step":..}`` for a bounded-float slider, or None.
+    unit_interval: dict | None = None
     #: ``(field, value)`` -- this row is shown only while ``field`` holds
     #: ``value`` -- or None.
     visible_when: tuple[str, str] | None = None
     #: Name of a field this row is shown only while that field holds any
     #: non-empty value -- or None.
     visible_when_set: str | None = None
+    #: Name of a field this row is shown only while that field is empty
+    #: -- or None.
+    visible_when_unset: str | None = None
+    #: ``(field, kinds)`` -- this row is shown only while the column named
+    #: by ``field`` has one of ``kinds`` (or its kind is unknown) -- or None.
+    visible_when_kind: tuple[str, tuple[str, ...]] | None = None
     #: ``(field, value)`` -- this row is shown only while ``field`` does
     #: *not* hold ``value`` -- or None.
     visible_unless: tuple[str, str] | None = None
@@ -162,8 +176,12 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             reactive_choice=reactive_choice_spec(field_info),
             checkbox_list=checkbox_list_spec(field_info),
             category_map=category_map_spec(field_info),
+            column_map=column_map_spec(field_info),
+            unit_interval=unit_interval_spec(field_info),
             visible_when=visible_when(field_info),
             visible_when_set=visible_when_set(field_info),
+            visible_when_unset=visible_when_unset(field_info),
+            visible_when_kind=visible_when_kind(field_info),
             visible_unless=visible_unless(field_info),
         )
 

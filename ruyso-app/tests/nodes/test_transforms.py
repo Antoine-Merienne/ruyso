@@ -633,3 +633,190 @@ def test_rename_categories_works_on_a_plain_object_column():
         params=RenameCategoriesParams(column="city", renames='{"ny": "New York"}')
     ).run(df=df)["df"]
     assert out["city"].tolist() == ["New York", "la", "New York"]
+
+
+# -- OneHotEncode / OrdinalEncode -----------------------------------------
+
+from ruyso_app.nodes.transforms import (  # noqa: E402
+    OneHotEncode,
+    OneHotEncodeParams,
+    OrdinalEncode,
+    OrdinalEncodeParams,
+)
+
+
+def _encoder_df():
+    return pd.DataFrame(
+        {
+            "city": ["ny", "la", "ny", "sf"],
+            "size": pd.Categorical(["s", "m", "l", "m"]),
+            "n": [1, 2, 3, 4],
+        }
+    )
+
+
+def test_one_hot_encode_auto_detects_categorical_columns():
+    out = OneHotEncode(params=OneHotEncodeParams()).run(df=_encoder_df())["df"]
+    assert "n" in out.columns  # numeric column untouched
+    assert {"city_ny", "city_la", "city_sf", "size_s", "size_m", "size_l"} <= set(out.columns)
+    assert "city" not in out.columns  # replaced by default
+    assert set(out["city_ny"].unique()) <= {0, 1}
+
+
+def test_one_hot_encode_drop_first_and_keep_original():
+    out = OneHotEncode(
+        params=OneHotEncodeParams(columns=["size"], drop_first=True, replace=False)
+    ).run(df=_encoder_df())["df"]
+    assert "size" in out.columns  # kept alongside
+    size_dummies = [c for c in out.columns if c.startswith("size_")]
+    assert len(size_dummies) == 2  # 3 levels - 1 dropped
+
+
+def test_ordinal_encode_replaces_with_sorted_integer_codes():
+    out = OrdinalEncode(params=OrdinalEncodeParams(columns=["city"])).run(
+        df=_encoder_df()
+    )["df"]
+    # categories sorted: la=0, ny=1, sf=2
+    assert out["city"].tolist() == [1, 0, 1, 2]
+    assert str(out["city"].dtype) == "Int64"
+
+
+def test_ordinal_encode_keep_original_adds_suffixed_column():
+    out = OrdinalEncode(
+        params=OrdinalEncodeParams(columns=["size"], replace=False)
+    ).run(df=_encoder_df())["df"]
+    assert "size" in out.columns and "size_ordinal" in out.columns
+
+
+def test_encoders_pass_through_when_no_categorical_columns():
+    num = pd.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+    assert OneHotEncode(params=OneHotEncodeParams()).run(df=num)["df"] is num
+    assert OrdinalEncode(params=OrdinalEncodeParams()).run(df=num)["df"] is num
+
+
+# -- datetime: combine / split / resample --------------------------------
+
+import json  # noqa: E402
+
+from ruyso_app.nodes.transforms import (  # noqa: E402
+    CombineDatetime,
+    CombineDatetimeParams,
+    ResampleDatetime,
+    ResampleDatetimeParams,
+    SplitDatetime,
+    SplitDatetimeParams,
+)
+
+
+def test_combine_datetime_assembles_from_numeric_parts():
+    df = pd.DataFrame({"yr": [2021, 2022], "mo": [1, 12], "dy": [15, 31], "hr": [9, 23]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "yr", "month": "mo", "day": "dy", "hour": "hr"})
+        )
+    ).run(df=df)["df"]
+    assert pd.api.types.is_datetime64_any_dtype(out["datetime"])
+    assert out["datetime"].iloc[0] == pd.Timestamp("2021-01-15 09:00:00")
+    assert "yr" in out.columns  # sources kept by default
+
+
+def test_combine_datetime_quarter_and_replace():
+    df = pd.DataFrame({"y": [2020, 2021], "q": [1, 4]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "y", "quarter": "q"}),
+            output_column="dt", replace=True,
+        )
+    ).run(df=df)["df"]
+    assert list(out.columns) == ["dt"]
+    assert out["dt"].tolist() == [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-10-01")]
+
+
+def test_combine_datetime_day_of_year_handles_leap():
+    df = pd.DataFrame({"y": [2024], "doy": [60]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(mapping=json.dumps({"year": "y", "dayofyear": "doy"}))
+    ).run(df=df)["df"]
+    assert out["datetime"].iloc[0] == pd.Timestamp("2024-02-29")
+
+
+def test_combine_datetime_parses_a_single_text_column():
+    df = pd.DataFrame({"raw": ["2023-03-15", "2023-11-01"]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "raw"}), datetime_format="%Y-%m-%d"
+        )
+    ).run(df=df)["df"]
+    assert pd.api.types.is_datetime64_any_dtype(out["datetime"])
+    assert out["datetime"].iloc[1] == pd.Timestamp("2023-11-01")
+
+
+def test_combine_datetime_empty_mapping_is_a_passthrough():
+    df = pd.DataFrame({"a": [1, 2]})
+    assert CombineDatetime(params=CombineDatetimeParams()).run(df=df)["df"] is df
+
+
+def _dt_df():
+    return pd.DataFrame(
+        {
+            "t": pd.to_datetime(
+                ["2021-01-15 09:30:00", "2022-06-03 14:00:00", "2023-12-31 23:59:59"]
+            ),
+        }
+    )
+
+
+def test_split_datetime_components_mode():
+    out = SplitDatetime(
+        params=SplitDatetimeParams(column="t", parts=["year", "quarter", "week", "hour"])
+    ).run(df=_dt_df())["df"]
+    assert {"t_year", "t_quarter", "t_week", "t_hour"} <= set(out.columns)
+    assert out["t_year"].tolist() == [2021, 2022, 2023]
+    assert out["t_quarter"].tolist() == [1, 2, 4]
+    assert str(out["t_year"].dtype) == "Int64"
+
+
+def test_split_datetime_string_mode_and_replace():
+    out = SplitDatetime(
+        params=SplitDatetimeParams(
+            column="t", mode="string", datetime_format="%Y/%m", replace=True
+        )
+    ).run(df=_dt_df())["df"]
+    assert list(out.columns) == ["t_str"]
+    assert out["t_str"].tolist() == ["2021/01", "2022/06", "2023/12"]
+
+
+def _series_df(n=30):
+    return pd.DataFrame(
+        {
+            "ts": pd.date_range("2021-01-01", periods=n, freq="D"),
+            "v": np.arange(float(n)),
+            "lbl": ["a"] * (n // 2) + ["b"] * (n - n // 2),
+        }
+    )
+
+
+def test_resample_datetime_downsamples_with_the_aggregator():
+    out = ResampleDatetime(
+        params=ResampleDatetimeParams(datetime_column="ts", rule="W", agg="mean")
+    ).run(df=_series_df())["df"]
+    assert "ts" in out.columns and len(out) == 5
+    assert out["v"].iloc[0] == 1.0  # mean of days 0..2 (first partial week)
+    assert set(out["lbl"].dropna()) <= {"a", "b"}  # non-numeric -> first
+
+
+def test_resample_datetime_upsamples_and_fills():
+    out = ResampleDatetime(
+        params=ResampleDatetimeParams(
+            datetime_column="ts", rule="12h", agg="mean", fill="ffill"
+        )
+    ).run(df=_series_df(n=5))["df"]
+    assert len(out) == 9  # 5 days -> 12-hourly
+    assert not out["v"].isna().any()  # forward-filled
+
+
+def test_resample_datetime_ohlc_flattens_columns():
+    out = ResampleDatetime(
+        params=ResampleDatetimeParams(datetime_column="ts", rule="W", agg="ohlc")
+    ).run(df=_series_df())["df"]
+    assert {"v_open", "v_high", "v_low", "v_close"} <= set(out.columns)

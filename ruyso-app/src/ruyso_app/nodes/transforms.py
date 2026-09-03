@@ -11,7 +11,10 @@ from ruyso_app.core.params import (
     category_map_field,
     checkbox_list_field,
     column_field,
+    column_map_field,
     reactive_choice_field,
+    suggestions_field,
+    unit_interval_field,
     visible_field,
 )
 from ruyso_app.core.port import Port
@@ -517,7 +520,9 @@ class SampleParams(NodeParams):
 
     mode: Literal["count", "fraction"] = "count"
     n: int = visible_field(100, visible_when=("mode", "count"))
-    frac: float = visible_field(0.1, visible_when=("mode", "fraction"))
+    frac: float = unit_interval_field(
+        0.1, lo=0.0, hi=1.0, visible_when=("mode", "fraction")
+    )
     replace: bool = False
     random_state: int = 0
 
@@ -1244,3 +1249,445 @@ class RenameCategories(Node):
         else:
             out[p.column] = remapped
         return {"df": out}
+
+
+# --------------------------------------------------------------------------
+# Categorical encoders (one-hot / ordinal)
+# --------------------------------------------------------------------------
+
+
+def _categorical_columns(df: Any) -> list[str]:
+    """Non-numeric, non-bool, non-datetime columns of ``df`` (object /
+    string / category)."""
+    from pandas.api.types import (
+        is_bool_dtype,
+        is_datetime64_any_dtype,
+        is_numeric_dtype,
+    )
+
+    out: list[str] = []
+    for name, dtype in df.dtypes.items():
+        if (
+            is_bool_dtype(dtype)
+            or is_numeric_dtype(dtype)
+            or is_datetime64_any_dtype(dtype)
+        ):
+            continue
+        out.append(str(name))
+    return out
+
+
+class OneHotEncodeParams(NodeParams):
+    """
+    Parameters for OneHotEncode.
+
+    Attributes:
+        columns: Columns to encode (tickboxes). Empty = every
+            object / string / category column.
+        drop_first: Drop the first level of each column (k-1 dummies),
+            to avoid collinearity.
+        replace: Replace the original columns with the dummy columns;
+            if off, the dummies are added alongside the originals.
+    """
+
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    drop_first: bool = False
+    replace: bool = True
+
+
+@register_node
+class OneHotEncode(Node):
+    """
+    One-hot (dummy) encode categorical columns into 0/1 indicator
+    columns named ``<column>_<value>``.
+
+    Fitted on whatever DataFrame it receives (stateless, like
+    ``standard_scaler``); ``handle_unknown='ignore'`` so it never
+    raises on an unseen value.
+    """
+
+    node_type = "one_hot_encode"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = OneHotEncodeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+        from sklearn.preprocessing import OneHotEncoder
+
+        p = self.params
+        df = inputs["df"]
+        cols = [c for c in (p.columns or []) if c in df.columns]
+        if not cols:
+            cols = _categorical_columns(df)
+        if not cols:
+            return {"df": df}
+
+        encoder = OneHotEncoder(
+            handle_unknown="ignore",
+            drop="first" if p.drop_first else None,
+            sparse_output=False,
+            dtype=int,
+        )
+        matrix = encoder.fit_transform(df[cols])
+        dummies = pd.DataFrame(
+            matrix,
+            columns=encoder.get_feature_names_out(cols),
+            index=df.index,
+        )
+        base = df.drop(columns=cols) if p.replace else df
+        return {"df": pd.concat([base, dummies], axis=1)}
+
+
+class OrdinalEncodeParams(NodeParams):
+    """
+    Parameters for OrdinalEncode.
+
+    Attributes:
+        columns: Columns to encode (tickboxes). Empty = every
+            object / string / category column.
+        replace: Replace the original columns with the integer codes;
+            if off, ``<column>_ordinal`` columns are added alongside.
+    """
+
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    replace: bool = True
+
+
+@register_node
+class OrdinalEncode(Node):
+    """
+    Ordinal-encode categorical columns to integer codes (0-based,
+    categories in sorted order). Fitted on whatever DataFrame it
+    receives (stateless); an unseen value would map to ``-1``.
+    """
+
+    node_type = "ordinal_encode"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = OrdinalEncodeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+        from sklearn.preprocessing import OrdinalEncoder
+
+        p = self.params
+        df = inputs["df"]
+        cols = [c for c in (p.columns or []) if c in df.columns]
+        if not cols:
+            cols = _categorical_columns(df)
+        if not cols:
+            return {"df": df}
+
+        encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+        codes = encoder.fit_transform(df[cols])
+
+        out = df.copy()
+        for i, col in enumerate(cols):
+            series = pd.Series(codes[:, i], index=df.index).astype("Int64")
+            out[col if p.replace else f"{col}_ordinal"] = series
+        return {"df": out}
+
+
+# --------------------------------------------------------------------------
+# Datetime: combine parts -> datetime / split datetime -> parts / resample
+# --------------------------------------------------------------------------
+
+#: Time components the combine / split nodes understand, coarse -> fine.
+_DT_COMPONENTS = [
+    "year", "quarter", "month", "week", "dayofyear", "day",
+    "hour", "minute", "second", "microsecond",
+]
+
+#: A few common target frequencies for the resample node's ``rule``.
+_RESAMPLE_RULES = ["YS", "QS", "MS", "W", "D", "h", "30min", "15min", "min", "s"]
+
+#: strptime patterns offered (non-binding) by the datetime nodes.
+_COMMON_DATETIME_FORMATS = [
+    "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d", "ISO8601",
+]
+
+
+class CombineDatetimeParams(NodeParams):
+    """
+    Parameters for CombineDatetime.
+
+    Attributes:
+        mapping: JSON ``{component: column}`` -- link each time part
+            (year / month / day / hour / ...) to a dataframe column. A
+            single mapped column that is *text* is parsed whole (using
+            ``datetime_format``); several numeric columns are assembled.
+        datetime_format: strptime pattern, used only when the single
+            mapped source column is text.
+        output_column: Name of the produced datetime column.
+        replace: Drop the mapped source columns (default: keep them).
+    """
+
+    mapping: str = column_map_field(
+        keys=_DT_COMPONENTS,
+        default="{}",
+        description="Link each time component to a column (blank = unused).",
+    )
+    datetime_format: str = suggestions_field(
+        suggestions=_COMMON_DATETIME_FORMATS, default="",
+        description="strptime format for a single text source column.",
+    )
+    output_column: str = "datetime"
+    replace: bool = False
+
+
+@register_node
+class CombineDatetime(Node):
+    """Build a datetime column from separate time-component columns."""
+
+    node_type = "combine_datetime"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = CombineDatetimeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import json
+
+        import pandas as pd
+        from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
+
+        p = self.params
+        df = inputs["df"]
+        try:
+            raw = json.loads(p.mapping or "{}")
+        except (ValueError, TypeError):
+            raw = {}
+        mapping = {
+            k: v
+            for k, v in raw.items()
+            if k in _DT_COMPONENTS and isinstance(v, str) and v in df.columns
+        }
+        if not mapping:
+            return {"df": df}
+
+        out = df.copy()
+        out_name = p.output_column or "datetime"
+
+        # Single non-numeric source column -> parse it directly.
+        if len(mapping) == 1:
+            (col,) = mapping.values()
+            if is_datetime64_any_dtype(df[col]):
+                result = df[col]
+            elif not is_numeric_dtype(df[col]):
+                result = pd.to_datetime(
+                    df[col], format=(p.datetime_format or None), errors="coerce"
+                )
+            else:
+                result = self._assemble(df, mapping)
+        else:
+            result = self._assemble(df, mapping)
+
+        out[out_name] = result
+        if p.replace:
+            drop = [c for c in set(mapping.values()) if c != out_name and c in out.columns]
+            out = out.drop(columns=drop)
+        return {"df": out}
+
+    @staticmethod
+    def _assemble(df: Any, mapping: dict[str, str]) -> Any:
+        import pandas as pd
+
+        def num(component: str) -> Any:
+            return pd.to_numeric(df[mapping[component]], errors="coerce")
+
+        if "year" not in mapping:
+            raise ValueError(
+                "combine_datetime: assembling from parts needs at least a 'year' column."
+            )
+        year = num("year").round().astype("Int64")
+
+        if "dayofyear" in mapping:
+            doy = num("dayofyear").round()
+            base = pd.to_datetime(
+                {"year": year, "month": 1, "day": 1}
+            ) + pd.to_timedelta(doy - 1, unit="D")
+        elif "week" in mapping:
+            week = num("week").round().astype("Int64")
+            base = pd.to_datetime(
+                year.astype(str) + "-W" + week.astype(str).str.zfill(2) + "-1",
+                format="%G-W%V-%u", errors="coerce",
+            )
+        else:
+            month = (
+                (num("quarter").round() - 1) * 3 + 1
+                if "quarter" in mapping and "month" not in mapping
+                else (num("month") if "month" in mapping else pd.Series(1, index=df.index))
+            )
+            day = num("day") if "day" in mapping else pd.Series(1, index=df.index)
+            base = pd.to_datetime(
+                {
+                    "year": year,
+                    "month": month.round().astype("Int64"),
+                    "day": day.round().astype("Int64"),
+                },
+                errors="coerce",
+            )
+
+        seconds = pd.Series(0.0, index=df.index)
+        for component, factor in (("hour", 3600), ("minute", 60), ("second", 1)):
+            if component in mapping:
+                seconds = seconds + num(component).fillna(0) * factor
+        result = base + pd.to_timedelta(seconds, unit="s")
+        if "microsecond" in mapping:
+            result = result + pd.to_timedelta(num("microsecond").fillna(0), unit="us")
+        return result
+
+
+_SPLIT_PARTS = [
+    "year", "quarter", "month", "week", "dayofyear", "day", "dayofweek",
+    "hour", "minute", "second",
+]
+
+
+class SplitDatetimeParams(NodeParams):
+    """
+    Parameters for SplitDatetime.
+
+    Attributes:
+        column: The datetime column to break apart.
+        mode: "components" adds one integer column per ticked part
+            (``<column>_<part>``); "string" adds one text column
+            ``<column>_str`` via strftime.
+        parts: Which components to extract (components mode).
+        datetime_format: strftime pattern (string mode).
+        replace: Drop the source datetime column (default: keep it).
+    """
+
+    column: str = column_field(dtypes=("datetime",))
+    mode: Literal["components", "string"] = "components"
+    parts: list[str] | None = checkbox_list_field(
+        choices=_SPLIT_PARTS, default=["year", "month", "day"],
+        visible_when=("mode", "components"),
+    )
+    datetime_format: str = visible_field(
+        "%Y-%m-%d", visible_when=("mode", "string")
+    )
+    replace: bool = False
+
+
+@register_node
+class SplitDatetime(Node):
+    """Break a datetime column into component columns (or a formatted string)."""
+
+    node_type = "split_datetime"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = SplitDatetimeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(f"split_datetime: column {p.column!r} is not in the data.")
+        series = pd.to_datetime(df[p.column], errors="coerce")
+        out = df.copy()
+
+        if p.mode == "string":
+            out[f"{p.column}_str"] = series.dt.strftime(p.datetime_format or "%Y-%m-%d")
+        else:
+            parts = [x for x in (p.parts or []) if x in _SPLIT_PARTS]
+            if not parts:
+                return {"df": df}
+            for part in parts:
+                if part == "week":
+                    values = series.dt.isocalendar().week
+                else:
+                    values = getattr(series.dt, part)
+                out[f"{p.column}_{part}"] = pd.Series(values, index=df.index).astype("Int64")
+
+        if p.replace:
+            out = out.drop(columns=[p.column])
+        return {"df": out}
+
+
+class ResampleDatetimeParams(NodeParams):
+    """
+    Parameters for ResampleDatetime.
+
+    Attributes:
+        datetime_column: The datetime column used as the resampling key.
+        rule: Target frequency (pandas offset alias, e.g. ``D`` / ``W``
+            / ``MS`` / ``h`` / ``15min``).
+        agg: Down-sampling aggregation applied to numeric columns
+            (non-numeric columns take the first value in the bin).
+        fill: Up-sampling fill for the gaps a finer rule creates.
+    """
+
+    datetime_column: str = column_field(dtypes=("datetime",))
+    rule: str = suggestions_field(suggestions=_RESAMPLE_RULES, default="D")
+    agg: Literal[
+        "mean", "sum", "median", "min", "max", "first", "last", "count", "ohlc"
+    ] = "mean"
+    fill: Literal[
+        "none", "ffill", "bfill", "interpolate_linear", "interpolate_time", "nearest"
+    ] = "none"
+
+
+@register_node
+class ResampleDatetime(Node):
+    """Resample the rows to a target frequency on a datetime key column."""
+
+    node_type = "resample_datetime"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = ResampleDatetimeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.datetime_column not in df.columns:
+            raise ValueError(
+                f"resample_datetime: column {p.datetime_column!r} is not in the data."
+            )
+        rule = p.rule or "D"
+        key = pd.to_datetime(df[p.datetime_column], errors="coerce")
+        work = df.drop(columns=[p.datetime_column]).copy()
+        work.index = pd.DatetimeIndex(key)
+        work = work[work.index.notna()].sort_index()
+        if work.empty:
+            raise ValueError("resample_datetime: no valid datetime values to resample on.")
+
+        numeric = work.select_dtypes(include="number")
+        other = work.drop(columns=list(numeric.columns))
+
+        if p.agg in ("first", "last", "count"):
+            res = getattr(work.resample(rule), p.agg)()
+        elif p.agg == "ohlc":
+            ohlc = numeric.resample(rule).ohlc()
+            ohlc.columns = [f"{col}_{field}" for col, field in ohlc.columns]
+            res = pd.concat([ohlc, other.resample(rule).first()], axis=1)
+        else:
+            agg_numeric = getattr(numeric.resample(rule), p.agg)()
+            res = pd.concat([agg_numeric, other.resample(rule).first()], axis=1)
+
+        if p.fill == "ffill":
+            res = res.ffill()
+        elif p.fill == "bfill":
+            res = res.bfill()
+        elif p.fill == "nearest":
+            res = res.interpolate(method="nearest")
+        elif p.fill == "interpolate_linear":
+            res = res.interpolate(method="linear")
+        elif p.fill == "interpolate_time":
+            res = res.interpolate(method="time")
+
+        return {"df": res.reset_index(names=p.datetime_column)}

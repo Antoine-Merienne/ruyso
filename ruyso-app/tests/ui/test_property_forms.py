@@ -99,18 +99,38 @@ def test_grapher_field_specs_carry_the_new_markers():
     assert specs["color_by"].column_allow_none is True
     assert specs["color_by"].is_column_list is False
 
-    assert specs["single_color"].color_choices  # colour picker widget
-    assert specs["single_color"].visible_when == ("color_by", "")
-
+    # colour channel: mark_color shown only while colour-by is empty
+    assert specs["mark_color"].color_choices  # colour picker widget
+    assert specs["mark_color"].visible_when_unset == "color_by"
     assert specs["colormap"].reactive_choice["options"] == "colormaps"
     assert specs["colormap"].visible_when_set == "color_by"
-
-    assert specs["point_size"].visible_when == ("kind", "scatter")
-    assert specs["show_legend"].visible_when_set == "color_by"
 
     # bar_mode has BOTH conditions -> shown only for a coloured bar chart
     assert specs["bar_mode"].visible_when == ("kind", "bar")
     assert specs["bar_mode"].visible_when_set == "color_by"
+
+    # shape channel: fixed shape fields show only while shape-by is empty
+    assert specs["shape_by"].column_allow_none is True
+    assert specs["marker_shape"].visible_when == ("kind", "scatter")
+    assert specs["marker_shape"].visible_when_unset == "shape_by"
+    assert specs["line_style"].visible_when_unset == "shape_by"
+    assert specs["bar_hatch"].visible_when_unset == "shape_by"
+    assert specs["shape_map"].visible_when_kind == (
+        "shape_by", ("categorical", "boolean")
+    )
+
+    # size channel: fixed size hidden and the range shown while size-by is set
+    assert specs["point_size"].visible_when == ("kind", "scatter")
+    assert specs["point_size"].visible_when_unset == "size_by"
+    assert specs["size_min"].visible_when == ("kind", "scatter")
+    assert specs["size_min"].visible_when_set == "size_by"
+    assert specs["width_max"].visible_when == ("kind", "line")
+    assert specs["width_max"].visible_when_set == "size_by"
+
+    # alpha channel: bounded-float sliders
+    assert specs["alpha"].unit_interval == {"lo": 0.0, "hi": 1.0, "step": 0.01}
+    assert specs["alpha"].visible_when_unset == "alpha_by"
+    assert specs["alpha_min"].visible_when_set == "alpha_by"
 
 
 def test_bin_field_specs_carry_visible_unless():

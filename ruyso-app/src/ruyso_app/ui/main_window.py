@@ -62,7 +62,7 @@ _MACRO_SHORTCUT_LETTER: dict[str, str] = {
     "loading": "L",
     "transform": "T",
     "model": "M",
-    "statistical_test": "S",
+    "statistics": "S",
     "grapher": "G",
     "export": "E",
 }

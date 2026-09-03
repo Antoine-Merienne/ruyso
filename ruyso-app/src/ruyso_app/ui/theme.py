@@ -30,12 +30,12 @@ MACRO_TYPE_LABELS: dict[str, str] = {
     "loading": "Data Loader",
     "transform": "Transformer",
     "model": "Model",
-    "statistical_test": "Statistical Test",
+    "statistics": "Statistics",
     "grapher": "Grapher",
     "export": "Exporter",
 }
 
-PREVIEW_MACRO_TYPES = frozenset({"grapher", "statistical_test"})
+PREVIEW_MACRO_TYPES = frozenset({"grapher"})
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ _MACRO_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "loading": (31, 119, 180),
     "transform": (255, 127, 14),
     "model": (44, 160, 44),
-    "statistical_test": (127, 127, 127),
+    "statistics": (127, 127, 127),
     "grapher": (148, 103, 189),
     "export": (140, 86, 75),
 }

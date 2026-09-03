@@ -439,29 +439,29 @@ def test_grapher_color_by_is_a_single_picker_with_a_none_clear_row(qapp):
     assert plot.get_property("color_by") == ""
 
 
-def test_grapher_single_colour_field_has_a_choose_button(qapp):
+def test_grapher_mark_colour_field_has_a_choose_button(qapp):
     from PySide6.QtWidgets import QPushButton
 
     panel, _plot = _grapher(qapp, None)
 
-    combo = panel._field_widgets["single_color"]._combo
+    combo = panel._field_widgets["mark_color"]._combo
     assert combo.currentText() == "darkblue"
     assert "darkblue" in [combo.itemText(i) for i in range(combo.count())]
-    row = panel._field_widgets["single_color"]
+    row = panel._field_widgets["mark_color"]
     assert any(b.text() == "Choose..." for b in row.findChildren(QPushButton))
 
 
 def test_grapher_colour_section_visibility_follows_color_by(qapp):
     panel, _plot = _grapher(qapp, {"team": "categorical"})
     rows = _rows(panel)
-    # nothing chosen -> single colour visible, colormap + legend hidden
-    assert rows["single color"] is True
-    assert rows["colormap"] is False and rows["show legend"] is False
+    # nothing chosen -> fixed mark colour visible, colormap hidden
+    assert rows["mark color"] is True
+    assert rows["colormap"] is False
 
     panel._field_widgets["color_by"]._combo.setCurrentText("team")
     rows = _rows(panel)
-    assert rows["single color"] is False
-    assert rows["colormap"] is True and rows["show legend"] is True
+    assert rows["mark color"] is False
+    assert rows["colormap"] is True
 
 
 def test_grapher_colormap_options_follow_the_color_by_column_type(qapp):
@@ -484,6 +484,55 @@ def test_grapher_mark_size_row_follows_the_kind(qapp):
     panel._field_widgets["kind"].setCurrentText("line")
     rows = _rows(panel)
     assert rows["point size"] is False and rows["line width"] is True
+
+
+def test_grapher_shape_channel_adapts_to_the_shape_by_column(qapp):
+    panel, _plot = _grapher(qapp, {"team": "categorical", "score": "numeric"})
+    rows = _rows(panel)
+    # scatter + no shape-by -> fixed marker shape shown, shape map hidden
+    assert rows["marker shape"] is True and rows["shape map"] is False
+
+    # discrete shape-by -> the shape-series ("shape map") picker
+    panel._field_widgets["shape_by"]._combo.setCurrentText("team")
+    rows = _rows(panel)
+    assert rows["marker shape"] is False and rows["shape map"] is True
+
+    # continuous shape-by -> neither (shape keeps its fixed value); a note
+    panel._field_widgets["shape_by"]._combo.setCurrentText("score")
+    rows = _rows(panel)
+    assert rows["marker shape"] is False and rows["shape map"] is False
+
+
+def test_grapher_size_channel_adapts_to_the_size_by_column_and_kind(qapp):
+    panel, _plot = _grapher(qapp, {"team": "categorical", "score": "numeric"})
+    rows = _rows(panel)
+    assert rows["point size"] is True and rows["size min"] is False
+
+    panel._field_widgets["size_by"]._combo.setCurrentText("score")
+    rows = _rows(panel)
+    assert rows["point size"] is False  # fixed size gives way to the range
+    assert rows["size min"] is True and rows["size max"] is True
+
+    panel._field_widgets["kind"].setCurrentText("line")
+    rows = _rows(panel)
+    assert rows["size min"] is False and rows["width min"] is True
+
+
+def test_grapher_alpha_channel_uses_sliders(qapp):
+    from PySide6.QtWidgets import QSlider
+
+    panel, plot = _grapher(qapp, {"team": "categorical"})
+    rows = _rows(panel)
+    assert rows["alpha"] is True and rows["alpha min"] is False
+
+    slider = panel._field_widgets["alpha"].findChild(QSlider)
+    assert slider is not None
+    slider.setValue(slider.value() - 10)  # nudge the fixed alpha down
+    assert plot.get_property("alpha") < 0.9
+
+    panel._field_widgets["alpha_by"]._combo.setCurrentText("team")
+    rows = _rows(panel)
+    assert rows["alpha"] is False and rows["alpha min"] is True and rows["alpha max"] is True
 
 
 def test_grapher_colormap_survives_a_form_rebuild(qapp):
@@ -653,3 +702,111 @@ def test_rename_categories_table_reacts_to_the_chosen_column(qapp):
     node.set_property("column", "team")
     panel._on_controller_changed("column")
     assert len(scroll.findChildren(QLineEdit)) == 3
+
+
+# -- model nodes: the classifier/regressor task toggle ----------------
+
+
+def test_model_task_toggle_switches_the_criterion_and_class_weight_rows(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("random_forest_fit"), name="rf")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    rows = _rows(panel)
+    assert rows["classifier criterion"] is True and rows["regressor criterion"] is False
+    assert rows["class weight"] is True  # classifier-only
+
+    panel._field_widgets["task"].setCurrentText("regressor")
+    rows = _rows(panel)
+    assert rows["classifier criterion"] is False and rows["regressor criterion"] is True
+    assert rows["class weight"] is False
+
+
+def test_box_plot_swarm_only_rows_follow_the_kind(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("box_plot"), name="bp")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"team": "categorical", "v": "numeric"})
+
+    rows = _rows(panel)
+    assert rows["point size"] is False and rows["swarm max points"] is False
+
+    panel._field_widgets["kind"].setCurrentText("swarm")
+    rows = _rows(panel)
+    assert rows["point size"] is True and rows["swarm max points"] is True
+
+
+# -- unit-interval slider widget -------------------------------------
+
+
+def test_ratio_field_renders_a_slider_that_writes_a_float(qapp):
+    from PySide6.QtWidgets import QSlider
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("train_test_split"), name="split")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    row = panel._field_widgets["test_size"]
+    slider = row.findChild(QSlider)
+    assert slider is not None
+    # default 0.2 on a 0.05..0.95 / 0.01 range
+    assert node.get_property("test_size") == 0.2
+    slider.setValue(slider.value() + 5)
+    assert abs(node.get_property("test_size") - 0.25) < 1e-6
+    assert isinstance(node.get_property("test_size"), float)
+
+
+def test_gradient_boosting_has_sliders_for_subsample_and_validation_fraction(qapp):
+    from PySide6.QtWidgets import QSlider
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("gradient_boosting_fit"), name="gb")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    for field in ("subsample", "validation_fraction"):
+        assert panel._field_widgets[field].findChild(QSlider) is not None
+
+
+# -- column-map table widget (combine_datetime's `mapping`) -------------
+
+
+def test_combine_datetime_mapping_is_a_component_to_column_table(qapp):
+    from PySide6.QtWidgets import QComboBox, QScrollArea
+    import json
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("combine_datetime"), name="cd")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"yr": "numeric", "mo": "numeric"})
+
+    scroll = panel._field_widgets["mapping"]
+    assert isinstance(scroll, QScrollArea)
+    combos = scroll.findChildren(QComboBox)
+    assert len(combos) == 10  # one row per time component
+    # first column of a row is the blank "no column" entry
+    assert combos[0].itemText(0) == "—"
+    assert [combos[0].itemText(i) for i in range(1, combos[0].count())] == ["mo", "yr"]
+
+    combos[0].setCurrentText("yr")  # the "year" row
+    assert json.loads(node.get_property("mapping")) == {"year": "yr"}
+
+
+def test_column_map_widget_repopulates_and_keeps_selection(qapp):
+    from PySide6.QtWidgets import QComboBox
+    import json
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("combine_datetime"), name="cd")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"yr": "numeric"})
+    combos = panel._field_widgets["mapping"].findChildren(QComboBox)
+    combos[0].setCurrentText("yr")
+
+    panel.set_input_columns({"yr": "numeric", "when": "numeric"})
+    combos = panel._field_widgets["mapping"].findChildren(QComboBox)
+    assert [combos[0].itemText(i) for i in range(1, combos[0].count())] == ["when", "yr"]
+    assert combos[0].currentText() == "yr"  # prior pick survived the refresh
+    assert json.loads(node.get_property("mapping")) == {"year": "yr"}

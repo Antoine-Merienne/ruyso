@@ -86,7 +86,7 @@ def test_scheduler_runs_full_pipeline_and_wires_outputs_correctly(
     # target = 2*x + 1 exactly -> coefficient ~2, intercept ~1.
     assert np.isclose(model.coef_[0], 2.0, atol=1e-6)
     assert np.isclose(model.intercept_, 1.0, atol=1e-6)
-    assert outputs["fit"]["score"] > 0.999
+    assert "score" not in outputs["fit"]  # fit nodes only output the model now
 
 
 def test_scheduler_rejects_invalid_graph_before_running_anything(no_cache_scheduler):

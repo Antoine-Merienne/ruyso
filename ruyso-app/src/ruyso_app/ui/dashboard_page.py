@@ -4,7 +4,7 @@ the exportable page, holding draggable/resizable figure, title and
 text blocks, plus the Options panel on the right.
 
 Figures and statistical-test results reach this canvas through the
-"add to dashboard" action on a grapher/statistical_test node (see the
+"add to dashboard" action on a grapher node (see the
 Pipeline tab); the person can also add title and free-text blocks by
 hand. The canvas is exported to PDF/PNG from a right-click "Exporter..."
 entry or the global "Dashboard" menu.

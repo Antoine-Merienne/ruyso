@@ -7,9 +7,8 @@ context menu with one entry per macro type, mirroring the top
 ``Node > New Node`` menu. Choosing a macro type calls back into
 ``MainWindow`` to run the two-step macro -> micro creation flow.
 
-A macro type with no registered concrete node yet (e.g.
-``statistical_test``) is shown but disabled, never omitted and never a
-crash.
+A macro type with no registered concrete node yet is shown but
+disabled, never omitted and never a crash.
 """
 
 from __future__ import annotations

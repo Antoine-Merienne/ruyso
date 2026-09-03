@@ -8,7 +8,7 @@ The codebase is split into three independently testable layers:
 
 | Layer | Package | Depends on | Status |
 |---|---|---|---|
-| 1. Node model | `ruyso_app.core`, `ruyso_app.nodes` | pydantic (+ the libs each node uses: pandas, geopandas, scikit-learn, matplotlib, seaborn) | done |
+| 1. Node model | `ruyso_app.core`, `ruyso_app.nodes` | pydantic (+ the libs each node uses: pandas, geopandas, scikit-learn, statsmodels, scipy, matplotlib, seaborn) | done |
 | 2. Execution engine | `ruyso_app.engine` | Layer 1, networkx, joblib | done |
 | 3. UI | `ruyso_app.ui` | Layers 1 & 2, PySide6, NodeGraphQt | done (beta) |
 
@@ -124,13 +124,13 @@ The UI is being reworked to match the `ruyso_ui_principles` mockups in
 phases. Decisions taken so far (spec section 8):
 
 - **Macro types & palette.** The six macro types are `loading`,
-  `transform`, `model`, `statistical_test`, `grapher`, `export`
-  (`viz` was split into `grapher` + `statistical_test`). Each maps to
-  one Matplotlib *tab10* color, identical in both themes so a node
-  stays recognizable across a theme toggle; the map is in
-  `theme._MACRO_TYPE_COLORS`. `statistical_test` has no concrete node
-  yet — its "New Node" entry is shown **disabled** rather than
-  omitted or crashing.
+  `transform`, `model`, `statistics`, `grapher`, `export` (`viz` was
+  split into `grapher` + `statistics`). Each maps to one Matplotlib
+  *tab10* color, identical in both themes so a node stays recognizable
+  across a theme toggle; the map is in `theme._MACRO_TYPE_COLORS`.
+  Every macro type now has at least one concrete node (a macro type
+  with none would show its "New Node" entry **disabled** rather than
+  omitted or crashing).
 - **Palette hex values.** Dark and light chrome palettes are the
   `DARK_THEME` / `LIGHT_THEME` dataclasses in `theme.py` (window,
   panel, text, border, accent, canvas-background values).
@@ -193,7 +193,12 @@ phases. Decisions taken so far (spec section 8):
   italic-grey **infer** entry for "let pandas guess". A `geodataframe`
   output may be wired into any node that expects a plain `dataframe`
   (a GeoDataFrame is one); the reverse is rejected by
-  `PipelineGraph.validate()`.
+  `PipelineGraph.validate()`. Alongside the file loaders,
+  **`example_data`** loads a bundled dataset with no file and no link —
+  a `dataset` dropdown of `sklearn/…` toy sets (iris, wine, …),
+  `statsmodels/…` datasets (longley, macrodata, sunspots, …) and
+  `seaborn/…` datasets (tips, penguins, … — these are fetched from the
+  web once and cached; a clear error is raised when offline).
 - **Transformer family.** `standard_scaler`; `drop_na` and `fill_na`
   (pick columns via a **tickbox list**; `drop_na` chooses `how` =
   any/all, `fill_na` a method — forward/backward fill, mean, median,
@@ -225,41 +230,156 @@ phases. Decisions taken so far (spec section 8):
   categorical column — the Options panel shows a table of the column's
   distinct values, each facing a "new name" box; blanks keep the old
   name, two old values mapped to one name merge; stored as a JSON map,
-  `core.params.category_map_field`); plus geo transforms
-  `geo_to_dataframe`, `dataframe_to_geo` and `reproject` (CRS from the
-  same suggestions dropdown as the datetime-format field). The reactive
-  behaviour is new Options-panel machinery: `core.params` markers
+  `core.params.category_map_field`); `one_hot_encode` (dummy columns
+  `<col>_<value>`, `drop_first` + replace-vs-keep-original) and
+  `ordinal_encode` (0-based integer codes, replace or add
+  `<col>_ordinal`) — both act on the ticked columns (empty = every
+  object/string/category column) and are fit per-DataFrame like
+  `standard_scaler`; `train_test_split` (moved here from *model* — one
+  DataFrame in; outputs in wiring order `X_train` / `y_train` /
+  `X_test` / `y_test` (X's are DataFrames, y's target Series), with
+  `shuffle` / `stratify`); `combine_datetime` (build a real datetime64
+  column from separate component columns — a **mapping table**, one row
+  per time part (year … microsecond) with a column dropdown each,
+  `core.params.column_map_field`; quarter → month, year+dayofyear and
+  year+ISO-week are handled; a lone text column is parsed with a
+  `datetime_format`; `output_column` name + a `replace` toggle to drop
+  the sources), `split_datetime` (the reverse — `mode` = `components`
+  (tickbox parts → `<col>_<part>` Int64 columns) or `string`
+  (`strftime` → `<col>_str`), with `replace`), and `resample_datetime`
+  (pick a datetime key column + a target `rule`, one downsample
+  aggregator — mean/sum/…/count/ohlc — for the numeric columns, and an
+  upsample `fill` — ffill / bfill / interpolate-linear / -time /
+  nearest; non-numeric columns take the first value; the key comes back
+  as a column); plus geo transforms `geo_to_dataframe`,
+  `dataframe_to_geo` and `reproject` (CRS from the same suggestions
+  dropdown as the datetime-format field). The reactive behaviour is
+  new Options-panel machinery: `core.params` markers
   (`reactive_choice_field`, `checkbox_list_field`, `category_map_field`,
-  `visible_field` / `visible_when=` / `visible_when_set=` /
-  `visible_unless=`) drive per-row visibility and dependent dropdowns
-  in `ui/options_panel.py`, with option lists in `ui/column_ops.py`.
-  The rename-categories table is fed by `column_spec.input_column_values`
-  (distinct values of the input's categorical columns).
+  `column_map_field`, `visible_field` / `visible_when=` /
+  `visible_when_set=` / `visible_unless=`) drive per-row visibility and
+  dependent dropdowns in `ui/options_panel.py`, with option lists in
+  `ui/column_ops.py`. The rename-categories table is fed by
+  `column_spec.input_column_values` (distinct values of the input's
+  categorical columns).
+- **Model family.** Every fit node has the same shape: inputs
+  `X_train` (dataframe), `y_train` (array), optional `X_test`/`y_test`
+  (carried alongside, unused by the fit itself); output `model` — the
+  fitted scikit-learn estimator object. Evaluation is done downstream
+  by `model_scores` / `residuals` / the model plots. `linear_regression_fit`,
+  `logistic_regression_fit`, `ridge_fit`, `lasso_fit`,
+  `elastic_net_fit`, `decision_tree_fit`, `random_forest_fit`,
+  `gradient_boosting_fit`, `adaboost_fit`, `svm_fit`, `knn_fit`,
+  `naive_bayes_fit`. Where an algorithm exists in both flavours the
+  node has a **`task`** dropdown (classifier / regressor) that selects
+  the estimator class; task-specific args (`class_weight`,
+  `classifier_criterion` vs `regressor_criterion`, `epsilon`, …) are
+  shown only for the matching task. The parameter forms expose every
+  constructor argument that maps onto an existing widget (int / float /
+  bool / dropdown); `nodes/models.py` `SklearnFitNode` filters the
+  chosen params against the estimator's signature and maps UI sentinels
+  back (`"none"` → `None`, `0` → `None` for `max_depth` / `n_jobs` /
+  `max_iter` / …).
+- **Model-consuming nodes** (`model` macro type, `nodes/model_ops.py`).
+  All take a fitted `model` port; the evaluation ones also take the
+  `X` (dataframe) + `y` (array) that `train_test_split` produces.
+  `predict` — `df` + `model` → the df with a `prediction` column
+  appended (and, for a classifier, a `probabilities` toggle adds one
+  `proba_<class>` column each); features are aligned to the model's
+  `feature_names_in_` when present, else positionally. `model_coeffs`
+  — `model` → a tidy `feature` / value DataFrame (`coef_` +
+  `intercept` row, one value column per class for multiclass; falls
+  back to `feature_importances_` for trees / forests). `model_scores`
+  — `model` + `X` + `y` → a `metric` / `value` DataFrame; a `task`
+  toggle picks the classification or regression metric set (tickboxes),
+  with an `average` for multiclass precision / recall / f1. `residuals`
+  — `model` + `X` + `y` → per-row `y_true` / `y_pred` / `residual`
+  (+ `std_residual`), regression only. The three DataFrame outputs are
+  browsable in the Table tab automatically.
+- **Model-visualization plots** (`grapher` macro type, in `nodes/viz.py`;
+  input `model` + `X` + `y`, output `figure`). `confusion_matrix_plot`
+  (`normalize` none/true/pred/all, colormap, annotate, colorbar);
+  `roc_curve_plot`, `precision_recall_plot`, `det_curve_plot` (binary
+  → one curve with the model colour + a chance line; multiclass →
+  one-vs-rest, a curve per class coloured from a qualitative colormap);
+  `calibration_curve_plot` (binary only — `n_bins`, `strategy`,
+  reference line); `learning_curve_plot` (`cv`, `n_points`, `scoring`,
+  std band or error bars — re-fits the model on growing subsets);
+  `qq_plot` (normal Q-Q of a regression model's residuals). Each has
+  the same axis / title / (where relevant) legend styling fields as the
+  other graphers and gets the on-canvas figure preview.
+- **Statistics family** (`statistics` macro type, `nodes/statistics.py`;
+  input `df`, output one or more result `df`s browsable in the Table
+  tab). One node per test family, each with a `test` dropdown:
+  `one_sample_test` (t / Wilcoxon), `independent_samples_test`
+  (t / Welch / Mann-Whitney / Kruskal / ANOVA / Brunner-Munzel /
+  rank-sums / median / KS), `paired_test` (t / Wilcoxon),
+  `correlation_test` (Pearson / Spearman / Kendall / point-biserial,
+  with CIs), `association_test` (χ² / G-test / Fisher, + Cramér's V),
+  `normality_test` (Shapiro / D'Agostino / Jarque-Bera /
+  Anderson-Darling / KS), `variance_test` (Levene / Bartlett /
+  Fligner), `resampling_test` (permutation mean-diff, bootstrap
+  mean/median CI — scipy `permutation_test` / `bootstrap`),
+  `multiple_testing` (FDR-BH/BY, Bonferroni/Holm/Šidák on a p-value
+  column → adjusted p + `reject`; or Fisher/Stouffer meta-combination),
+  `timeseries_test` (ADF / KPSS stationarity, Ljung-Box,
+  Durbin-Watson, Granger causality — statsmodels). Plus **`regression`**
+  — statsmodels inference: `model` = OLS / Logit / Poisson-GLM /
+  Probit / RLM, a `y_column` picker + `x_columns` tickbox list,
+  `add_intercept`, robust SEs (OLS), a confidence level; two outputs,
+  a `coeffs` table (term, coef, std_err, t/z, p-value, CI) and a
+  `residuals` DataFrame (row, fitted, residual). Classical tests are
+  powered by scipy; time-series and regressions by statsmodels (both
+  are hard dependencies now).
 - **Grapher (`matplotlib_plot`).** Draws with a local
   `seaborn-v0_8-whitegrid` style context (never global), a `darkblue`
   default colour, slightly smaller markers/lines and a top/right
-  despine. The Options panel exposes: `x` / `y` / `kind` / `title`; an
-  optional **colour by** column picker with an italic-grey **None**
-  row — while it is None a colour field (a common-colour dropdown plus
-  a *Choose...* colour dialog, `core.params.color_field`) is shown, and
-  while it names a column a **colormap** picker is shown instead whose
-  options adapt to the column type (qualitative maps for
-  text/category/bool, sequential/diverging for numeric/datetime — the
-  `colormaps` generator in `ui/column_ops.py`); marker size / line
-  width (whichever fits `kind`); a **bar mode** (dodge / stack / layer)
-  shown only for a bar chart coloured by a column; axis grid / frame /
-  label overrides / font size / log scales / figure size; title font
-  size + bold + italic; and legend show / title / location / font size
-  (shown only while colouring by a column). Colouring by a categorical
-  column draws a legend in a lightly translucent box; by a continuous
-  column, a colorbar. (A row may carry any mix of `visible_when=`,
-  `visible_when_set=` and `visible_unless=`, and then shows only while
-  *all* of them hold.)
+  despine. **Four independent visual channels**, each a fixed value
+  *plus* an optional "... by `<column>`" picker (italic-grey **None**
+  row), all following the same logic:
+  - **colour** — `mark_color` (common-colour dropdown + *Choose...*
+    dialog) / `color_by` (+ a `colormap` whose options adapt: qualitative
+    for text/category/bool, sequential/diverging for numeric/datetime,
+    the `colormaps` generator in `ui/column_ops.py`);
+  - **shape** — `marker_shape` / `line_style` / `bar_hatch` (per `kind`)
+    / `shape_by`; a *discrete* shape-by column reveals a **shape map**
+    picker (`assorted` / `geometric` / `bold` / `minimal` — a named
+    series of markers/linestyles/hatches, with an on-figure note past
+    its length); a *continuous* one keeps the fixed shape (noted);
+  - **size** — `point_size` / `line_width` (per `kind`) / `size_by`
+    (+ `size_min`/`size_max` for scatter, `width_min`/`width_max` for
+    lines); works for discrete (stepped) and continuous (interpolated);
+  - **alpha** — `alpha` / `alpha_by` (+ `alpha_min`/`alpha_max`).
+
+  The fixed field shows while its "by" picker is empty
+  (`visible_when_unset=`); the map/range fields show once it names a
+  column (`visible_when_set=` / `visible_when_kind=("shape_by", kinds)`
+  for the shape/size split). Shape and size are fully independent — you
+  can size-by a column while picking a fixed marker, or shape-by a
+  column at a fixed size. Also: a **bar mode** (dodge / stack / layer)
+  for a coloured bar chart; axis grid / frame / label overrides / font
+  size / log scales / figure size; title font size + bold + italic;
+  legend show / title / location / font size. Colouring by a
+  categorical column draws a legend in a translucent box; by a
+  continuous column, a colorbar; colour-by and shape-by on *different*
+  columns get two legends (same column → one combined legend of
+  coloured shapes). (A row may carry any mix of `visible_when=`,
+  `visible_when_set=`, `visible_when_unset=`, `visible_when_kind=` and
+  `visible_unless=`, and shows only while *all* hold. Ratio / fraction
+  floats — `test_size`, `subsample`, `l1_ratio`, `alpha`, … — use
+  `core.params.unit_interval_field`, rendered as a 0→1 slider.)
+- **`table_viewer`** (grapher). Renders a *small* DataFrame as a table
+  image (matplotlib `ax.table`, no LaTeX needed) that previews and
+  exports like any figure: `decimals` rounding for numeric columns,
+  `max_rows` / `max_cols` truncation (with a note), header fill colour,
+  font size, row height.
 - **More grapher nodes** (seaborn-backed, same styling / colour-by
-  controls). `box_plot` — box or violin of a numeric column across a
-  categorical one, `orientation` swaps the axes, `color_by` splits each
-  category into hue sub-groups (categorical only — a continuous column
-  raises). `histogram_plot` — distribution of one numeric column;
+  controls). `box_plot` — a numeric column across a categorical one,
+  `kind` = box / violin / boxen / swarm (seaborn's catplot family);
+  `orientation` swaps the axes, `color_by` splits each category into
+  hue sub-groups (categorical only — a continuous column raises); the
+  swarm kind adds a `point_size` and, above `swarm_max_points` rows,
+  draws a seeded random subsample (noted on the figure). `histogram_plot` — distribution of one numeric column;
   `mode` = histogram / kde / both (`bins` + `stat` hidden for pure
   KDE), `color_by` overlays one distribution per category with
   `multiple` = layer / stack / dodge. `heatmap_plot` — categorical ×
@@ -268,8 +388,7 @@ phases. Decisions taken so far (spec section 8):
   residuals from independence, with Cramér's V in the title).
 
 Still to come: the Dashboard tab (figure/title/text blocks, "add to
-dashboard", PDF/PNG export); the statistical-test node type and its
-preview.
+dashboard", PDF/PNG export).
 
 > Packaging the app into a standalone executable (PyInstaller/Nuitka)
 > is intentionally not set up yet — planned for once more features

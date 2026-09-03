@@ -23,8 +23,11 @@ Every helper stashes a small marker dict in the field's
 * *visible when* (any helper's ``visible_when=`` argument) -- the field
   is only shown while another field holds a given value;
   ``visible_when_set=`` shows it while another field holds any
-  non-empty value; ``visible_unless=`` shows it while another field
-  does *not* hold a given value. Conditions combine with AND.
+  non-empty value; ``visible_when_unset=`` shows it while another field
+  is empty; ``visible_unless=`` shows it while another field does *not*
+  hold a given value; ``visible_when_kind=(field, kinds)`` shows it
+  while the column named by ``field`` has one of ``kinds`` (or the
+  kind is not known yet). Conditions combine with AND.
 """
 
 from __future__ import annotations
@@ -40,8 +43,12 @@ COLOR_FIELD_KEY = "ruyso_color_field"
 REACTIVE_CHOICE_KEY = "ruyso_reactive_choice"
 CHECKBOX_LIST_KEY = "ruyso_checkbox_list"
 CATEGORY_MAP_KEY = "ruyso_category_map"
+COLUMN_MAP_KEY = "ruyso_column_map"
+UNIT_INTERVAL_KEY = "ruyso_unit_interval"
 VISIBLE_WHEN_KEY = "ruyso_visible_when"
 VISIBLE_WHEN_SET_KEY = "ruyso_visible_when_set"
+VISIBLE_WHEN_UNSET_KEY = "ruyso_visible_when_unset"
+VISIBLE_WHEN_KIND_KEY = "ruyso_visible_when_kind"
 VISIBLE_UNLESS_KEY = "ruyso_visible_unless"
 
 #: Accepted values for a column reference's ``dtypes`` list. ``"any"``
@@ -64,6 +71,8 @@ def _visible_markers(
     visible_when: tuple[str, str] | None,
     visible_when_set: str | None,
     visible_unless: tuple[str, str] | None = None,
+    visible_when_unset: str | None = None,
+    visible_when_kind: tuple[str, tuple[str, ...]] | None = None,
 ) -> dict | None:
     marker: dict[str, Any] = {}
     if visible_when is not None:
@@ -71,10 +80,28 @@ def _visible_markers(
         marker[VISIBLE_WHEN_KEY] = {"field": field, "equals": equals}
     if visible_when_set is not None:
         marker[VISIBLE_WHEN_SET_KEY] = {"field": visible_when_set}
+    if visible_when_unset is not None:
+        marker[VISIBLE_WHEN_UNSET_KEY] = {"field": visible_when_unset}
+    if visible_when_kind is not None:
+        field, kinds = visible_when_kind
+        marker[VISIBLE_WHEN_KIND_KEY] = {"field": field, "kinds": list(kinds)}
     if visible_unless is not None:
         field, equals = visible_unless
         marker[VISIBLE_UNLESS_KEY] = {"field": field, "equals": equals}
     return marker or None
+
+
+#: Every field helper accepts this set of visibility conditions as
+#: keyword arguments; they are popped out of ``**field_kwargs`` here so
+#: pydantic's ``Field`` never sees them.
+_VISIBLE_KEYS = (
+    "visible_when", "visible_when_set", "visible_unless",
+    "visible_when_unset", "visible_when_kind",
+)
+
+
+def _pop_visible(field_kwargs: dict[str, Any]) -> dict | None:
+    return _visible_markers(*(field_kwargs.pop(key, None) for key in _VISIBLE_KEYS))
 
 
 def column_field(
@@ -83,9 +110,6 @@ def column_field(
     default: Any = ...,
     description: str | None = None,
     allow_none: bool = False,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """Declare a parameter that names one or more input-DataFrame columns.
@@ -99,7 +123,7 @@ def column_field(
         raise ValueError(f"Unknown column dtype kind(s): {sorted(unknown)}")
     extra = _merge(
         {COLUMN_REF_KEY: {"dtypes": list(dtypes), "allow_none": bool(allow_none)}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
+        _pop_visible(field_kwargs),
     )
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
@@ -109,16 +133,10 @@ def suggestions_field(
     suggestions: list[str],
     default: Any = ...,
     description: str | None = None,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """Declare a free-text string parameter with a dropdown of suggested values."""
-    extra = _merge(
-        {SUGGESTIONS_KEY: {"values": list(suggestions)}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
-    )
+    extra = _merge({SUGGESTIONS_KEY: {"values": list(suggestions)}}, _pop_visible(field_kwargs))
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
 
@@ -127,9 +145,6 @@ def color_field(
     suggestions: list[str],
     default: Any = ...,
     description: str | None = None,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """Declare a colour parameter: a suggestions dropdown of common
@@ -137,9 +152,27 @@ def color_field(
     dialog. Any matplotlib colour string (name or ``#rrggbb``) is
     accepted as the value.
     """
+    extra = _merge({COLOR_FIELD_KEY: {"values": list(suggestions)}}, _pop_visible(field_kwargs))
+    return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
+
+
+def unit_interval_field(
+    default: float = 0.5,
+    *,
+    lo: float = 0.0,
+    hi: float = 1.0,
+    step: float = 0.01,
+    description: str | None = None,
+    **field_kwargs: Any,
+) -> Any:
+    """Declare a bounded ``float`` edited with a slider (``lo``..``hi``).
+
+    Use for ratios / fractions / proportions. The value still
+    round-trips as a plain float; only the widget changes.
+    """
     extra = _merge(
-        {COLOR_FIELD_KEY: {"values": list(suggestions)}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
+        {UNIT_INTERVAL_KEY: {"lo": float(lo), "hi": float(hi), "step": float(step)}},
+        _pop_visible(field_kwargs),
     )
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
@@ -150,9 +183,6 @@ def reactive_choice_field(
     depends_on: str,
     default: Any = ...,
     description: str | None = None,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """
@@ -168,7 +198,7 @@ def reactive_choice_field(
         raise ValueError(f"Unknown reactive-choice generator {options!r}")
     extra = _merge(
         {REACTIVE_CHOICE_KEY: {"options": options, "depends_on": depends_on}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
+        _pop_visible(field_kwargs),
     )
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
@@ -179,9 +209,6 @@ def checkbox_list_field(
     choices: list[str] | None = None,
     default: Any = None,
     description: str | None = None,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """
@@ -193,7 +220,7 @@ def checkbox_list_field(
     """
     extra = _merge(
         {CHECKBOX_LIST_KEY: {"source": source, "choices": list(choices) if choices else None}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
+        _pop_visible(field_kwargs),
     )
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
@@ -203,9 +230,6 @@ def category_map_field(
     column: str,
     default: Any = "{}",
     description: str | None = None,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     **field_kwargs: Any,
 ) -> Any:
     """
@@ -216,9 +240,24 @@ def category_map_field(
         column: Name of the sibling field naming the column whose
             distinct input-data values fill the table's left column.
     """
+    extra = _merge({CATEGORY_MAP_KEY: {"column": column}}, _pop_visible(field_kwargs))
+    return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
+
+
+def column_map_field(
+    *,
+    keys: list[str],
+    default: Any = "{}",
+    description: str | None = None,
+    **field_kwargs: Any,
+) -> Any:
+    """
+    Declare a ``{key: column name}`` mapping stored as a JSON string and
+    edited as a table: one fixed ``keys`` row each, with a dropdown of
+    the input DataFrame's columns on the right (blank = unmapped).
+    """
     extra = _merge(
-        {CATEGORY_MAP_KEY: {"column": column}},
-        _visible_markers(visible_when, visible_when_set, visible_unless),
+        {COLUMN_MAP_KEY: {"keys": list(keys)}}, _pop_visible(field_kwargs)
     )
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
@@ -226,27 +265,20 @@ def category_map_field(
 def visible_field(
     default: Any = ...,
     *,
-    visible_when: tuple[str, str] | None = None,
-    visible_when_set: str | None = None,
-    visible_unless: tuple[str, str] | None = None,
     description: str | None = None,
     **field_kwargs: Any,
 ) -> Any:
-    """A plain field (any annotation) shown only while another field
-    holds ``visible_when``'s value / (``visible_when_set``) holds any
-    non-empty value / (``visible_unless``) does not hold a value.
-    Conditions combine with AND.
+    """A plain field (any annotation) shown only while its
+    ``visible_when`` / ``visible_when_set`` / ``visible_when_unset`` /
+    ``visible_when_kind`` / ``visible_unless`` conditions all hold (AND).
     """
-    if visible_when is None and visible_when_set is None and visible_unless is None:
+    marker = _pop_visible(field_kwargs)
+    if marker is None:
         raise ValueError(
-            "visible_field needs visible_when=, visible_when_set= or visible_unless="
+            "visible_field needs visible_when=, visible_when_set=, "
+            "visible_when_unset=, visible_when_kind= or visible_unless="
         )
-    return Field(
-        default=default,
-        description=description,
-        json_schema_extra=_visible_markers(visible_when, visible_when_set, visible_unless),
-        **field_kwargs,
-    )
+    return Field(default=default, description=description, json_schema_extra=marker, **field_kwargs)
 
 
 # -- readers (used by ui.property_forms) --------------------------------
@@ -294,6 +326,16 @@ def category_map_spec(field_info: FieldInfo) -> dict | None:
     return dict(marker) if marker is not None else None
 
 
+def column_map_spec(field_info: FieldInfo) -> dict | None:
+    marker = _marker(field_info, COLUMN_MAP_KEY)
+    return dict(marker) if marker is not None else None
+
+
+def unit_interval_spec(field_info: FieldInfo) -> dict | None:
+    marker = _marker(field_info, UNIT_INTERVAL_KEY)
+    return dict(marker) if marker is not None else None
+
+
 def visible_when(field_info: FieldInfo) -> tuple[str, str] | None:
     marker = _marker(field_info, VISIBLE_WHEN_KEY)
     return (marker["field"], marker["equals"]) if marker is not None else None
@@ -302,6 +344,16 @@ def visible_when(field_info: FieldInfo) -> tuple[str, str] | None:
 def visible_when_set(field_info: FieldInfo) -> str | None:
     marker = _marker(field_info, VISIBLE_WHEN_SET_KEY)
     return marker["field"] if marker is not None else None
+
+
+def visible_when_unset(field_info: FieldInfo) -> str | None:
+    marker = _marker(field_info, VISIBLE_WHEN_UNSET_KEY)
+    return marker["field"] if marker is not None else None
+
+
+def visible_when_kind(field_info: FieldInfo) -> tuple[str, tuple[str, ...]] | None:
+    marker = _marker(field_info, VISIBLE_WHEN_KIND_KEY)
+    return (marker["field"], tuple(marker["kinds"])) if marker is not None else None
 
 
 def visible_unless(field_info: FieldInfo) -> tuple[str, str] | None:

@@ -102,7 +102,7 @@ def test_running_generated_script_reproduces_scheduler_output(tmp_path, sample_c
 
     scheduler = PipelineScheduler(memory=joblib.Memory(location=None))
     expected = scheduler.run(graph)
-    expected_score = expected["fit"]["score"]
+    expected_coef = float(expected["fit"]["model"].coef_[0])
 
     script_path = tmp_path / "exported_pipeline.py"
     save_script(graph, script_path, source_description="test graph")
@@ -115,9 +115,9 @@ def test_running_generated_script_reproduces_scheduler_output(tmp_path, sample_c
     )
 
     assert result.returncode == 0, result.stderr
-    assert "[fit] score = " in result.stdout
-    printed_score = float(result.stdout.split("[fit] score = ")[1].splitlines()[0])
-    assert printed_score == pytest.approx(expected_score, rel=1e-9)
+    # the terminal "fit" node prints its "model" output -> a LinearRegression
+    assert "[fit] model = LinearRegression(" in result.stdout
+    assert expected_coef == pytest.approx(2.0, rel=1e-6)
 
 
 def test_sanitizes_node_ids_that_are_not_valid_identifiers():

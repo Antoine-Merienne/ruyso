@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2",
     "pandas",
     "scikit-learn",
+    "statsmodels",
     "matplotlib",
     "seaborn>=0.13",
     "networkx",

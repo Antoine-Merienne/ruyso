@@ -88,11 +88,27 @@ def test_by_category_groups_registered_nodes_by_macro_type():
 
     assert "csv_loader" in grouped["loading"]
     assert {"excel_loader", "parquet_loader", "geojson_loader"} <= set(grouped["loading"])
-    assert {"matplotlib_plot", "box_plot", "histogram_plot", "heatmap_plot"} == set(
-        grouped["grapher"]
-    )
+    assert {"matplotlib_plot", "box_plot", "histogram_plot", "heatmap_plot",
+            "table_viewer"} <= set(grouped["grapher"])
+    # model-visualization plots are graphers too
+    assert {"confusion_matrix_plot", "roc_curve_plot", "precision_recall_plot",
+            "det_curve_plot", "calibration_curve_plot", "learning_curve_plot",
+            "qq_plot"} <= set(grouped["grapher"])
     assert {"drop_na", "standard_scaler", "change_type", "column_filter",
             "row_filter", "dtype_filter"} <= set(grouped["transform"])
-    # No statistical_test node exists yet in this beta -- must simply
-    # be absent, not present with an empty list.
+    # encoders and the train/test split are transforms
+    assert {"one_hot_encode", "ordinal_encode", "train_test_split"} <= set(
+        grouped["transform"]
+    )
+    # the scikit-learn fit nodes and the model-consuming nodes are models
+    assert {"linear_regression_fit", "logistic_regression_fit", "random_forest_fit",
+            "svm_fit", "knn_fit", "predict", "model_coeffs", "model_scores",
+            "residuals"} <= set(grouped["model"])
+    # the statistics family + regression nodes
+    assert {"one_sample_test", "independent_samples_test", "paired_test",
+            "correlation_test", "association_test", "normality_test",
+            "variance_test", "resampling_test", "multiple_testing",
+            "timeseries_test", "regression"} <= set(grouped["statistics"])
     assert "statistical_test" not in grouped
+    # the no-file example-dataset loader
+    assert "example_data" in grouped["loading"]

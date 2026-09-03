@@ -170,6 +170,135 @@ def test_bar_colour_by_discrete_dodge_mode_offsets_the_groups():
     assert len(set(xs)) == 4  # 2 groups x 2 categories, all at distinct x offsets
 
 
+# -- colour / shape / size / alpha channels ------------------------
+
+
+def _style_df():
+    return pd.DataFrame(
+        {
+            "x": list(range(12)),
+            "y": list(range(12)),
+            "grp": ["a", "b", "c"] * 4,
+            "shp": ["p", "q"] * 6,
+            "mag": [float(v) for v in range(12)],
+        }
+    )
+
+
+def _legends(ax):
+    return [c for c in ax.get_children() if c.__class__.__name__ == "Legend"]
+
+
+def test_fixed_line_style_is_applied():
+    ax = _run(x="x", y="y", kind="line", line_style="dashed").axes[0]
+    assert ax.get_lines()[0].get_linestyle() == "--"
+
+
+def test_shape_by_discrete_column_draws_one_group_per_level_with_its_own_shape():
+    ax = _run(df=_style_df(), x="x", y="y", kind="scatter", shape_by="shp").axes[0]
+    assert len(ax.collections) == 2  # one scatter call per shape level
+    markers = {c.get_paths()[0].vertices.tobytes() for c in ax.collections}
+    assert len(markers) == 2
+    legend = ax.get_legend()
+    assert [t.get_text() for t in legend.get_texts()] == ["p", "q"]
+    assert legend.get_title().get_text() == "shp"
+
+
+def test_shape_map_choice_changes_the_marker_series():
+    df = pd.DataFrame({"x": range(9), "y": range(9), "s": ["p", "q", "r"] * 3})
+    per_map = {}
+    for shape_map in ("assorted", "geometric", "bold", "minimal"):
+        ax = _run(
+            df=df, x="x", y="y", kind="scatter", shape_by="s", shape_map=shape_map
+        ).axes[0]
+        per_map[shape_map] = tuple(
+            c.get_paths()[0].vertices.tobytes() for c in ax.collections
+        )
+        assert len(set(per_map[shape_map])) == 3
+    assert len(set(per_map.values())) >= 2
+
+
+def test_size_by_continuous_scales_area_and_shape_stays_the_fixed_one():
+    from matplotlib.markers import MarkerStyle
+
+    ax = _run(
+        df=_style_df(),
+        x="x", y="y", kind="scatter", size_by="mag", marker_shape="square",
+        size_min=20.0, size_max=200.0,
+    ).axes[0]
+    sizes = ax.collections[0].get_sizes()
+    assert sizes.min() == 20.0 and sizes.max() == 200.0
+    # the fixed marker_shape is still respected while sizing by a column
+    square_verts = MarkerStyle("s").get_path().vertices.shape
+    assert ax.collections[0].get_paths()[0].vertices.shape == square_verts
+
+
+def test_shape_by_and_size_by_are_independent_channels():
+    ax = _run(
+        df=_style_df(),
+        x="x", y="y", kind="scatter", shape_by="shp", size_by="mag",
+        size_min=15.0, size_max=150.0,
+    ).axes[0]
+    assert len(ax.collections) == 2  # one per shape level
+    import numpy as np
+
+    all_sizes = np.concatenate([c.get_sizes() for c in ax.collections])
+    assert all_sizes.min() == 15.0 and all_sizes.max() == 150.0
+
+
+def test_size_by_continuous_scales_line_width():
+    ax = _run(
+        df=_style_df(),
+        x="x", y="y", kind="line", size_by="mag", width_min=1.0, width_max=5.0,
+    ).axes[0]
+    assert 1.0 <= ax.get_lines()[0].get_linewidth() <= 5.0
+
+
+def test_fixed_alpha_and_alpha_by_column():
+    ax = _run(df=_style_df(), x="x", y="y", alpha=0.4).axes[0]
+    assert round(float(ax.collections[0].get_facecolors()[0][3]), 3) == 0.4
+
+    ax2 = _run(
+        df=_style_df(), x="x", y="y", alpha_by="mag", alpha_min=0.2, alpha_max=0.9
+    ).axes[0]
+    alphas = ax2.collections[0].get_facecolors()[:, 3]
+    assert round(alphas.min(), 2) == 0.2 and round(alphas.max(), 2) == 0.9
+
+
+def test_colour_by_and_shape_by_different_columns_get_two_legends():
+    ax = _run(
+        df=_style_df(), x="x", y="y", kind="scatter", color_by="grp", shape_by="shp"
+    ).axes[0]
+    titles = sorted(lg.get_title().get_text() for lg in _legends(ax))
+    assert titles == ["grp", "shp"]
+
+
+def test_colour_by_and_shape_by_same_column_get_one_combined_legend():
+    ax = _run(
+        df=_style_df(), x="x", y="y", kind="scatter", color_by="grp", shape_by="grp"
+    ).axes[0]
+    assert len(_legends(ax)) == 1
+
+
+def test_too_many_shape_levels_draws_a_repeat_note():
+    df = pd.DataFrame(
+        {"x": range(10), "y": range(10), "many": [f"c{i}" for i in range(10)]}
+    )
+    fig = _run(df=df, x="x", y="y", kind="scatter", shape_by="many")
+    assert any("repeat" in t.get_text() for t in fig.texts)
+
+
+def test_bar_shape_by_discrete_hatches_each_bar_and_size_by_notes_no_effect():
+    df = pd.DataFrame(
+        {"x": ["a", "b", "c", "d"], "y": [1, 2, 3, 4], "s": ["p", "q", "p", "q"]}
+    )
+    ax = _run(df=df, x="x", y="y", kind="bar", shape_by="s").axes[0]
+    assert len({rect.get_hatch() for rect in ax.patches}) == 2
+
+    fig = _run(df=_style_df(), x="grp", y="y", kind="bar", size_by="mag")
+    assert any("no effect on bars" in t.get_text() for t in fig.texts)
+
+
 # -- box / violin -----------------------------------------------------
 
 from ruyso_app.nodes.viz import (  # noqa: E402
@@ -193,12 +322,33 @@ def _cat_df():
     )
 
 
-def test_box_plot_draws_box_and_violin_kinds():
-    for kind in ("box", "violin"):
+def test_box_plot_draws_all_four_catplot_kinds():
+    for kind in ("box", "violin", "boxen", "swarm"):
         fig = BoxPlot(
             params=BoxPlotParams(category_column="team", value_column="score", kind=kind)
         ).run(df=_cat_df())["figure"]
         assert isinstance(fig, Figure)
+
+
+def test_box_plot_swarm_subsamples_large_data_and_notes_it():
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    big = pd.DataFrame(
+        {"team": rng.choice(list("ab"), 4000), "score": rng.normal(size=4000)}
+    )
+    fig = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", kind="swarm",
+            swarm_max_points=500,
+        )
+    ).run(df=big)["figure"]
+    assert any("subsample" in t.get_text() for t in fig.texts)
+    # a small dataset draws every point with no note
+    small = BoxPlot(
+        params=BoxPlotParams(category_column="team", value_column="score", kind="swarm")
+    ).run(df=_cat_df())["figure"]
+    assert not any("subsample" in t.get_text() for t in small.texts)
 
 
 def test_box_plot_orientation_swaps_the_axes():
@@ -316,3 +466,163 @@ def test_heatmap_association_puts_cramers_v_in_the_title():
         )
     ).run(df=_cat_df())["figure"].axes[0]
     assert "Cram" in ax.get_title() and "V =" in ax.get_title()
+
+
+# -- table_viewer ---------------------------------------------------------
+
+from ruyso_app.nodes.viz import TableViewer, TableViewerParams  # noqa: E402
+
+
+def test_table_viewer_renders_a_table_figure_with_rounding():
+    df = pd.DataFrame({"name": ["a", "b"], "v": [0.123456, 9.87654], "n": [10, 20]})
+    fig = TableViewer(params=TableViewerParams(decimals=2, title="T")).run(df=df)["figure"]
+    assert isinstance(fig, Figure)
+    cells = fig.axes[0].tables[0].get_celld()
+    texts = {c.get_text().get_text() for c in cells.values()}
+    assert "0.12" in texts and "9.88" in texts  # numeric rounding applied
+    assert fig.axes[0].get_title() == "T"
+
+
+def test_table_viewer_truncates_large_input_and_notes_it():
+    import numpy as np
+
+    big = pd.DataFrame(np.arange(60 * 20).reshape(60, 20))
+    fig = TableViewer(params=TableViewerParams(max_rows=8, max_cols=4)).run(df=big)[
+        "figure"
+    ]
+    note = " ".join(t.get_text() for t in fig.texts)
+    assert "8 of 60 rows" in note and "4 of 20 columns" in note
+
+
+# -- model-visualization plots -------------------------------------------
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+
+from ruyso_app.nodes.models import (  # noqa: E402
+    LinearRegressionFit,
+    LinearRegressionFitParams,
+    LogisticRegressionFit,
+    LogisticRegressionFitParams,
+    RandomForestFit,
+    RandomForestFitParams,
+    TrainTestSplit,
+    TrainTestSplitParams,
+)
+from ruyso_app.nodes.viz import (  # noqa: E402
+    CalibrationCurvePlot,
+    CalibrationCurvePlotParams,
+    ConfusionMatrixPlot,
+    ConfusionMatrixPlotParams,
+    DetCurvePlot,
+    LearningCurvePlot,
+    LearningCurvePlotParams,
+    PrecisionRecallPlot,
+    QQPlot,
+    QQPlotParams,
+    RocCurvePlot,
+    _CurvePlotParams,
+)
+
+
+def _mv_data(kind="binary", n=200):
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame(
+        {"a": rng.normal(size=n), "b": rng.normal(size=n), "c": rng.normal(size=n)}
+    )
+    if kind == "binary":
+        y = (X["a"] + X["b"] > 0).astype(int)
+    elif kind == "multiclass":
+        y = pd.cut(X["a"] + X["b"], bins=3, labels=["lo", "mid", "hi"]).astype(object)
+    else:  # regression
+        y = 2 * X["a"] - X["b"] + 0.2 * rng.normal(size=n)
+    split = TrainTestSplit(
+        params=TrainTestSplitParams(target_column="t", test_size=0.3, random_state=0)
+    ).run(df=X.assign(t=y))
+    return split
+
+
+def _rf(split):
+    return RandomForestFit(
+        params=RandomForestFitParams(task="classifier", n_estimators=25)
+    ).run(X_train=split["X_train"], y_train=split["y_train"])["model"]
+
+
+def test_confusion_matrix_plot_binary_and_multiclass():
+    for kind in ("binary", "multiclass"):
+        split = _mv_data(kind)
+        model = _rf(split)
+        fig = ConfusionMatrixPlot(
+            params=ConfusionMatrixPlotParams(normalize="true")
+        ).run(model=model, X=split["X_test"], y=split["y_test"])["figure"]
+        assert isinstance(fig, Figure)
+
+
+def test_roc_pr_det_draw_one_curve_binary_and_one_per_class_multiclass():
+    for node_cls in (RocCurvePlot, PrecisionRecallPlot, DetCurvePlot):
+        b = _mv_data("binary")
+        ax = node_cls(params=_CurvePlotParams()).run(
+            model=_rf(b), X=b["X_test"], y=b["y_test"]
+        )["figure"].axes[0]
+        # at least the model's own curve is present
+        assert len(ax.get_lines()) >= 1
+
+        m = _mv_data("multiclass")
+        ax_m = node_cls(params=_CurvePlotParams(colormap="Set2")).run(
+            model=_rf(m), X=m["X_test"], y=m["y_test"]
+        )["figure"].axes[0]
+        assert len(ax_m.get_lines()) >= 3  # one per class
+
+
+def test_roc_plot_rejects_a_regressor():
+    r = _mv_data("regression")
+    model = LinearRegressionFit(params=LinearRegressionFitParams()).run(
+        X_train=r["X_train"], y_train=r["y_train"]
+    )["model"]
+    with pytest.raises(ValueError, match="classification model"):
+        RocCurvePlot(params=_CurvePlotParams()).run(
+            model=model, X=r["X_test"], y=r["y_test"]
+        )
+
+
+def test_calibration_curve_plot_binary_only():
+    b = _mv_data("binary")
+    model = LogisticRegressionFit(
+        params=LogisticRegressionFitParams(max_iter=300)
+    ).run(X_train=b["X_train"], y_train=b["y_train"])["model"]
+    fig = CalibrationCurvePlot(params=CalibrationCurvePlotParams(n_bins=8)).run(
+        model=model, X=b["X_test"], y=b["y_test"]
+    )["figure"]
+    assert isinstance(fig, Figure)
+
+    m = _mv_data("multiclass")
+    with pytest.raises(ValueError, match="binary"):
+        CalibrationCurvePlot(params=CalibrationCurvePlotParams()).run(
+            model=_rf(m), X=m["X_test"], y=m["y_test"]
+        )
+
+
+def test_learning_curve_plot_draws_train_and_test_lines():
+    b = _mv_data("binary")
+    ax = LearningCurvePlot(
+        params=LearningCurvePlotParams(cv=3, n_points=4)
+    ).run(model=_rf(b), X=b["X_train"], y=b["y_train"])["figure"].axes[0]
+    assert len(ax.get_lines()) >= 2
+
+
+def test_qq_plot_regression_only():
+    r = _mv_data("regression")
+    model = LinearRegressionFit(params=LinearRegressionFitParams()).run(
+        X_train=r["X_train"], y_train=r["y_train"]
+    )["model"]
+    ax = QQPlot(params=QQPlotParams()).run(
+        model=model, X=r["X_test"], y=r["y_test"]
+    )["figure"].axes[0]
+    assert ax.get_xlabel() == "Theoretical quantiles"
+    assert len(ax.collections) == 1  # the residual scatter
+
+    b = _mv_data("binary")
+    with pytest.raises(ValueError, match="regression model"):
+        QQPlot(params=QQPlotParams()).run(
+            model=_rf(b), X=b["X_test"], y=b["y_test"]
+        )
