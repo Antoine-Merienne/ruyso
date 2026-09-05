@@ -134,7 +134,6 @@ def test_model_scores_classification_table():
     model = _clf(split)
     out = ModelScores(
         params=ModelScoresParams(
-            task="classification",
             classification_metrics=["accuracy", "precision", "recall", "f1"],
         )
     ).run(model=model, X=split["X_test"], y=split["y_test"])["df"]
@@ -147,12 +146,32 @@ def test_model_scores_regression_table():
     split = _split(_frame(classification=False))
     model = _reg(split)
     out = ModelScores(
-        params=ModelScoresParams(
-            task="regression", regression_metrics=["r2", "mae", "rmse"]
-        )
+        params=ModelScoresParams(regression_metrics=["r2", "mae", "rmse"])
     ).run(model=model, X=split["X_test"], y=split["y_test"])["df"]
     assert out["metric"].tolist() == ["r2", "mae", "rmse"]
     assert out.loc[out["metric"] == "r2", "value"].iloc[0] > 0.9
+
+
+def test_model_scores_detects_task_from_the_model_not_a_default():
+    # Regression bug: the node used to default to "classification"
+    # regardless of the wired-in model, silently producing NaN scores
+    # for a regressor unless the user manually flipped a "task" toggle.
+    # There is no such toggle any more -- the model itself decides.
+    reg_split = _split(_frame(classification=False))
+    model = _reg(reg_split)  # a regressor, with every default left untouched
+    out = ModelScores(params=ModelScoresParams()).run(
+        model=model, X=reg_split["X_test"], y=reg_split["y_test"]
+    )["df"]
+    assert out["metric"].tolist() == ["r2", "mae", "rmse"]  # regression defaults
+    assert not out["value"].isna().any()
+
+    clf_split = _split(_frame(classification=True))
+    model = _clf(clf_split)  # ... and the reverse, a classifier
+    out = ModelScores(params=ModelScoresParams()).run(
+        model=model, X=clf_split["X_test"], y=clf_split["y_test"]
+    )["df"]
+    assert out["metric"].tolist() == ["accuracy", "f1"]  # classification defaults
+    assert not out["value"].isna().any()
 
 
 # -- residuals ----------------------------------------------------
@@ -177,3 +196,57 @@ def test_residuals_rejects_a_classifier():
         Residuals(params=ResidualsParams()).run(
             model=model, X=split["X_test"], y=split["y_test"]
         )
+
+
+# -- optim_diagnostic / optim_scores -------------------------------------
+
+from ruyso_app.nodes.model_ops import (  # noqa: E402
+    OptimDiagnostic,
+    OptimDiagnosticParams,
+    OptimScores,
+    OptimScoresParams,
+)
+
+
+def _fake_optim():
+    return {
+        "method": "tpe",
+        "metric": "r2",
+        "direction": "maximize",
+        "n_trials": 3,
+        "best_value": 0.987,
+        "best_params": {"alpha": 2.5},
+        "trials": pd.DataFrame(
+            {
+                "trial": [0, 1, 2],
+                "alpha": [1.0, 2.5, 4.0],
+                "train_score": [0.98, 0.99, 0.97],
+                "test_score": [0.95, 0.987, 0.93],
+            }
+        ),
+    }
+
+
+def test_optim_diagnostic_summarizes_the_run():
+    out = OptimDiagnostic(params=OptimDiagnosticParams()).run(optim=_fake_optim())["df"]
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert row["method"] == "tpe" and row["metric"] == "r2"
+    assert row["n_trials"] == 3 and row["best_value"] == 0.987
+    assert row["best_alpha"] == 2.5
+
+
+def test_optim_diagnostic_requires_an_actual_optim_run():
+    with pytest.raises(ValueError, match="optimize"):
+        OptimDiagnostic(params=OptimDiagnosticParams()).run(optim=None)
+
+
+def test_optim_scores_returns_the_trials_table():
+    out = OptimScores(params=OptimScoresParams()).run(optim=_fake_optim())["df"]
+    assert list(out.columns) == ["trial", "alpha", "train_score", "test_score"]
+    assert len(out) == 3
+
+
+def test_optim_scores_requires_an_actual_optim_run():
+    with pytest.raises(ValueError, match="optimize"):
+        OptimScores(params=OptimScoresParams()).run(optim=None)

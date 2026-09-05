@@ -20,6 +20,12 @@ Every helper stashes a small marker dict in the field's
 * *category map* (:func:`category_map_field`) -- a JSON ``{old: new}``
   mapping edited as a table of the input column's distinct values, each
   facing a "new name" box (blank = keep).
+* *code* (:func:`code_field`) -- a multi-line Python-source string,
+  edited in a monospace text box with a read-only hint of the input
+  DataFrame's column names underneath.
+* *optimize bounds* (:func:`optimize_bounds_field`) -- a JSON
+  ``{param: [lo, hi]}`` mapping edited as a table, one row per numeric
+  field of the node's own schema, each with a checkbox + bound pair.
 * *visible when* (any helper's ``visible_when=`` argument) -- the field
   is only shown while another field holds a given value;
   ``visible_when_set=`` shows it while another field holds any
@@ -45,6 +51,8 @@ CHECKBOX_LIST_KEY = "ruyso_checkbox_list"
 CATEGORY_MAP_KEY = "ruyso_category_map"
 COLUMN_MAP_KEY = "ruyso_column_map"
 UNIT_INTERVAL_KEY = "ruyso_unit_interval"
+CODE_KEY = "ruyso_code"
+OPTIMIZE_BOUNDS_KEY = "ruyso_optimize_bounds"
 VISIBLE_WHEN_KEY = "ruyso_visible_when"
 VISIBLE_WHEN_SET_KEY = "ruyso_visible_when_set"
 VISIBLE_WHEN_UNSET_KEY = "ruyso_visible_when_unset"
@@ -262,6 +270,45 @@ def column_map_field(
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
 
+def code_field(
+    *,
+    default: Any = "",
+    description: str | None = None,
+    **field_kwargs: Any,
+) -> Any:
+    """
+    Declare a multi-line Python-source string field.
+
+    Rendered as a monospace text box (``ui.options_panel._build_code_widget``)
+    with a read-only hint of the input DataFrame's column names beneath
+    it, so writing an expression against the data doesn't require
+    leaving the panel. Like the tickbox / table fields, edits are
+    batched -- the auto-run waits for focus-out rather than firing on
+    every keystroke.
+    """
+    extra = _merge({CODE_KEY: {}}, _pop_visible(field_kwargs))
+    return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
+
+
+def optimize_bounds_field(
+    *,
+    default: Any = "{}",
+    description: str | None = None,
+    **field_kwargs: Any,
+) -> Any:
+    """
+    Declare a ``{param: [lo, hi]}`` mapping stored as a JSON string and
+    edited as a table (a fit node's "optimize" section -- see
+    ``models.SklearnFitParams``): one row per *numeric* field of the
+    same node's own parameter schema, each with a checkbox (include it
+    in the search) and a lo/hi bound pair. Unlike
+    :func:`column_map_field`, the row list is not given here -- the UI
+    derives it from the params schema itself, so it never goes stale.
+    """
+    extra = _merge({OPTIMIZE_BOUNDS_KEY: {}}, _pop_visible(field_kwargs))
+    return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
+
+
 def visible_field(
     default: Any = ...,
     *,
@@ -334,6 +381,14 @@ def column_map_spec(field_info: FieldInfo) -> dict | None:
 def unit_interval_spec(field_info: FieldInfo) -> dict | None:
     marker = _marker(field_info, UNIT_INTERVAL_KEY)
     return dict(marker) if marker is not None else None
+
+
+def is_code_field(field_info: FieldInfo) -> bool:
+    return _marker(field_info, CODE_KEY) is not None
+
+
+def is_optimize_bounds_field(field_info: FieldInfo) -> bool:
+    return _marker(field_info, OPTIMIZE_BOUNDS_KEY) is not None
 
 
 def visible_when(field_info: FieldInfo) -> tuple[str, str] | None:

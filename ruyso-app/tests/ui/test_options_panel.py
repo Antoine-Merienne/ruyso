@@ -4,7 +4,8 @@ Tests for the Options panel as the selected-node editor
 """
 
 from NodeGraphQt import NodeGraph
-from PySide6.QtWidgets import QComboBox, QLineEdit, QPushButton, QSizePolicy
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton, QSizePolicy
 
 import ruyso_app.nodes
 from ruyso_app.core.registry import NodeRegistry
@@ -27,6 +28,15 @@ def _graph(qapp):
     return graph
 
 
+def _combo_entries(combo):
+    """``[node_type or None, ...]`` for a Micro type combo -- ``None`` marks
+    a ``QComboBox.insertSeparator()`` row (see ``ui.micro_type_groups``)."""
+    return [
+        None if combo.itemData(i, Qt.AccessibleDescriptionRole) == "separator" else combo.itemText(i)
+        for i in range(combo.count())
+    ]
+
+
 def test_show_node_populates_macro_and_micro(qapp):
     graph = _graph(qapp)
     node = graph.create_node(qt_type_for("drop_na"), name="clean")
@@ -36,9 +46,54 @@ def test_show_node_populates_macro_and_micro(qapp):
 
     assert panel.current_category() == "transform"
     assert panel._macro_combo.currentText() == theme.label_for_category("transform")
-    items = [panel._micro_combo.itemText(i) for i in range(panel._micro_combo.count())]
-    assert items == BY_CAT["transform"]
+    entries = _combo_entries(panel._micro_combo)
+    # grouped + separated (see ui.micro_type_groups), but every node_type
+    # is still there and none is duplicated.
+    assert sorted(t for t in entries if t is not None) == BY_CAT["transform"]
+    assert None in entries  # at least one separator
     assert panel._micro_combo.currentText() == "drop_na"
+
+
+def test_options_title_is_centered(qapp):
+    panel = OptionsPanel()
+    assert panel._title.alignment() & Qt.AlignHCenter
+
+
+def test_node_help_shows_a_description_under_micro_type(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("drop_na"), name="clean")
+    panel = OptionsPanel()
+
+    panel.show_node(node, BY_CAT)
+
+    assert panel._node_help.isVisibleTo(panel)
+    assert "missing" in panel._node_help.text().lower()
+
+    panel.clear()
+    assert not panel._node_help.isVisibleTo(panel)
+
+
+def test_node_help_prefers_an_explicit_tagline(qapp):
+    from ruyso_app.ui.options_panel import _node_tagline
+
+    core_cls = NodeRegistry.get("drop_na")
+    original = core_cls.__dict__.get("tagline", "")
+    core_cls.tagline = "Custom one-liner."
+    try:
+        assert _node_tagline(core_cls) == "Custom one-liner."
+    finally:
+        core_cls.tagline = original
+
+
+def test_params_form_packs_to_the_top(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("drop_na"), name="clean")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    host_layout = panel._params_host.layout()
+    # last item is a stretch so short forms never spread their rows out
+    assert host_layout.itemAt(host_layout.count() - 1).spacerItem() is not None
 
 
 def test_editing_a_field_writes_back_to_the_node_property(qapp):
@@ -245,51 +300,119 @@ def test_background_tint_follows_selected_macro_type(qapp):
     assert "background-color: rgb(" in panel.styleSheet()
 
 
-def test_loader_datetime_columns_is_a_column_dropdown_with_a_none_entry(qapp):
-    from PySide6.QtCore import Qt
-
+def test_loader_has_no_datetime_params(qapp):
     graph = _graph(qapp)
     loader = graph.create_node(qt_type_for("csv_loader"), name="load")
     panel = OptionsPanel()
-    # the loader's own last-run columns feed its datetime picker
     panel.show_node(loader, BY_CAT, input_columns={"date": "categorical", "n": "numeric"})
 
-    combo = [
-        c
-        for c in panel._params_host.findChildren(QComboBox)
-        if c.isEditable() and c.itemText(0) == "None"
-    ][0]
-    assert [combo.itemText(i) for i in range(combo.count())] == ["None", "date", "n"]
-    # the "None" row is styled italic + grey
-    assert combo.itemData(0, Qt.FontRole).italic()
-    assert combo.itemData(0, Qt.ForegroundRole).getRgb()[:3] == (150, 150, 150)
-
-    combo.activated.emit(1)  # pick "date"
-    assert loader.get_property("datetime_columns") == "date"
-    combo.activated.emit(0)  # "None" clears
-    assert loader.get_property("datetime_columns") == ""
+    assert "datetime_columns" not in panel._field_widgets
+    assert "datetime_format" not in panel._field_widgets
 
 
-def test_loader_datetime_format_is_an_editable_suggestions_combo(qapp):
-    from ruyso_app.nodes.loaders import COMMON_DATETIME_FORMATS
-
+def test_loading_micro_type_dropdown_is_grouped_with_separators(qapp):
     graph = _graph(qapp)
     loader = graph.create_node(qt_type_for("csv_loader"), name="load")
     panel = OptionsPanel()
     panel.show_node(loader, BY_CAT)
 
-    combo = [
-        c
-        for c in panel._params_host.findChildren(QComboBox)
-        if c.isEditable() and c.itemText(0) == "infer"
-    ][0]
+    entries = _combo_entries(panel._micro_combo)
+    # three curated groups (general / geo / example), each separated by a
+    # line: two ``None`` separators among the entries, general loaders
+    # before geo loaders before the example loader.
+    assert entries.count(None) == 2
+    assert entries.index(None) < entries.index("geojson_loader") < entries.index(None, entries.index(None) + 1)
+    assert entries[-1] == "example_data"
+    assert entries.index("csv_loader") < entries.index(None)
+
+
+def test_transform_micro_type_dropdown_is_grouped_with_separators(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("drop_na"), name="clean")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    entries = _combo_entries(panel._micro_combo)
+    groups: list[list[str]] = [[]]
+    for entry in entries:
+        if entry is None:
+            groups.append([])
+        else:
+            groups[-1].append(entry)
+
+    # 7 curated groups (base / filters / type / reshaping / datetime /
+    # geo / custom) -> 6 separators, nothing lost or duplicated.
+    assert len(groups) == 7
+    assert sorted(t for g in groups for t in g) == BY_CAT["transform"]
+    assert groups[0] == ["head", "tail", "sample", "drop_na", "sort", "reset_index"]
+    assert groups[1] == ["row_filter", "column_filter", "dtype_filter"]
+    assert "diff" in groups[4]  # datetime operations
+    assert groups[-1] == ["custom_operation"]
+
+
+def test_statistics_micro_type_dropdown_separates_tests_from_non_tests(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("regression"), name="reg")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    entries = _combo_entries(panel._micro_combo)
+    groups: list[list[str]] = [[]]
+    for entry in entries:
+        if entry is None:
+            groups.append([])
+        else:
+            groups[-1].append(entry)
+
+    assert len(groups) == 2  # non-tests, then every *_test node
+    assert sorted(t for g in groups for t in g) == BY_CAT["statistics"]
+    assert groups[0] == ["regression", "pca", "arima", "auto_arima", "multiple_testing"]
+    assert groups[1] == sorted(groups[1])
+    assert all(t.endswith("_test") for t in groups[1])
+
+
+def test_custom_operation_code_field_is_a_multiline_editor_with_a_column_hint(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("custom_operation"), name="custom")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    from PySide6.QtWidgets import QPlainTextEdit
+
+    container = panel._field_widgets["code"]
+    editor = container.findChild(QPlainTextEdit)
+    assert editor is not None
+
+    editor.setPlainText("df['c'] = df['a'] + df['b']")
+    assert node.get_property("code") == "df['c'] = df['a'] + df['b']"
+
+    labels = [w for w in container.findChildren(QLabel)]
+    hint_text = " ".join(l.text() for l in labels)
+    assert "a" in hint_text and "b" in hint_text and "np" in hint_text
+
+
+def test_change_type_datetime_format_is_shown_only_for_the_datetime_target(qapp):
+    from ruyso_app.nodes.transforms import _COMMON_DATETIME_FORMATS
+
+    graph = _graph(qapp)
+    ct = graph.create_node(qt_type_for("change_type"), name="ct")
+    panel = OptionsPanel()
+    panel.show_node(ct, BY_CAT, input_columns={"amount": "numeric"})
+
+    panel._field_widgets["column"]._combo.setCurrentText("amount")
+    assert _rows(panel)["datetime format"] is False  # target_type defaults to "str"
+
+    panel._field_widgets["target_type"].setCurrentText("datetime")
+    assert _rows(panel)["datetime format"] is True
+
+    combo = panel._field_widgets["datetime_format"]
     items = [combo.itemText(i) for i in range(combo.count())]
-    assert items == ["infer", *COMMON_DATETIME_FORMATS]
+    assert items == ["infer", *_COMMON_DATETIME_FORMATS]
 
     combo.setCurrentText("%d-%m-%Y")  # free text is accepted
-    assert loader.get_property("datetime_format") == "%d-%m-%Y"
+    assert ct.get_property("datetime_format") == "%d-%m-%Y"
     combo.activated.emit(0)  # "infer" clears
-    assert loader.get_property("datetime_format") == ""
+    assert ct.get_property("datetime_format") == ""
 
 
 def _rows(panel):
@@ -810,3 +933,74 @@ def test_column_map_widget_repopulates_and_keeps_selection(qapp):
     assert [combos[0].itemText(i) for i in range(1, combos[0].count())] == ["when", "yr"]
     assert combos[0].currentText() == "yr"  # prior pick survived the refresh
     assert json.loads(node.get_property("mapping")) == {"year": "yr"}
+
+
+# -- fit node "optimize" section ----------------------------------------
+
+
+def test_optimize_section_is_hidden_until_the_tickbox_is_checked(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("ridge_fit"), name="ridge")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    rows = _rows(panel)
+    for label in ("optimize bounds", "optimize metric", "optimize method", "optimize n trials"):
+        assert rows[label] is False
+
+    panel._field_widgets["optimize"].setChecked(True)
+    rows = _rows(panel)
+    for label in ("optimize bounds", "optimize metric", "optimize method", "optimize n trials"):
+        assert rows[label] is True
+
+
+def test_optimize_bounds_table_lists_the_nodes_own_numeric_hyperparameters(qapp):
+    from PySide6.QtWidgets import QCheckBox
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("ridge_fit"), name="ridge")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    table = panel._field_widgets["optimize_bounds"]
+    boxes = table.findChildren(QCheckBox)
+    # alpha, max_iter, tol, random_state are RidgeFitParams' own int/float
+    # fields -- random_state (and the optimize_* fields themselves) must
+    # never appear as a row to bound.
+    assert len(boxes) == 3  # alpha, max_iter, tol
+    form = table.widget().layout()
+    row_names = {
+        form.itemAt(i, form.ItemRole.LabelRole).widget().text()
+        for i in range(form.rowCount())
+    }
+    assert row_names == {"alpha", "max_iter", "tol"}
+
+
+def test_optimize_bounds_table_round_trips_a_checked_row(qapp):
+    import json
+
+    from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("ridge_fit"), name="ridge")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    table = panel._field_widgets["optimize_bounds"]
+    form = table.widget().layout()
+    alpha_row = next(
+        i for i in range(form.rowCount())
+        if form.itemAt(i, form.ItemRole.LabelRole).widget().text() == "alpha"
+    )
+    row_widget = form.itemAt(alpha_row, form.ItemRole.FieldRole).widget()
+    box = row_widget.findChild(QCheckBox)
+    lo, hi = row_widget.findChildren(QDoubleSpinBox)
+
+    assert not lo.isEnabled()  # unchecked rows start disabled
+    box.setChecked(True)
+    assert lo.isEnabled() and hi.isEnabled()
+    lo.setValue(0.5)
+    hi.setValue(5.0)
+
+    panel.flush_recompute()  # these edits are batched -- commit them
+    assert json.loads(node.get_property("optimize_bounds")) == {"alpha": [0.5, 5.0]}

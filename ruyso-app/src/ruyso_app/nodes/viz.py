@@ -74,6 +74,33 @@ _SHAPE_MAP_HATCHES = {
 }
 
 
+def _bar_error_value(values: Any, method: str) -> float:
+    """
+    Error-bar half-length for one bar's y values (see
+    ``MatplotlibPlotParams.bar_error``): sample standard deviation,
+    standard error of the mean, or a t-distribution confidence
+    interval. ``values`` is assumed already-numeric with NaNs removed;
+    fewer than 2 values gives 0 (nothing to estimate spread from).
+    """
+    import numpy as np
+
+    arr = np.asarray(values, dtype="float64")
+    n = arr.size
+    if n < 2:
+        return 0.0
+    std = float(np.std(arr, ddof=1))
+    if method == "std":
+        return std
+    sem = std / np.sqrt(n)
+    if method == "sem":
+        return float(sem)
+    from scipy import stats as _spstats
+
+    level = 0.95 if method == "ci_95" else 0.99
+    t = float(_spstats.t.ppf((1 + level) / 2, df=n - 1))
+    return t * sem
+
+
 def _shape_sequence(kind: str, shape_map: str) -> list:
     """The ordered marker / linestyle / hatch series for ``shape_map``."""
     table = {
@@ -283,6 +310,11 @@ class MatplotlibPlotParams(NodeParams):
     (palette / shape series / evenly-spaced sizes / evenly-spaced
     alphas); a *continuous* one interpolates (colormap / size range /
     alpha range -- shape keeps its fixed value).
+
+    Plus two kind-specific extras: ``bar_error`` (bar only) adds a
+    confidence-interval / std-dev / SEM whisker per bar, averaging its
+    y values instead of summing them; ``line_fill`` / ``line_stack``
+    (line only) turn the line(s) into a (stacked) area chart.
     """
 
     x: str = column_field(dtypes=("any",), description="Column for the x-axis.")
@@ -317,6 +349,27 @@ class MatplotlibPlotParams(NodeParams):
         description="Arrangement of the colour-by groups' bars: side by side "
         "(dodge), stacked, or overlaid (layer). Used only for a discrete "
         "colour-by column.",
+    )
+    bar_error: Literal["none", "sem", "std", "ci_95", "ci_99"] = visible_field(
+        "none",
+        visible_when=("kind", "bar"),
+        description="Error bar per bar: standard error of the mean, standard "
+        "deviation, or a t-based confidence interval. When not 'none', each "
+        "bar's y values are averaged (mean) rather than summed / shown "
+        "one-per-row, and per-row shape/opacity styling no longer applies.",
+    )
+
+    # -- line-only extras ----------------------------------------------
+    line_fill: bool = visible_field(
+        False, visible_when=("kind", "line"),
+        description="Fill the area under each line (an area chart).",
+    )
+    line_stack: bool = visible_field(
+        False,
+        visible_when=("kind", "line"),
+        visible_when_set="color_by",
+        description="Stack the colour-by groups' lines into a stacked area "
+        "chart instead of overlaying them. Needs a discrete colour-by column.",
     )
 
     # -- shape channel ------------------------------------------------
@@ -479,6 +532,7 @@ class MatplotlibPlot(Node):
         matplotlib.use("Agg")  # non-interactive backend, safe for headless/test runs
         import matplotlib.pyplot as plt
         import numpy as np
+        import pandas as pd
         from matplotlib.colors import to_rgba
         from pandas.api.types import (
             is_bool_dtype,
@@ -641,53 +695,86 @@ class MatplotlibPlot(Node):
 
             # -- line -------------------------------------------
             elif p.kind == "line":
-                color_groups = (
-                    [(cgi, ci["codes"] == cgi) for cgi in range(len(ci["cats"]))]
-                    if color_kind == "discrete"
-                    else [(0, all_rows)]
-                )
-                shape_groups = (
-                    [(sgi, si["codes"] == sgi) for sgi in range(len(si["cats"]))]
-                    if shape_kind == "discrete"
-                    else [(0, all_rows)]
-                )
-                for cgi, cmask in color_groups:
-                    if color_kind == "discrete":
-                        line_color = color_palette[cgi]
-                    elif color_kind == "continuous":
-                        frac = (
-                            float(color_norm(np.nanmean(ci["num"])))
-                            if np.isfinite(ci["num"]).any()
-                            else 0.5
+                if p.line_stack and color_kind == "discrete":
+                    # ax.stackplot needs every group's y aligned on one
+                    # shared, ordered x axis (0 for an x value a group
+                    # has no rows at).
+                    x_arr = np.asarray(x)
+                    x_values = sorted(set(x_arr.tolist()))
+                    stacks = []
+                    for cgi in range(len(ci["cats"])):
+                        gmask = ci["codes"] == cgi
+                        gy = np.asarray(y)[gmask]
+                        gx = x_arr[gmask]
+                        stacks.append(
+                            [float(gy[gx == xv].sum()) for xv in x_values]
                         )
-                        line_color = color_cmap(frac)
-                    else:
-                        line_color = single_color
-                    for sgi, smask in shape_groups:
-                        mask = cmask & smask
-                        if not mask.any():
-                            continue
-                        ls = (
-                            shape_seq[sgi % len(shape_seq)]
-                            if shape_kind == "discrete"
-                            else _LINE_STYLES.get(p.line_style, "-")
+                    ax.stackplot(
+                        x_values, *stacks,
+                        labels=[str(c) for c in ci["cats"]],
+                        colors=color_palette, alpha=fixed_alpha,
+                    )
+                    if shape_kind == "discrete":
+                        notes.append("shape styling has no effect on stacked lines")
+                else:
+                    if p.line_stack:
+                        notes.append(
+                            "line_stack needs a discrete colour-by column -- "
+                            "showing overlaid lines"
                         )
-                        lw = (
-                            float(np.nanmean(size_row[mask]))
-                            if size_kind != "single"
-                            else fixed_size
-                        )
-                        la = (
-                            float(np.nanmean(alpha_row[mask]))
-                            if alpha_kind != "single"
-                            else fixed_alpha
-                        )
-                        xm = np.asarray(x[mask])
-                        order = np.argsort(xm)
-                        ax.plot(
-                            xm[order], np.asarray(y[mask])[order],
-                            color=line_color, linestyle=ls, linewidth=lw, alpha=la,
-                        )
+                    color_groups = (
+                        [(cgi, ci["codes"] == cgi) for cgi in range(len(ci["cats"]))]
+                        if color_kind == "discrete"
+                        else [(0, all_rows)]
+                    )
+                    shape_groups = (
+                        [(sgi, si["codes"] == sgi) for sgi in range(len(si["cats"]))]
+                        if shape_kind == "discrete"
+                        else [(0, all_rows)]
+                    )
+                    for cgi, cmask in color_groups:
+                        if color_kind == "discrete":
+                            line_color = color_palette[cgi]
+                        elif color_kind == "continuous":
+                            frac = (
+                                float(color_norm(np.nanmean(ci["num"])))
+                                if np.isfinite(ci["num"]).any()
+                                else 0.5
+                            )
+                            line_color = color_cmap(frac)
+                        else:
+                            line_color = single_color
+                        for sgi, smask in shape_groups:
+                            mask = cmask & smask
+                            if not mask.any():
+                                continue
+                            ls = (
+                                shape_seq[sgi % len(shape_seq)]
+                                if shape_kind == "discrete"
+                                else _LINE_STYLES.get(p.line_style, "-")
+                            )
+                            lw = (
+                                float(np.nanmean(size_row[mask]))
+                                if size_kind != "single"
+                                else fixed_size
+                            )
+                            la = (
+                                float(np.nanmean(alpha_row[mask]))
+                                if alpha_kind != "single"
+                                else fixed_alpha
+                            )
+                            xm = np.asarray(x[mask])
+                            order = np.argsort(xm)
+                            xs, ys = xm[order], np.asarray(y[mask])[order]
+                            ax.plot(
+                                xs, ys, color=line_color, linestyle=ls,
+                                linewidth=lw, alpha=la,
+                            )
+                            if p.line_fill:
+                                ax.fill_between(
+                                    xs, 0, ys, color=line_color,
+                                    alpha=min(la, 0.3),
+                                )
 
             # -- bar -------------------------------------------
             else:
@@ -700,9 +787,20 @@ class MatplotlibPlot(Node):
                     groups_n = max(len(ci["cats"]), 1)
                     for i, cat in enumerate(ci["cats"]):
                         sub = df[ci["codes"] == i]
-                        heights = [
-                            float(sub.loc[sub[p.x] == xv, p.y].sum()) for xv in x_values
-                        ]
+                        errors = None
+                        if p.bar_error != "none":
+                            grouped = [
+                                pd.to_numeric(
+                                    sub.loc[sub[p.x] == xv, p.y], errors="coerce"
+                                ).dropna().to_numpy("float64")
+                                for xv in x_values
+                            ]
+                            heights = [float(v.mean()) if v.size else 0.0 for v in grouped]
+                            errors = [_bar_error_value(v, p.bar_error) for v in grouped]
+                        else:
+                            heights = [
+                                float(sub.loc[sub[p.x] == xv, p.y].sum()) for xv in x_values
+                            ]
                         hatch = (
                             shape_seq[i % len(shape_seq)] if combined else hatch_single
                         )
@@ -715,6 +813,9 @@ class MatplotlibPlot(Node):
                             color=color_palette[i], hatch=hatch, alpha=alpha_v,
                             label=str(cat),
                         )
+                        if errors is not None:
+                            common["yerr"] = errors
+                            common["capsize"] = 4
                         if p.bar_mode == "dodge":
                             w = span / groups_n
                             ax.bar(
@@ -732,6 +833,48 @@ class MatplotlibPlot(Node):
                         notes.append(
                             f"shape styling by {si['name']!r} is not shown on grouped bars"
                         )
+                elif p.bar_error != "none":
+                    # aggregated (mean +/- error) bars, one per unique x --
+                    # per-row shape/opacity styling doesn't apply to an
+                    # aggregate of several rows, so it's skipped (noted below).
+                    x_arr = np.asarray(x)
+                    x_values = list(dict.fromkeys(x.tolist()))
+                    base = np.arange(len(x_values))
+                    grouped = [
+                        pd.to_numeric(y[x_arr == xv], errors="coerce")
+                        .dropna().to_numpy("float64")
+                        for xv in x_values
+                    ]
+                    heights = [float(v.mean()) if v.size else 0.0 for v in grouped]
+                    errors = [_bar_error_value(v, p.bar_error) for v in grouped]
+                    if color_kind == "continuous":
+                        group_means = np.array(
+                            [
+                                float(np.nanmean(ci["num"][x_arr == xv]))
+                                for xv in x_values
+                            ]
+                        )
+                        bar_colors = color_cmap(color_norm(group_means))
+                    else:
+                        bar_colors = single_color
+                    bars = ax.bar(
+                        base, heights, yerr=errors, capsize=4,
+                        color=bar_colors, alpha=fixed_alpha,
+                    )
+                    if hatch_single:
+                        for rect in bars:
+                            rect.set_hatch(hatch_single)
+                    ax.set_xticks(base)
+                    ax.set_xticklabels([str(xv) for xv in x_values])
+                    if shape_kind == "discrete" or alpha_kind != "single":
+                        notes.append(
+                            "shape / opacity styling has no effect on "
+                            "confidence-interval bars"
+                        )
+                    if color_kind == "continuous" and p.show_legend:
+                        sm = plt.cm.ScalarMappable(norm=color_norm, cmap=color_cmap)
+                        sm.set_array([])
+                        fig.colorbar(sm, ax=ax, label=legend_label)
                 else:
                     if color_kind == "continuous":
                         bar_colors = color_cmap(color_norm(ci["num"]))
@@ -804,6 +947,56 @@ class MatplotlibPlot(Node):
 # ==========================================================================
 
 
+#: Table styling presets (see ``TableViewerParams.style``), chosen to
+#: cover the table conventions most often seen in data/scientific
+#: writing: a shaded "dashboard" look (this node's original default,
+#: kept as-is), academic three-line tables (APA / most journals), a
+#: plain full grid, alternating (zebra) stripes, and a border-free
+#: minimalist look.
+_TABLE_STYLES = ("shaded", "three_line", "grid", "striped", "minimal")
+
+
+def _apply_table_style(
+    table: Any, n_data_rows: int, style: str, header_color: Any
+) -> None:
+    """Border / shading preset for one ``ax.table`` (see ``_TABLE_STYLES``)."""
+    for (r, _c), cell in table.get_celld().items():
+        cell.set_text_props(weight="bold" if r == 0 else "normal")
+        if style == "grid":
+            cell.set_facecolor("white")
+            cell.set_edgecolor("0.6")
+            cell.visible_edges = "closed"
+        elif style == "striped":
+            cell.set_facecolor(
+                (0.95, 0.95, 0.97, 1.0) if (r > 0 and r % 2 == 0) else "white"
+            )
+            cell.set_edgecolor("0.3")
+            cell.visible_edges = "B" if r == 0 else ""
+        elif style == "minimal":
+            cell.set_facecolor("none")
+            cell.set_edgecolor("0.2")
+            cell.visible_edges = "B" if r == 0 else ""
+        elif style == "three_line":
+            cell.set_facecolor("none")
+            cell.set_edgecolor("0.15")
+            cell.set_linewidth(1.1)
+            if r == 0:
+                cell.visible_edges = "TB"
+            elif r == n_data_rows:
+                cell.visible_edges = "B"
+            else:
+                cell.visible_edges = ""
+        else:  # "shaded" -- the original look
+            cell.set_edgecolor("0.75")
+            cell.visible_edges = "closed"
+            if r == 0:
+                cell.set_facecolor(header_color)
+            elif r % 2 == 0:
+                cell.set_facecolor((0.965, 0.965, 0.975, 1.0))
+            else:
+                cell.set_facecolor("white")
+
+
 class TableViewerParams(NodeParams):
     """
     Parameters for TableViewer.
@@ -811,11 +1004,22 @@ class TableViewerParams(NodeParams):
     Attributes:
         decimals: Rounding for numeric columns.
         max_rows / max_cols: Show at most this many rows / columns; the
-            rest are dropped and a note is printed on the figure.
+            rest are dropped and a note is printed on the figure. This
+            node is for a small, presentation-sized table -- not for
+            browsing a full DataFrame (use the Table tab for that).
         show_index: Include the DataFrame index as a leading column.
         font_size: Cell text size.
-        header_color: Fill colour of the header row.
+        style: Table styling preset -- "shaded" (fill + zebra rows),
+            "three_line" (the academic three-rule look used by APA and
+            most journals: a rule above and below the header, one at
+            the bottom, no vertical lines), "grid" (a full border on
+            every cell), "striped" (zebra rows, no borders), or
+            "minimal" (no lines at all but a header underline).
+        header_color: Fill colour of the header row ("shaded" only).
         row_height: Vertical scale of the cells (1.0 = matplotlib default).
+        padding: Empty margin between the figure edge and the table, as
+            a fraction of the figure (so the table doesn't touch the
+            window edge).
         the remaining fields: figure size + title styling.
     """
 
@@ -824,12 +1028,18 @@ class TableViewerParams(NodeParams):
     max_cols: int = 12
     show_index: bool = False
     font_size: int = 9
+    style: Literal["shaded", "three_line", "grid", "striped", "minimal"] = "shaded"
     header_color: str = color_field(
         suggestions=["#cfe2f3", "#d9ead3", "#fce5cd", "lightgrey", "white"],
         default="#cfe2f3",
+        visible_when=("style", "shaded"),
         description="Header row fill colour.",
     )
     row_height: float = 1.5
+    padding: float = unit_interval_field(
+        0.08, lo=0.0, hi=0.3,
+        description="Empty margin between the figure edge and the table.",
+    )
     fig_width: float = 8.0
     fig_height: float = 5.0
     title: str | None = None
@@ -888,25 +1098,20 @@ class TableViewer(Node):
         with plt.style.context(_BASE_STYLE):
             fig, ax = plt.subplots(figsize=_fig_size(p))
             ax.axis("off")
+            pad = float(p.padding)
             table = ax.table(
                 cellText=cell_text,
                 colLabels=col_labels,
                 rowLabels=row_labels,
                 cellLoc="center",
-                loc="center",
+                bbox=(pad, pad, 1 - 2 * pad, 1 - 2 * pad),
             )
             table.auto_set_font_size(False)
             table.set_fontsize(int(p.font_size))
             table.scale(1.0, max(float(p.row_height), 0.5))
 
             header_rgba = to_rgba(p.header_color or "#cfe2f3")
-            for (r, _c), cell in table.get_celld().items():
-                cell.set_edgecolor("0.75")
-                if r == 0:
-                    cell.set_facecolor(header_rgba)
-                    cell.set_text_props(weight="bold")
-                elif r > 0 and r % 2 == 0:
-                    cell.set_facecolor((0.965, 0.965, 0.975, 1.0))
+            _apply_table_style(table, len(cell_text), p.style, header_rgba)
 
             try:
                 table.auto_set_column_width(col=list(range(len(col_labels))))
@@ -1940,4 +2145,429 @@ class QQPlot(Node):
                 default_xlabel="Theoretical quantiles",
                 default_ylabel="Ordered residuals",
             )
+        return {"figure": fig}
+
+
+# ==========================================================================
+# Single-variable plots: pie_chart, heatmap_1d, autocorrelogram
+# ==========================================================================
+
+
+class PieChartParams(NodeParams):
+    """
+    Parameters for PieChart.
+
+    Attributes:
+        column: Categorical column to summarize -- each category's
+            share is its count of rows.
+        style: "pie", "doughnut" (a pie with a hole), or "tile" (a
+            waffle-style grid of unit squares, one square per share of
+            the total -- often easier to compare by eye than wedge
+            angles, especially for close shares).
+        top_n: Keep only the N largest categories, grouping the rest
+            into "other". 0 = show every category.
+        show_percent: Label each wedge with its percentage (pie /
+            doughnut only).
+        doughnut_width: Ring thickness as a fraction of the radius
+            (doughnut only).
+        tile_columns: Grid width, in tiles (tile only).
+        colormap: Palette for the categories.
+        the remaining fields: figure size + title styling + legend.
+    """
+
+    column: str = column_field(dtypes=("categorical", "boolean"))
+    style: Literal["pie", "doughnut", "tile"] = "pie"
+    top_n: int = 0
+    show_percent: bool = visible_field(True, visible_unless=("style", "tile"))
+    doughnut_width: float = unit_interval_field(
+        0.4, lo=0.1, hi=0.9, visible_when=("style", "doughnut"),
+    )
+    tile_columns: int = visible_field(10, visible_when=("style", "tile"))
+    colormap: str = reactive_choice_field(
+        options="colormaps", depends_on="column", default="tab10",
+    )
+    fig_width: float = 5.0
+    fig_height: float = 5.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+    show_legend: bool = True
+    legend_location: _LEGEND_LOCATIONS = "outside right"
+    legend_font_size: int = 9
+
+
+@register_node
+class PieChart(Node):
+    """Single-variable share plot: pie, doughnut, or a tile ('waffle') grid."""
+
+    node_type = "pie_chart"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = PieChartParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        from matplotlib.patches import Patch, Rectangle
+
+        p = self.params
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(f"pie_chart: column {p.column!r} is not in the input data.")
+
+        counts = df[p.column].value_counts(dropna=True)
+        if counts.empty:
+            raise ValueError("pie_chart: no non-missing values to summarize.")
+        if p.top_n and len(counts) > int(p.top_n):
+            top = counts.iloc[: int(p.top_n)]
+            other = float(counts.iloc[int(p.top_n) :].sum())
+            counts = pd.concat([top, pd.Series({"other": other})])
+        labels = [str(v) for v in counts.index]
+        values = counts.to_numpy("float64")
+        cmap = plt.get_cmap(p.colormap or "tab10")
+        colors = [cmap(i % cmap.N) for i in range(len(values))]
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = plt.subplots(figsize=_fig_size(p))
+
+            if p.style in ("pie", "doughnut"):
+                width = float(p.doughnut_width) if p.style == "doughnut" else 1.0
+                autopct = (lambda pct: f"{pct:.1f}%") if p.show_percent else None
+                ax.pie(
+                    values, colors=colors, autopct=autopct,
+                    wedgeprops={"width": width, "edgecolor": "white"},
+                    pctdistance=1 - width / 2 if p.style == "doughnut" else 0.6,
+                )
+                ax.set_aspect("equal")
+                handles = [Patch(facecolor=c) for c in colors]
+            else:  # tile
+                cols = max(int(p.tile_columns), 1)
+                total = float(values.sum())
+                # cap the tile count at ~100 so a large dataset doesn't
+                # draw thousands of squares; each tile then represents
+                # more than one row.
+                unit = total / 100 if total > 100 else 1.0
+                tile_counts = [max(int(round(v / unit)), 1 if v > 0 else 0) for v in values]
+                cat_of_tile = [i for i, n in enumerate(tile_counts) for _ in range(n)]
+                n_tiles = len(cat_of_tile) or 1
+                rows = int(np.ceil(n_tiles / cols))
+                for idx, cat_i in enumerate(cat_of_tile):
+                    r, c = divmod(idx, cols)
+                    ax.add_patch(
+                        Rectangle(
+                            (c, rows - 1 - r), 0.9, 0.9,
+                            facecolor=colors[cat_i], edgecolor="white",
+                        )
+                    )
+                ax.set_xlim(0, cols)
+                ax.set_ylim(0, rows)
+                ax.set_aspect("equal")
+                ax.axis("off")
+                handles = [Patch(facecolor=c) for c in colors]
+
+            if p.show_legend:
+                _place_legend(ax, p, p.column, handles=handles, labels=labels)
+            if p.title:
+                ax.set_title(
+                    p.title, fontsize=p.title_font_size,
+                    fontweight="bold" if p.title_bold else "normal",
+                    fontstyle="italic" if p.title_italic else "normal",
+                )
+            fig.tight_layout()
+        return {"figure": fig}
+
+
+class Heatmap1DParams(NodeParams):
+    """
+    Parameters for Heatmap1D.
+
+    Attributes:
+        column: Numeric column to render as a strip of coloured cells
+            (value -> colour) -- a single-variable alternative to a
+            histogram for spotting a sequence's pattern or outliers at
+            a glance.
+        columns_per_row: Wrap the strip into a grid this many cells
+            wide (0 = one single row) -- e.g. 7 turns a daily series
+            into a calendar-style heatmap.
+        colormap: Continuous colormap.
+        show_colorbar: Draw a colour scale.
+        show_values: Print each cell's (rounded) value.
+        decimals: Rounding for the printed values.
+        the remaining fields: figure size + title styling.
+    """
+
+    column: str = column_field(dtypes=("numeric",))
+    columns_per_row: int = 0
+    colormap: str = reactive_choice_field(
+        options="colormaps", depends_on="column", default="viridis",
+    )
+    show_colorbar: bool = True
+    show_values: bool = False
+    decimals: int = visible_field(1, visible_when=("show_values", "True"))
+    fig_width: float = 8.0
+    fig_height: float = 2.2
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class Heatmap1D(Node):
+    """
+    1D heat map: a numeric column rendered as a strip (or wrapped
+    grid) of coloured cells, one cell per value.
+    """
+
+    node_type = "heatmap_1d"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = Heatmap1DParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(f"heatmap_1d: column {p.column!r} is not in the input data.")
+        values = pd.to_numeric(df[p.column], errors="coerce").to_numpy("float64")
+        if values.size == 0:
+            raise ValueError("heatmap_1d: no values to plot.")
+
+        cols = int(p.columns_per_row) or values.size
+        rows = int(np.ceil(values.size / cols))
+        padded = np.full(rows * cols, np.nan)
+        padded[: values.size] = values
+        grid = padded.reshape(rows, cols)
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = plt.subplots(figsize=_fig_size(p))
+            im = ax.imshow(grid, aspect="auto", cmap=p.colormap or "viridis")
+            ax.set_yticks([])
+            ax.set_xticks([])
+            if p.show_values:
+                for r in range(rows):
+                    for c in range(cols):
+                        v = grid[r, c]
+                        if np.isfinite(v):
+                            ax.text(
+                                c, r, f"{v:.{max(int(p.decimals), 0)}f}",
+                                ha="center", va="center", fontsize=7, color="white",
+                            )
+            if p.show_colorbar:
+                fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.15, pad=0.15)
+            if p.title:
+                ax.set_title(
+                    p.title, fontsize=p.title_font_size,
+                    fontweight="bold" if p.title_bold else "normal",
+                    fontstyle="italic" if p.title_italic else "normal",
+                )
+            fig.tight_layout()
+        return {"figure": fig}
+
+
+class AutocorrelogramParams(NodeParams):
+    """
+    Parameters for Autocorrelogram.
+
+    Attributes:
+        column: Numeric (discrete-time) series column, already ordered
+            by time (see the ``sort`` transform).
+        show_acf / show_pacf: Which correlogram(s) to draw -- unselect
+            one to show only the other; at least one must stay on.
+        max_lag: Number of lags to show.
+        show_ci: Draw the confidence band (shaded).
+        confidence_level: Confidence level for the band.
+        pacf_method: Estimation method for the partial ACF.
+    """
+
+    column: str = column_field(dtypes=("numeric",))
+    show_acf: bool = True
+    show_pacf: bool = True
+    max_lag: int = 20
+    show_ci: bool = True
+    confidence_level: float = unit_interval_field(
+        0.95, lo=0.5, hi=0.999, visible_when=("show_ci", "True"),
+    )
+    pacf_method: Literal["ywm", "ywadjusted", "ols", "ld"] = visible_field(
+        "ywm", visible_when=("show_pacf", "True"),
+    )
+    fig_width: float = 7.0
+    fig_height: float = 4.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class Autocorrelogram(Node):
+    """ACF and/or PACF of a discrete time series, with an optional confidence band."""
+
+    node_type = "autocorrelogram"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = AutocorrelogramParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        if not p.show_acf and not p.show_pacf:
+            raise ValueError("autocorrelogram: at least one of ACF / PACF must be selected.")
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        df = inputs["df"]
+        if p.column not in df.columns:
+            raise ValueError(f"autocorrelogram: column {p.column!r} is not in the input data.")
+        x = pd.to_numeric(df[p.column], errors="coerce").dropna().to_numpy("float64")
+        max_lag = max(int(p.max_lag), 1)
+        if x.size < max_lag + 2:
+            raise ValueError(
+                "autocorrelogram: not enough non-missing values for the requested max_lag."
+            )
+
+        alpha = (1.0 - float(p.confidence_level)) if p.show_ci else None
+        n_plots = int(p.show_acf) + int(p.show_pacf)
+
+        with plt.style.context(_BASE_STYLE):
+            fig, axes = plt.subplots(n_plots, 1, figsize=_fig_size(p), squeeze=False)
+            axes = axes[:, 0]
+            i = 0
+            if p.show_acf:
+                from statsmodels.graphics.tsaplots import plot_acf
+
+                plot_acf(x, lags=max_lag, alpha=alpha, ax=axes[i], title="ACF")
+                i += 1
+            if p.show_pacf:
+                from statsmodels.graphics.tsaplots import plot_pacf
+
+                plot_pacf(
+                    x, lags=max_lag, alpha=alpha, ax=axes[i],
+                    method=p.pacf_method, title="PACF",
+                )
+                i += 1
+            if p.title:
+                fig.suptitle(
+                    p.title, fontsize=p.title_font_size,
+                    fontweight="bold" if p.title_bold else "normal",
+                    fontstyle="italic" if p.title_italic else "normal",
+                )
+            fig.tight_layout()
+        return {"figure": fig}
+
+
+# ==========================================================================
+# 2D density plot
+# ==========================================================================
+
+
+class Density2DParams(NodeParams):
+    """
+    Parameters for Density2D.
+
+    Attributes:
+        x / y: Numeric columns.
+        kind: "contour" (a bivariate KDE, contour lines or filled) or
+            "hexbin" (binned counts -- scales better to a lot of data).
+        fill: Fill the KDE contours (contour only).
+        levels: Number of contour levels (contour only).
+        gridsize: Hexagon grid resolution (hexbin only).
+        colormap: Continuous colormap.
+        show_points: Overlay the raw (x, y) points, lightly.
+        the remaining fields: axes + figure size + title styling.
+    """
+
+    x: str = column_field(dtypes=("numeric",))
+    y: str = column_field(dtypes=("numeric",))
+    kind: Literal["contour", "hexbin"] = "contour"
+    fill: bool = visible_field(True, visible_when=("kind", "contour"))
+    levels: int = visible_field(10, visible_when=("kind", "contour"))
+    gridsize: int = visible_field(30, visible_when=("kind", "hexbin"))
+    colormap: str = reactive_choice_field(
+        options="colormaps", depends_on="x", default="viridis",
+    )
+    show_points: bool = False
+    x_label: str = ""
+    y_label: str = ""
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    fig_width: float = 6.0
+    fig_height: float = 4.5
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class Density2D(Node):
+    """2D density of two numeric columns: a bivariate KDE contour, or a hexbin count grid."""
+
+    node_type = "density_2d"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = Density2DParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        for col in (p.x, p.y):
+            if col not in df.columns:
+                raise ValueError(f"density_2d: column {col!r} is not in the input data.")
+        data = df[[p.x, p.y]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(data) < 3:
+            raise ValueError("density_2d: need at least 3 complete (x, y) rows.")
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = plt.subplots(figsize=_fig_size(p))
+            if p.kind == "contour":
+                import seaborn as sns
+
+                sns.kdeplot(
+                    data=data, x=p.x, y=p.y, fill=bool(p.fill),
+                    levels=max(int(p.levels), 2), cmap=p.colormap or "viridis", ax=ax,
+                )
+            else:
+                hb = ax.hexbin(
+                    data[p.x], data[p.y], gridsize=max(int(p.gridsize), 4),
+                    cmap=p.colormap or "viridis",
+                )
+                fig.colorbar(hb, ax=ax, label="count")
+            if p.show_points:
+                ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
+            _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
         return {"figure": fig}

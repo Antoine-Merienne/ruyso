@@ -1,7 +1,8 @@
 """
 Tests for the file-loading node family: each format round-trips a
-known DataFrame, and every loader applies the shared
-``datetime_columns`` / ``datetime_format`` handling.
+known DataFrame. Loaders do not coerce dtypes -- see
+``tests/nodes/test_transforms.py`` for ``change_type``'s datetime
+conversion (with an optional strptime format).
 """
 
 import pandas as pd
@@ -23,7 +24,6 @@ from ruyso_app.nodes.loaders import (
     ParquetLoaderParams,
     StataLoader,
     StataLoaderParams,
-    parse_datetime_columns,
 )
 
 import ruyso_app.nodes  # noqa: F401
@@ -108,40 +108,22 @@ def test_stata_loader(tmp_path, frame):
     assert df["value"].tolist() == [10.5, 20.0, 30.25]
 
 
-# -- shared datetime handling ------------------------------------------
+# -- loaders do not coerce dtypes ---------------------------------------
 
 
-def test_datetime_columns_are_parsed(tmp_path, frame):
+def test_csv_loader_leaves_a_date_looking_column_as_text(tmp_path, frame):
+    # dtype coercion is a transform's job (change_type) now, not a loader's.
     path = tmp_path / "s.csv"
     frame.to_csv(path, index=False)
-    df = CSVLoader(
-        params=CSVLoaderParams(
-            filepath=str(path), datetime_columns=["when"], datetime_format="%Y-%m-%d"
-        )
-    ).run()["df"]
-    assert pd.api.types.is_datetime64_any_dtype(df["when"])
-    assert df["when"].iloc[0] == pd.Timestamp("2021-01-01")
+    df = CSVLoader(params=CSVLoaderParams(filepath=str(path))).run()["df"]
+    assert not pd.api.types.is_datetime64_any_dtype(df["when"])
 
 
-def test_datetime_format_can_be_inferred_when_blank(frame):
-    out = parse_datetime_columns(frame.copy(), CSVLoaderParams(filepath="x", datetime_columns=["when"]))
-    assert pd.api.types.is_datetime64_any_dtype(out["when"])
-
-
-def test_unknown_datetime_column_raises(frame):
-    with pytest.raises(ValueError, match="not found"):
-        parse_datetime_columns(
-            frame.copy(), CSVLoaderParams(filepath="x", datetime_columns=["nope"])
-        )
-
-
-def test_every_file_loading_node_shares_the_datetime_params():
-    # ``example_data`` is a loader with no file / no datetime parsing; the
-    # shared params are for the file-path loaders (they subclass LoaderParams).
+def test_no_file_loading_node_has_a_datetime_param():
     for node_type, cls in NodeRegistry.all().items():
         if cls.category != "loading" or node_type == "example_data":
             continue
         fields = cls.params_schema.model_fields
-        assert "datetime_columns" in fields
-        assert "datetime_format" in fields
+        assert "datetime_columns" not in fields
+        assert "datetime_format" not in fields
         assert "filepath" in fields

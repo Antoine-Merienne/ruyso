@@ -1,14 +1,19 @@
 """
 Statistics nodes (macro type ``statistics``).
 
-One node per *family* of hypothesis test -- each with a ``test``
-dropdown and per-test parameters -- plus a ``regression`` node wrapping
-statsmodels' inference models (OLS / Logit / Poisson / Probit / RLM).
+One node per *family* of hypothesis test (node_type ending in
+``_test``) -- each with a ``test`` dropdown and per-test parameters --
+plus a handful of non-test tools: ``regression`` (statsmodels inference
+models), ``pca``, and the time-series forecasters ``arima`` /
+``auto_arima``. The Micro type dropdown groups the whole macro type
+into these two: non-tests first, then every ``*_test`` node
+(``ui.micro_type_groups``).
 
 Every node takes a ``df`` input and produces one or more ``df``
 outputs (a tidy results table), so results are browsable in the Table
 tab like any other DataFrame. scipy powers the classical tests;
-statsmodels powers the time-series tests and the regressions.
+statsmodels powers the time-series tests, the regressions, and ARIMA;
+scikit-learn powers PCA.
 """
 
 from __future__ import annotations
@@ -865,3 +870,412 @@ class Regression(Node):
             }
         )
         return {"coeffs": coeffs, "residuals": residuals}
+
+
+# --------------------------------------------------------------------------
+# PCA
+# --------------------------------------------------------------------------
+
+
+class PCAParams(NodeParams):
+    """
+    Attributes:
+        columns: Numeric columns to include (tickboxes; blank = every
+            numeric column).
+        n_components: Number of components to keep. 0 = keep every
+            component (``min(n_rows, n_columns)``).
+        standardize: Standardize each column (zero mean, unit variance)
+            before fitting -- recommended unless the columns are
+            already on comparable scales, since PCA is sensitive to it.
+        random_state: Seed for the randomized SVD solver (large inputs
+            only; ignored otherwise).
+    """
+
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    n_components: int = 0
+    standardize: bool = True
+    random_state: int = 0
+
+
+@register_node
+class PCA(Node):
+    """
+    Principal component analysis: reduce numeric columns to
+    uncorrelated components. ``scores`` is the transformed data
+    (PC1, PC2, ...); ``loadings`` is each original variable's weight in
+    each component; ``variance`` is the (cumulative) share of variance
+    each component explains.
+    """
+
+    node_type = "pca"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [
+        Port(name="scores", dtype="dataframe"),
+        Port(name="loadings", dtype="dataframe"),
+        Port(name="variance", dtype="dataframe"),
+    ]
+    params_schema = PCAParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        from sklearn.decomposition import PCA as SkPCA
+        from sklearn.preprocessing import StandardScaler
+
+        p = self.params
+        df = inputs["df"]
+        columns = p.columns or df.select_dtypes(include="number").columns.tolist()
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            raise ValueError(f"pca: column(s) not found in the input data: {missing}")
+        if len(columns) < 2:
+            raise ValueError("pca: need at least 2 numeric columns.")
+
+        data = df[columns].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(data) < 2:
+            raise ValueError("pca: not enough complete rows (need at least 2).")
+
+        X = data.to_numpy("float64")
+        if p.standardize:
+            X = StandardScaler().fit_transform(X)
+
+        n_components = min(int(p.n_components), len(columns), len(data)) if p.n_components else None
+        model = SkPCA(n_components=n_components, random_state=int(p.random_state))
+        transformed = model.fit_transform(X)
+
+        pc_names = [f"PC{i + 1}" for i in range(transformed.shape[1])]
+        scores = pd.DataFrame(transformed, columns=pc_names, index=data.index)
+
+        loadings = pd.DataFrame(
+            model.components_.T, index=pd.Index(columns, name="variable"), columns=pc_names
+        ).reset_index()
+
+        ratio = model.explained_variance_ratio_
+        variance = pd.DataFrame(
+            {
+                "component": pc_names,
+                "explained_variance": model.explained_variance_,
+                "explained_variance_ratio": ratio,
+                "cumulative_variance_ratio": np.cumsum(ratio),
+            }
+        )
+        return {"scores": scores, "loadings": loadings, "variance": variance}
+
+
+# --------------------------------------------------------------------------
+# ARIMA / AutoARIMA (statsmodels SARIMAX; the seasonal (P, D, Q, s) term
+# is how these handle/remove seasonality -- see ``ArimaParams.seasonal``)
+# --------------------------------------------------------------------------
+
+
+def _fit_sarimax(
+    x: np.ndarray, order: tuple[int, int, int], seasonal_order: tuple[int, int, int, int],
+    trend: str,
+) -> Any:
+    """Fit a (seasonal) ARIMA model. Assumes ``x`` is already ordered by
+    time (see the ``sort`` transform)."""
+    import warnings
+
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return SARIMAX(
+            x, order=order, seasonal_order=seasonal_order, trend=trend,
+            enforce_stationarity=False, enforce_invertibility=False,
+        ).fit(disp=False)
+
+
+def _forecast_table(res: Any, forecast_periods: int, confidence_level: float) -> pd.DataFrame:
+    alpha = 1.0 - float(confidence_level)
+    forecast = res.get_forecast(steps=max(int(forecast_periods), 1))
+    mean = np.asarray(forecast.predicted_mean, dtype="float64")
+    ci = np.asarray(forecast.conf_int(alpha=alpha), dtype="float64")
+    return pd.DataFrame(
+        {
+            "step": np.arange(1, len(mean) + 1),
+            "forecast": mean,
+            "ci_low": ci[:, 0],
+            "ci_high": ci[:, 1],
+        }
+    )
+
+
+def _fit_summary_table(
+    res: Any, order: tuple[int, int, int], seasonal_order: tuple[int, int, int, int]
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "order": str(order),
+                "seasonal_order": str(seasonal_order),
+                "aic": float(res.aic),
+                "bic": float(res.bic),
+                "log_likelihood": float(res.llf),
+                "n_obs": int(res.nobs),
+            }
+        ]
+    )
+
+
+class ArimaParams(NodeParams):
+    """
+    Attributes:
+        column: Numeric time-series column, already ordered by time
+            (see the ``sort`` transform).
+        p / d / q: Non-seasonal ARIMA order -- AR terms, differencing,
+            MA terms.
+        seasonal: Also fit a seasonal (P, D, Q, s) component -- this is
+            how a seasonal pattern is taken out of the series (a
+            seasonal difference, ``D`` >= 1, removes it structurally;
+            the seasonal AR/MA terms model what's left of it).
+        P / D / Q: Seasonal order (used only when ``seasonal`` is on).
+        seasonal_periods: s -- the season length (e.g. 12 for monthly
+            data with a yearly cycle, 7 for daily with a weekly cycle).
+        trend: Deterministic trend term -- "n" none, "c" constant,
+            "t" linear, "ct" both.
+        forecast_periods: Steps to forecast beyond the data.
+        confidence_level: Confidence level for the forecast interval.
+    """
+
+    column: str = column_field(dtypes=("numeric",))
+    p: int = 1
+    d: int = 0
+    q: int = 0
+    seasonal: bool = False
+    P: int = visible_field(0, visible_when=("seasonal", "True"))
+    D: int = visible_field(0, visible_when=("seasonal", "True"))
+    Q: int = visible_field(0, visible_when=("seasonal", "True"))
+    seasonal_periods: int = visible_field(12, visible_when=("seasonal", "True"))
+    trend: Literal["n", "c", "t", "ct"] = "c"
+    forecast_periods: int = 10
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+
+
+@register_node
+class Arima(Node):
+    """
+    ARIMA(p,d,q)(P,D,Q)s: fit a (seasonal) ARIMA model on a chosen
+    order and forecast forward. ``fit`` is a one-row summary (order,
+    AIC/BIC, log-likelihood); ``forecast`` has one row per step
+    (forecast value + confidence interval). See ``auto_arima`` for an
+    automatic order search.
+    """
+
+    node_type = "arima"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [
+        Port(name="fit", dtype="dataframe"),
+        Port(name="forecast", dtype="dataframe"),
+    ]
+    params_schema = ArimaParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        x = _num(inputs["df"], p.column, "arima").dropna().to_numpy("float64")
+        if x.size < 10:
+            raise ValueError("arima: need at least 10 non-missing values.")
+
+        order = (int(p.p), int(p.d), int(p.q))
+        seasonal_order = (
+            (int(p.P), int(p.D), int(p.Q), int(p.seasonal_periods))
+            if p.seasonal else (0, 0, 0, 0)
+        )
+        res = _fit_sarimax(x, order, seasonal_order, p.trend)
+        return {
+            "fit": _fit_summary_table(res, order, seasonal_order),
+            "forecast": _forecast_table(res, p.forecast_periods, p.confidence_level),
+        }
+
+
+def _select_d(x: np.ndarray, max_d: int) -> int:
+    """
+    ADF-based differencing order: the smallest ``d`` in ``[0, max_d]``
+    at which the ``d``-times-differenced series looks stationary (ADF
+    p-value < 0.05); ``max_d`` if none does.
+    """
+    import warnings
+
+    from statsmodels.tsa.stattools import adfuller
+
+    series = x.astype("float64", copy=True)
+    for d in range(max_d + 1):
+        if len(series) < 10:
+            return d
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                pval = float(adfuller(series, autolag="AIC")[1])
+            except (ValueError, np.linalg.LinAlgError):
+                return d
+        if pval < 0.05:
+            return d
+        series = np.diff(series)
+    return max_d
+
+
+def _stepwise_search(
+    x: np.ndarray, max_p: int, d: int, max_q: int, seasonal: bool,
+    max_P: int, D: int, max_Q: int, seasonal_periods: int, trend: str, ic: str,
+) -> tuple[tuple[int, int, int], tuple[int, int, int, int], Any]:
+    """
+    Hyndman-Khandakar-style stepwise search: hill-climb over (p, q)
+    (and (P, Q), if ``seasonal``) from a few seed models, at each step
+    moving to whichever neighbour ((p +/- 1, q), (p, q +/- 1), ...)
+    improves ``ic`` (AIC or BIC) the most, until none does. This finds
+    a good order in a handful of fits instead of a full grid over every
+    (p, q) combination -- the same idea as the reference R
+    implementation, simplified: ``d`` comes from ``_select_d`` and
+    ``D`` from a fixed rule (see ``AutoArimaParams``), not a
+    seasonal unit-root test.
+    """
+    import warnings
+
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    def ic_of(res: Any) -> float:
+        return float(res.aic if ic == "aic" else res.bic)
+
+    def fit(p: int, q: int, P: int, Q: int) -> Any:
+        s_order = (P, D, Q, seasonal_periods) if seasonal else (0, 0, 0, 0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return SARIMAX(
+                x, order=(p, d, q), seasonal_order=s_order, trend=trend,
+                enforce_stationarity=False, enforce_invertibility=False,
+            ).fit(disp=False)
+
+    seeds = [(min(2, max_p), min(2, max_q)), (0, 0), (1, 0), (0, 1)]
+    seeds = [
+        (p, q, min(1, max_P), min(1, max_Q)) if seasonal else (p, q, 0, 0)
+        for p, q in seeds
+    ]
+
+    best: tuple[int, int, int, int] | None = None
+    best_ic = float("inf")
+    best_res: Any = None
+    tried: set[tuple[int, int, int, int]] = set()
+
+    def try_point(p: int, q: int, P: int, Q: int) -> None:
+        nonlocal best, best_ic, best_res
+        key = (p, q, P, Q)
+        if key in tried or not (0 <= p <= max_p and 0 <= q <= max_q):
+            return
+        if seasonal and not (0 <= P <= max_P and 0 <= Q <= max_Q):
+            return
+        tried.add(key)
+        if p == q == P == Q == 0 and d == 0 and D == 0:
+            return  # a null model is not a meaningful fit
+        try:
+            res = fit(p, q, P, Q)
+        except Exception:  # noqa: BLE001 - an unfittable order is just skipped
+            return
+        value = ic_of(res)
+        if value < best_ic:
+            best, best_ic, best_res = key, value, res
+
+    for seed in seeds:
+        try_point(*seed)
+    if best is None:
+        best = (0, 0, 0, 0)
+        best_res = fit(*best)
+        best_ic = ic_of(best_res)
+
+    improved = True
+    while improved:
+        improved = False
+        p, q, P, Q = best
+        neighbors = [(p + 1, q, P, Q), (p - 1, q, P, Q), (p, q + 1, P, Q), (p, q - 1, P, Q)]
+        if seasonal:
+            neighbors += [
+                (p, q, P + 1, Q), (p, q, P - 1, Q), (p, q, P, Q + 1), (p, q, P, Q - 1),
+            ]
+        before = best_ic
+        for candidate in neighbors:
+            try_point(*candidate)
+        improved = best_ic < before
+
+    p, q, P, Q = best
+    order = (p, d, q)
+    seasonal_order = (P, D, Q, seasonal_periods) if seasonal else (0, 0, 0, 0)
+    return order, seasonal_order, best_res
+
+
+class AutoArimaParams(NodeParams):
+    """
+    Attributes:
+        column: Numeric time-series column, already ordered by time.
+        max_p / max_d / max_q: Upper bound for the non-seasonal search
+            (``d`` itself is chosen automatically -- see ``arima.py``
+            ``_select_d`` -- up to ``max_d``).
+        seasonal: Also search a seasonal (P, D, Q, s) component -- how
+            this node takes seasonality out of the series (see
+            ``ArimaParams.seasonal``).
+        max_P / max_Q: Upper bound for the seasonal AR/MA search order
+            (used only when ``seasonal`` is on). The seasonal
+            differencing order ``D`` is fixed at 1 when seasonal
+            (0 otherwise), the usual rule of thumb, rather than
+            searched.
+        seasonal_periods: s -- the season length.
+        trend: Deterministic trend term.
+        information_criterion: Criterion the stepwise search minimises.
+        forecast_periods / confidence_level: as ``arima``.
+    """
+
+    column: str = column_field(dtypes=("numeric",))
+    max_p: int = 5
+    max_d: int = 2
+    max_q: int = 5
+    seasonal: bool = False
+    max_P: int = visible_field(2, visible_when=("seasonal", "True"))
+    max_Q: int = visible_field(2, visible_when=("seasonal", "True"))
+    seasonal_periods: int = visible_field(12, visible_when=("seasonal", "True"))
+    trend: Literal["n", "c", "t", "ct"] = "c"
+    information_criterion: Literal["aic", "bic"] = "aic"
+    forecast_periods: int = 10
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+
+
+@register_node
+class AutoArima(Node):
+    """
+    Stepwise ARIMA order search (Hyndman-Khandakar-style, minimizing
+    AIC/BIC -- see ``_stepwise_search``), then forecast forward with
+    the chosen order. Same outputs as ``arima``, plus the search
+    reveals its choice through the ``order`` / ``seasonal_order``
+    columns of ``fit``.
+    """
+
+    node_type = "auto_arima"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [
+        Port(name="fit", dtype="dataframe"),
+        Port(name="forecast", dtype="dataframe"),
+    ]
+    params_schema = AutoArimaParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        x = _num(inputs["df"], p.column, "auto_arima").dropna().to_numpy("float64")
+        min_needed = 3 * int(p.seasonal_periods) if p.seasonal else 10
+        if x.size < max(min_needed, 10):
+            raise ValueError(
+                "auto_arima: not enough non-missing values for the requested search."
+            )
+
+        d = _select_d(x, max(int(p.max_d), 0))
+        D = 1 if p.seasonal else 0  # the usual rule of thumb, not searched
+
+        order, seasonal_order, res = _stepwise_search(
+            x, max(int(p.max_p), 0), d, max(int(p.max_q), 0), p.seasonal,
+            max(int(p.max_P), 0), D, max(int(p.max_Q), 0), int(p.seasonal_periods),
+            p.trend, p.information_criterion,
+        )
+        return {
+            "fit": _fit_summary_table(res, order, seasonal_order),
+            "forecast": _forecast_table(res, p.forecast_periods, p.confidence_level),
+        }

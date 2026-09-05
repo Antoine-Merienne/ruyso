@@ -6,7 +6,7 @@ discovered in ``ruyso_app.nodes``.
 Kept deliberately small: NodeGraphQt provides selection and port
 connecting out of the box; this module registers every node type,
 applies ``ui.theme``'s canvas colors, and installs
-``CanvasNavigation`` to remap pan / zoom to trackpad gestures.
+``CanvasNavigation`` to remap pan / zoom to mouse and trackpad gestures.
 """
 
 from __future__ import annotations

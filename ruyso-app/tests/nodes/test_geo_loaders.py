@@ -1,11 +1,10 @@
 """
 Tests for the geospatial loader nodes: each reads a vector file back
-into a GeoDataFrame with a geometry column, and shares the loaders'
-datetime handling.
+into a GeoDataFrame with a geometry column. Loaders do not coerce
+dtypes -- see ``tests/nodes/test_loaders.py``.
 """
 
 import geopandas as gpd
-import pandas as pd
 import pytest
 from shapely.geometry import Point
 
@@ -54,12 +53,3 @@ def test_geopackage_loader_with_layer(tmp_path, gdf):
         params=GeoPackageLoaderParams(filepath=str(path), layer="places")
     ).run()["gdf"]
     assert list(out["name"]) == ["a", "b", "c"]
-
-
-def test_geo_loader_parses_datetime_columns(tmp_path, gdf):
-    path = tmp_path / "s.geojson"
-    gdf.to_file(path, driver="GeoJSON")
-    out = GeoJSONLoader(
-        params=LoaderParams(filepath=str(path), datetime_columns=["when"])
-    ).run()["gdf"]
-    assert pd.api.types.is_datetime64_any_dtype(out["when"])

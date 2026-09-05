@@ -19,6 +19,7 @@ dependencies = [
     "geopandas>=1",
     "pyarrow",
     "openpyxl",
+    "optuna",
 ]
 
 [project.optional-dependencies]
@@ -27,3 +28,8 @@ ui = ["PySide6>=6.5", "NodeGraphQt>=0.6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Pre-seeded seaborn example-dataset cache (see nodes/example_data.py) so
+# "seaborn/..." example datasets load without any network access.
+ruyso_app = ["nodes/data/seaborn/*.csv"]

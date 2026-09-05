@@ -1,26 +1,37 @@
 """
-Nodes that *consume* a fitted model (the ``model`` port).
+Nodes that *consume* a fitted model (the ``model`` port) or an
+optimize-section run (the ``optim`` port -- see
+``nodes.models.SklearnFitNode``).
 
-These turn a trained scikit-learn estimator into something inspectable:
+Model-consuming:
 
 * ``predict``       -- score a DataFrame, appending a prediction column
                        (and per-class probabilities for a classifier).
 * ``model_coeffs``  -- the model's coefficients (or feature importances)
                        as a tidy DataFrame, viewable in the Table tab.
 * ``model_scores``  -- a chosen set of metrics on a held-out (X, y),
-                       as a ``metric`` / ``value`` DataFrame.
+                       as a ``metric`` / ``value`` DataFrame. Whether
+                       classification or regression metrics actually get
+                       computed is detected from the model itself.
 * ``residuals``     -- ``y_true`` / ``y_pred`` / ``residual`` per row
                        (regression only).
 
-All four are in the ``model`` macro type. The evaluation nodes take
-the same ``X`` (dataframe) + ``y`` (array) ports that ``train_test_split``
-produces.
+Optim-consuming:
+
+* ``optim_diagnostic`` -- one-row summary of an optimize run (method,
+                       metric, trial count, best score, best value per
+                       searched parameter).
+* ``optim_scores``  -- the per-trial train/test score table.
+
+All six are in the ``model`` macro type. The model-consuming
+evaluation nodes take the same ``X`` (dataframe) + ``y`` (array) ports
+that ``train_test_split`` produces.
 """
 
 from typing import Any, Literal
 
 from ruyso_app.core.node import Node, NodeParams
-from ruyso_app.core.params import checkbox_list_field, visible_field
+from ruyso_app.core.params import checkbox_list_field
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
 
@@ -216,27 +227,26 @@ class ModelScoresParams(NodeParams):
     Parameters for ModelScores.
 
     Attributes:
-        task: Whether to compute classification or regression metrics.
         classification_metrics / regression_metrics: Which metrics to
             report (tickboxes), one per row of the output DataFrame.
+            Both lists are always editable; only the one matching the
+            wired-in model actually gets computed (a classifier or
+            regressor is detected from the model itself via
+            ``sklearn.base.is_classifier``, not from a separate
+            "task" toggle) -- so the node produces a sensible result
+            with its defaults as soon as it is wired up, whichever kind
+            of model that is, with nothing to configure first.
         average: Averaging for multiclass precision / recall / f1 /
-            roc_auc (ignored for a binary target).
+            roc_auc (ignored for a binary target, and for a regressor).
     """
 
-    task: Literal["classification", "regression"] = "classification"
     classification_metrics: list[str] = checkbox_list_field(
-        choices=_CLASSIFICATION_METRICS,
-        default=["accuracy", "f1"],
-        visible_when=("task", "classification"),
+        choices=_CLASSIFICATION_METRICS, default=["accuracy", "f1"],
     )
     regression_metrics: list[str] = checkbox_list_field(
-        choices=_REGRESSION_METRICS,
-        default=["r2", "mae", "rmse"],
-        visible_when=("task", "regression"),
+        choices=_REGRESSION_METRICS, default=["r2", "mae", "rmse"],
     )
-    average: Literal["macro", "micro", "weighted"] = visible_field(
-        "macro", visible_when=("task", "classification")
-    )
+    average: Literal["macro", "micro", "weighted"] = "macro"
 
 
 @register_node
@@ -257,13 +267,19 @@ class ModelScores(Node):
         self.validate_inputs(inputs)
         import numpy as np
         import pandas as pd
+        from sklearn.base import is_classifier
 
         p = self.params
         model = inputs["model"]
         X = align_features_to_model(inputs["X"], model)
         y_true = np.asarray(inputs["y"])
 
-        if p.task == "classification":
+        # The model itself says whether it is a classifier or a
+        # regressor -- there is nothing to pick, and no way for a
+        # stale/default choice to silently score the wrong metric set
+        # (e.g. accuracy/f1 against a regressor's continuous output,
+        # which is always NaN).
+        if is_classifier(model):
             scores = _classification_scores(
                 model, X, y_true, p.classification_metrics or [], p.average
             )
@@ -415,3 +431,76 @@ class Residuals(Node):
             spread = float(np.std(residual, ddof=1)) or 1.0
             out["std_residual"] = residual / spread
         return {"df": out}
+
+
+# --------------------------------------------------------------------------
+# optim_diagnostic / optim_scores -- consume an ``optim`` object
+# --------------------------------------------------------------------------
+
+
+def _require_optim(node_type: str, optim: Any) -> dict[str, Any]:
+    """Raise a clear error if the wired-in fit node never ran 'optimize'."""
+    if not optim:
+        raise ValueError(
+            f"{node_type}: the wired-in fit node has no optimization run to show "
+            f"-- tick 'optimize' in its Options panel (and wire X_test/y_test)."
+        )
+    return optim
+
+
+class OptimDiagnosticParams(NodeParams):
+    """OptimDiagnostic has no parameters of its own -- it just summarizes ``optim``."""
+
+
+@register_node
+class OptimDiagnostic(Node):
+    """
+    One-row summary of a fit node's "optimize" run: method, metric,
+    trial count, best score, and the best value found for each searched
+    parameter (as ``best_<param>`` columns).
+    """
+
+    node_type = "optim_diagnostic"
+    category = "model"
+    inputs = [Port(name="optim", dtype="optim")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = OptimDiagnosticParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        optim = _require_optim(self.node_type, inputs["optim"])
+        row = {
+            "method": optim["method"],
+            "metric": optim["metric"],
+            "direction": optim["direction"],
+            "n_trials": optim["n_trials"],
+            "best_value": optim["best_value"],
+        }
+        row.update({f"best_{name}": value for name, value in optim["best_params"].items()})
+        return {"df": pd.DataFrame([row])}
+
+
+class OptimScoresParams(NodeParams):
+    """OptimScores has no parameters of its own -- it just unpacks ``optim``."""
+
+
+@register_node
+class OptimScores(Node):
+    """
+    The training and testing score after each optimize-section trial,
+    as a DataFrame (one row per trial, plus the sampled parameter
+    values for that trial).
+    """
+
+    node_type = "optim_scores"
+    category = "model"
+    inputs = [Port(name="optim", dtype="optim")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = OptimScoresParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        optim = _require_optim(self.node_type, inputs["optim"])
+        return {"df": optim["trials"]}

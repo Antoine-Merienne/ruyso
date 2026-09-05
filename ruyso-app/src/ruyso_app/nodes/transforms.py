@@ -10,6 +10,7 @@ from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
     category_map_field,
     checkbox_list_field,
+    code_field,
     column_field,
     column_map_field,
     reactive_choice_field,
@@ -19,6 +20,13 @@ from ruyso_app.core.params import (
 )
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
+
+#: strptime patterns offered (non-binding) by every datetime-related
+#: field in this module (``change_type`` -> datetime, ``combine_datetime``,
+#: ``split_datetime``).
+_COMMON_DATETIME_FORMATS = [
+    "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d", "ISO8601",
+]
 
 
 class DropNAParams(NodeParams):
@@ -118,6 +126,8 @@ class ChangeTypeParams(NodeParams):
         target_type: Target dtype -- one of str / category / bool /
             int / float / datetime. The Options panel narrows this list
             to the conversions that make sense for ``column``.
+        datetime_format: strptime pattern used only when ``target_type``
+            is "datetime" (blank = let pandas infer).
         errors: "raise" fails on an un-convertible value; "coerce"
             turns it into NaN/NaT (numeric / datetime targets only).
     """
@@ -125,6 +135,12 @@ class ChangeTypeParams(NodeParams):
     column: str = column_field(dtypes=("any",))
     target_type: str = reactive_choice_field(
         options="cast_types", depends_on="column", default="str"
+    )
+    datetime_format: str = suggestions_field(
+        suggestions=_COMMON_DATETIME_FORMATS,
+        default="",
+        description="strptime format, e.g. %Y-%m-%d. Blank = infer.",
+        visible_when=("target_type", "datetime"),
     )
     errors: Literal["raise", "coerce"] = "raise"
 
@@ -155,7 +171,9 @@ class ChangeType(Node):
             numeric = pd.to_numeric(series, errors=errors)
             df[col] = numeric.astype("Int64" if target == "int" else "float64")
         elif target == "datetime":
-            df[col] = pd.to_datetime(series, errors=errors)
+            df[col] = pd.to_datetime(
+                series, format=self.params.datetime_format or None, errors=errors
+            )
         elif target == "bool":
             df[col] = series.astype("boolean")
         elif target == "category":
@@ -1406,11 +1424,6 @@ _DT_COMPONENTS = [
 #: A few common target frequencies for the resample node's ``rule``.
 _RESAMPLE_RULES = ["YS", "QS", "MS", "W", "D", "h", "30min", "15min", "min", "s"]
 
-#: strptime patterns offered (non-binding) by the datetime nodes.
-_COMMON_DATETIME_FORMATS = [
-    "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d", "ISO8601",
-]
-
 
 class CombineDatetimeParams(NodeParams):
     """
@@ -1691,3 +1704,159 @@ class ResampleDatetime(Node):
             res = res.interpolate(method="time")
 
         return {"df": res.reset_index(names=p.datetime_column)}
+
+
+# --------------------------------------------------------------------------
+# Diff (time-series row-order difference)
+# --------------------------------------------------------------------------
+
+
+class DiffParams(NodeParams):
+    """
+    Parameters for Diff.
+
+    Attributes:
+        columns: Numeric columns to difference. Blank (default) = every
+            numeric column.
+        lags: Comma-separated period(s) to diff over, e.g. ``1`` or
+            ``1, 7, 30``. Each produces one ``<column>_diff_<lag>``
+            column (``Series.diff(periods=lag)``; a negative lag looks
+            forward instead of back). Assumes the rows are already
+            ordered by time (see the ``sort`` node) -- this is a plain
+            row-order difference, not aware of any datetime column.
+        replace: Drop the source columns, keeping only the diff columns.
+    """
+
+    columns: list[str] | None = column_field(dtypes=("numeric",), default=None)
+    lags: str = "1"
+    replace: bool = False
+
+
+@register_node
+class Diff(Node):
+    """Row-order difference of numeric columns (e.g. a time series already sorted by time)."""
+
+    node_type = "diff"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = DiffParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"].copy()
+        columns = p.columns or df.select_dtypes(include="number").columns.tolist()
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            raise ValueError(f"diff: column(s) not found in the input data: {missing}")
+
+        try:
+            lags = [int(v.strip()) for v in p.lags.split(",") if v.strip()]
+        except ValueError:
+            raise ValueError(
+                f"diff: could not read lags {p.lags!r}; separate them with commas, "
+                f"e.g. '1, 7'."
+            ) from None
+        if not lags:
+            raise ValueError("diff: at least one lag is required.")
+
+        for column in columns:
+            series = pd.to_numeric(df[column], errors="coerce")
+            for lag in lags:
+                df[f"{column}_diff_{lag}"] = series.diff(periods=lag)
+
+        if p.replace:
+            df = df.drop(columns=columns)
+        return {"df": df}
+
+
+# --------------------------------------------------------------------------
+# CustomOperation (user-written Python against the DataFrame)
+# --------------------------------------------------------------------------
+
+#: Builtins left available inside a ``custom_operation`` node's code --
+#: everything else (``import``, ``open``, ``exec``, ``eval``, ...) is
+#: not, so a typo or a pasted snippet can't reach the filesystem or the
+#: network by accident. This is a light guard rail, not a security
+#: sandbox: the app runs locally and the code is the user's own.
+_CUSTOM_OPERATION_BUILTINS = (
+    "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
+    "int", "len", "list", "map", "max", "min", "range", "reversed",
+    "round", "set", "sorted", "str", "sum", "tuple", "zip",
+)
+
+#: ``math`` functions/constants bound by name alongside ``pd`` / ``np``.
+#: Kept in sync with ``ui.options_panel.OptionsPanel._CODE_HINT_GLOBALS``,
+#: the hint shown under the code editor.
+_CUSTOM_OPERATION_MATH_NAMES = (
+    "exp", "log", "log2", "log10", "sqrt", "sin", "cos", "tan",
+    "floor", "ceil", "pi", "e",
+)
+
+
+class CustomOperationParams(NodeParams):
+    """
+    Parameters for CustomOperation.
+
+    Attributes:
+        code: Python statements run against the input DataFrame, bound
+            to the name ``df`` -- mutate it in place or reassign it,
+            e.g. ``df['b'] = df['a'] / np.exp(df['c'])``. ``pd``
+            (pandas), ``np`` (numpy) and the common ``math`` functions
+            (exp, log, log2, log10, sqrt, sin, cos, tan, floor, ceil,
+            pi, e) are already available by name; a reduced builtins
+            set is used (no import / open / exec / eval) as a light
+            guard rail, not a security sandbox.
+    """
+
+    code: str = code_field(default="")
+
+
+@register_node
+class CustomOperation(Node):
+    """Run user-written Python against the input DataFrame (bound as ``df``)."""
+
+    node_type = "custom_operation"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = CustomOperationParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import builtins
+        import math
+
+        import numpy as np
+        import pandas as pd
+
+        code = self.params.code
+        df = inputs["df"]
+        if not code.strip():
+            return {"df": df}
+
+        namespace: dict[str, Any] = {
+            "__builtins__": {n: getattr(builtins, n) for n in _CUSTOM_OPERATION_BUILTINS},
+            "df": df.copy(),
+            "pd": pd,
+            "np": np,
+            **{n: getattr(math, n) for n in _CUSTOM_OPERATION_MATH_NAMES},
+        }
+        try:
+            exec(compile(code, "<custom_operation>", "exec"), namespace)  # noqa: S102
+        except SyntaxError as exc:
+            raise ValueError(f"custom_operation: syntax error - {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
+            raise ValueError(f"custom_operation: {type(exc).__name__}: {exc}") from exc
+
+        result = namespace.get("df")
+        if not isinstance(result, pd.DataFrame):
+            got = "nothing" if result is None else type(result).__name__
+            raise ValueError(
+                f"custom_operation: 'df' must still be a DataFrame after your code "
+                f"runs (got {got})."
+            )
+        return {"df": result}

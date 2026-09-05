@@ -4,7 +4,7 @@ remap for the pipeline canvas.
 """
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QContextMenuEvent, QKeyEvent, QMouseEvent, QWheelEvent
 
 from ruyso_app.ui.canvas import PipelineCanvas
 
@@ -89,6 +89,112 @@ def test_plain_left_press_is_left_for_nodegraphqt(qapp):
         canvas.graph.viewer().viewport(), _mouse(QEvent.MouseButtonPress, (100, 100))
     )
     assert consumed is False
+
+
+def test_plain_mouse_wheel_zooms(qapp):
+    # A real mouse wheel reports only angleDelta (no pixelDelta) and no
+    # modifier -> it must zoom, not pan.
+    canvas = PipelineCanvas()
+    viewer = canvas.graph.viewer()
+    nav = canvas._navigation
+    before = _range(viewer)
+
+    consumed = nav.eventFilter(viewer.viewport(), _wheel(angle=(0, 120)))
+
+    assert consumed is True
+    assert _range(viewer)[2:] != before[2:]  # scaled -> zoom
+
+
+def test_right_drag_pans(qapp):
+    canvas = PipelineCanvas()
+    viewer = canvas.graph.viewer()
+    vp = viewer.viewport()
+    nav = canvas._navigation
+
+    press = nav.eventFilter(
+        vp, _mouse(QEvent.MouseButtonPress, (100, 100), button=Qt.RightButton)
+    )
+    assert press is True and nav._rmb_active
+
+    before = _range(viewer)
+    nav.eventFilter(
+        vp, _mouse(QEvent.MouseMove, (170, 140), button=Qt.NoButton, buttons=Qt.RightButton)
+    )
+    after = _range(viewer)
+    assert nav._rmb_panning
+    assert after[:2] != before[:2]  # translated
+    assert after[2:] == before[2:]  # ... not scaled
+
+    release = nav.eventFilter(
+        vp, _mouse(QEvent.MouseButtonRelease, (170, 140), button=Qt.RightButton)
+    )
+    assert release is True and not nav._rmb_active
+
+
+def test_context_menu_event_is_swallowed(qapp):
+    canvas = PipelineCanvas()
+    nav = canvas._navigation
+    evt = QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(10, 10))
+    assert nav.eventFilter(canvas.graph.viewer(), evt) is True
+
+
+def test_right_click_without_drag_opens_the_context_menu(qapp):
+    canvas = PipelineCanvas()
+    viewer = canvas.graph.viewer()
+    vp = viewer.viewport()
+    nav = canvas._navigation
+
+    calls = []
+    viewer.contextMenuEvent = lambda event: calls.append(event)
+
+    nav.eventFilter(vp, _mouse(QEvent.MouseButtonPress, (100, 100), button=Qt.RightButton))
+    # a jitter below the drag threshold does not start a pan
+    nav.eventFilter(
+        vp, _mouse(QEvent.MouseMove, (101, 100), button=Qt.NoButton, buttons=Qt.RightButton)
+    )
+    assert not nav._rmb_panning
+    nav.eventFilter(vp, _mouse(QEvent.MouseButtonRelease, (101, 100), button=Qt.RightButton))
+
+    qapp.processEvents()  # the menu is opened on the next event-loop tick
+    assert len(calls) == 1
+
+
+def test_right_drag_does_not_open_the_context_menu(qapp):
+    canvas = PipelineCanvas()
+    viewer = canvas.graph.viewer()
+    vp = viewer.viewport()
+    nav = canvas._navigation
+
+    calls = []
+    viewer.contextMenuEvent = lambda event: calls.append(event)
+
+    nav.eventFilter(vp, _mouse(QEvent.MouseButtonPress, (100, 100), button=Qt.RightButton))
+    nav.eventFilter(
+        vp, _mouse(QEvent.MouseMove, (170, 140), button=Qt.NoButton, buttons=Qt.RightButton)
+    )
+    nav.eventFilter(vp, _mouse(QEvent.MouseButtonRelease, (170, 140), button=Qt.RightButton))
+
+    qapp.processEvents()
+    assert calls == []
+
+
+def test_plain_right_press_is_consumed_but_left_press_passes_through(qapp):
+    canvas = PipelineCanvas()
+    nav = canvas._navigation
+    viewer = canvas.graph.viewer()
+    vp = viewer.viewport()
+    viewer.contextMenuEvent = lambda event: None  # never open the real (modal) menu
+
+    assert (
+        nav.eventFilter(vp, _mouse(QEvent.MouseButtonPress, (5, 5), button=Qt.RightButton))
+        is True
+    )
+    # clean up the half-open right-button gesture
+    nav.eventFilter(vp, _mouse(QEvent.MouseButtonRelease, (5, 5), button=Qt.RightButton))
+    assert (
+        nav.eventFilter(vp, _mouse(QEvent.MouseButtonPress, (5, 5), button=Qt.LeftButton))
+        is False
+    )
 
 
 def test_pinch_gesture_zooms(qapp):

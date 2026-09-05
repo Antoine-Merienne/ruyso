@@ -27,7 +27,7 @@ import json
 from NodeGraphQt import BaseNode
 from NodeGraphQt.constants import NodePropWidgetEnum
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -56,6 +57,7 @@ from ruyso_app.ui.column_spec import (
     warning_message,
 )
 from ruyso_app.ui.file_filters import filter_for
+from ruyso_app.ui.micro_type_groups import grouped_micro_types
 from ruyso_app.ui.property_forms import iter_field_specs
 
 #: Minimum width; the panel lives in a splitter and can be widened.
@@ -70,6 +72,26 @@ _SENTINEL_COLOR = QColor(150, 150, 150)
 
 #: "no column" row in a column-map table dropdown.
 _BLANK = "—"
+
+
+def _node_tagline(core_cls: type) -> str:
+    """Short "what this node does" text for the Options pane.
+
+    Uses the core node's ``tagline`` class attribute; when that is
+    blank, falls back to the first non-empty line of its docstring.
+    """
+    text = (getattr(core_cls, "tagline", "") or "").strip()
+    if text:
+        return " ".join(text.split())
+    doc = (core_cls.__doc__ or "").strip()
+    if not doc:
+        return ""
+    # First paragraph of the docstring, whitespace collapsed, trimmed to
+    # its first one or two full sentences so a wrapped opening line is
+    # not cut mid-clause.
+    paragraph = " ".join(doc.split("\n\n", 1)[0].split()).replace("``", "")
+    sentences = paragraph.replace(". ", ".\x00").split("\x00")
+    return " ".join(sentences[:2]).strip()
 
 
 def _prepend_clear_sentinel(combo: QComboBox, label: str) -> None:
@@ -129,9 +151,25 @@ class OptionsPanel(QWidget):
         self._category_maps: dict[str, tuple] = {}
         # column-map field name -> repopulate()  (key -> input-column table)
         self._column_maps: dict[str, object] = {}
+        # code field name -> refresh_hint()  (updates the column-name hint)
+        self._code_hints: dict[str, object] = {}
 
         self._title = QLabel("Options", self)
         self._title.setStyleSheet("font-weight: bold;")
+        self._title.setAlignment(Qt.AlignCenter)
+
+        # Read-only "what this node does" blurb, shown just under the
+        # Micro type dropdown. Filled from the core node's ``tagline``
+        # (falling back to the first docstring line) by ``show_node``.
+        self._node_help = QLabel("", self)
+        self._node_help.setObjectName("ruysoNodeHelp")
+        self._node_help.setWordWrap(True)
+        self._node_help.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._node_help.setStyleSheet(
+            "QLabel#ruysoNodeHelp { color: palette(mid); font-size: 11px; "
+            "padding: 10px 0 8px 0; line-height: 140%; }"
+        )
+        self._node_help.setVisible(False)
 
         self._macro_combo = QComboBox(self)
         for category, label in theme.MACRO_TYPE_LABELS.items():
@@ -142,6 +180,9 @@ class OptionsPanel(QWidget):
         self._micro_combo.currentTextChanged.connect(self._on_micro_combo_changed)
 
         self._header_form = QFormLayout()
+        self._header_form.setVerticalSpacing(10)
+        self._header_form.setHorizontalSpacing(10)
+        self._header_form.setContentsMargins(0, 4, 0, 4)
         self._header_form.addRow("Macro type", self._macro_combo)
         self._header_form.addRow("Micro type", self._micro_combo)
 
@@ -149,9 +190,21 @@ class OptionsPanel(QWidget):
         self._placeholder.setWordWrap(True)
 
         self._params_host = QWidget()
-        self._params_form = QFormLayout(self._params_host)
+        # A trailing stretch keeps the rows packed against the top so a
+        # short form (or one with many hidden rows) never spreads its
+        # widgets out with gaps between them.
+        host_box = QVBoxLayout(self._params_host)
+        host_box.setContentsMargins(0, 0, 0, 0)
+        host_box.setSpacing(0)
+        self._params_form = QFormLayout()
         self._params_form.setContentsMargins(0, 8, 0, 0)
         self._params_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        # Breathing room between parameter rows -- the auto-generated
+        # forms were otherwise cramped enough to be hard to scan.
+        self._params_form.setVerticalSpacing(12)
+        self._params_form.setHorizontalSpacing(10)
+        host_box.addLayout(self._params_form)
+        host_box.addStretch(1)
 
         # The parameter form can get long (the grapher node alone has
         # ~20 rows), so it scrolls inside the panel.
@@ -164,10 +217,12 @@ class OptionsPanel(QWidget):
         self._params_host.setAutoFillBackground(False)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
         layout.addWidget(self._title)
+        layout.addSpacing(2)
         layout.addLayout(self._header_form)
+        layout.addWidget(self._node_help)
         layout.addWidget(self._placeholder)
         layout.addWidget(self._params_scroll, 1)
 
@@ -244,12 +299,16 @@ class OptionsPanel(QWidget):
         self._populate_macro_combo(core_cls.category, node_types_by_category)
         siblings = node_types_by_category.get(core_cls.category, [])
         self._micro_combo.clear()
-        self._micro_combo.addItems(siblings)
+        for index, group in enumerate(grouped_micro_types(core_cls.category, siblings)):
+            if index:
+                self._micro_combo.insertSeparator(self._micro_combo.count())
+            self._micro_combo.addItems(group)
         if core_type in siblings:
             self._micro_combo.setCurrentText(core_type)
         self._micro_combo.setEnabled(len(siblings) > 1)
         self._suppress_type_signal = False
 
+        self._node_help.setText(_node_tagline(core_cls))
         self._rebuild_params_form(node)
         self._set_editor_visible(True)
 
@@ -293,6 +352,8 @@ class OptionsPanel(QWidget):
             repopulate()
         for repopulate in self._column_maps.values():
             repopulate()
+        for refresh_hint in self._code_hints.values():
+            refresh_hint()
         self._refresh_all_reactive_choices()
         # kind-conditioned rows depend on the freshly-learnt column kinds
         for row in self._row_conditions:
@@ -321,6 +382,7 @@ class OptionsPanel(QWidget):
     def _set_editor_visible(self, visible: bool) -> None:
         self._placeholder.setVisible(not visible)
         self._params_scroll.setVisible(visible)
+        self._node_help.setVisible(visible and bool(self._node_help.text()))
         for i in range(self._header_form.count()):
             item = self._header_form.itemAt(i).widget()
             if item is not None:
@@ -357,6 +419,7 @@ class OptionsPanel(QWidget):
         self._checkbox_lists.clear()
         self._category_maps.clear()
         self._column_maps.clear()
+        self._code_hints.clear()
 
         specs = list(iter_field_specs(type(node).CORE_NODE_CLASS.params_schema))
         controllers = {
@@ -517,6 +580,12 @@ class OptionsPanel(QWidget):
         if spec.unit_interval is not None:
             return self._build_slider_widget(node, spec, current)
 
+        if spec.is_code:
+            return self._build_code_widget(node, spec, current)
+
+        if spec.is_optimize_bounds:
+            return self._build_optimize_bounds_widget(node, spec)
+
         if spec.widget == enum.QCOMBO_BOX:
             combo = QComboBox()
             combo.addItems(spec.choices or [])
@@ -634,6 +703,56 @@ class OptionsPanel(QWidget):
         layout.addWidget(readout, 0)
         row._slider = slider  # noqa: SLF001 - for controller wiring / tests
         return row
+
+    # -- Python-source fields ------------------------------------------
+
+    #: Names bound alongside ``df`` in a ``custom_operation`` node's code
+    #: (kept in sync with ``nodes.transforms._CUSTOM_OPERATION_GLOBALS``
+    #: purely for this hint -- the node itself is the source of truth).
+    _CODE_HINT_GLOBALS = "pd, np, exp, log, log2, log10, sqrt, sin, cos, tan, floor, ceil, pi, e"
+
+    def _build_code_widget(self, node: BaseNode, spec, current) -> QWidget:
+        """
+        A multi-line, monospace Python source editor
+        (``core.params.code_field``) plus a read-only hint of the input
+        DataFrame's column names, so writing an expression against the
+        data doesn't require leaving the panel. Edits are batched like
+        the tickbox lists -- the auto-run waits for focus-out.
+        """
+        name = spec.name
+        container = QWidget()
+        box = QVBoxLayout(container)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+
+        editor = QPlainTextEdit("" if current is None else str(current))
+        editor.setTabChangesFocus(True)
+        editor.setMinimumHeight(110)
+        editor.setPlaceholderText("df['b'] = df['a'] * 2")
+        mono = QFont("Menlo")
+        mono.setStyleHint(QFont.Monospace)
+        mono.setFamilies(["Menlo", "Consolas", "monospace"])
+        editor.setFont(mono)
+
+        hint = QLabel()
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+
+        def refresh_hint() -> None:
+            columns = sorted(self._input_columns or {})
+            cols_text = ", ".join(columns) if columns else "(run the pipeline to list columns)"
+            hint.setText(f"columns: {cols_text}\nalso available: {self._CODE_HINT_GLOBALS}")
+
+        def commit() -> None:
+            self._write_batched(node, name, editor.toPlainText())
+
+        editor.textChanged.connect(commit)
+
+        box.addWidget(editor)
+        box.addWidget(hint)
+        refresh_hint()
+        self._code_hints[name] = refresh_hint
+        return container
 
     # -- colour fields ------------------------------------------------
 
@@ -1030,6 +1149,111 @@ class OptionsPanel(QWidget):
 
         repopulate()
         self._column_maps[name] = repopulate
+        return scroll
+
+    #: Fields of a fit node's own params schema that belong to the
+    #: "optimize" section itself (not a hyperparameter someone would
+    #: search over), so they never appear as a row in the bounds table.
+    _OPTIMIZE_META_FIELDS = frozenset(
+        {"optimize", "optimize_bounds", "optimize_metric", "optimize_method", "optimize_n_trials"}
+    )
+
+    def _build_optimize_bounds_widget(self, node: BaseNode, spec) -> QWidget:
+        """
+        A fit node's "optimize" section parameter table
+        (``core.params.optimize_bounds_field``): one row per *numeric*
+        field of the node's own params schema (excluding the optimize
+        fields themselves and ``random_state``), each a checkbox
+        (include it in the search) plus a lo/hi bound pair. Stored as
+        JSON ``{param: [lo, hi]}`` for the checked rows only.
+        """
+        name = spec.name
+        core_cls = type(node).CORE_NODE_CLASS
+        param_names = [
+            field_name
+            for field_name, info in core_cls.params_schema.model_fields.items()
+            if info.annotation in (int, float)
+            and field_name not in self._OPTIMIZE_META_FIELDS
+            and field_name != "random_state"
+        ]
+
+        inner = QWidget()
+        form = QFormLayout(inner)
+        form.setContentsMargins(4, 6, 4, 6)
+        form.setSpacing(6)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        scroll.setMaximumHeight(220)
+        scroll.setMinimumHeight(48)
+
+        if not param_names:
+            empty = QLabel("no numeric parameters to optimize")
+            empty.setStyleSheet("color: gray; font-size: 11px;")
+            form.addRow(empty)
+            return scroll
+
+        def stored_map() -> dict[str, list]:
+            try:
+                data = json.loads(node.get_property(name) or "{}")
+            except (ValueError, TypeError):
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        rows: dict[str, tuple[QCheckBox, QDoubleSpinBox, QDoubleSpinBox]] = {}
+
+        def commit() -> None:
+            mapping = {
+                pname: [lo.value(), hi.value()]
+                for pname, (box, lo, hi) in rows.items()
+                if box.isChecked()
+            }
+            self._write_batched(node, name, json.dumps(mapping, ensure_ascii=False))
+
+        current = stored_map()
+        for pname in param_names:
+            box = QCheckBox()
+            lo = QDoubleSpinBox()
+            hi = QDoubleSpinBox()
+            for spin in (lo, hi):
+                spin.setRange(-1_000_000_000, 1_000_000_000)
+                spin.setDecimals(4)
+
+            bounds = current.get(pname)
+            if bounds and len(bounds) == 2:
+                box.setChecked(True)
+                lo.setValue(float(bounds[0]))
+                hi.setValue(float(bounds[1]))
+            else:
+                try:
+                    seed = float(node.get_property(pname))
+                except (TypeError, ValueError):
+                    seed = 0.0
+                lo.setValue(seed)
+                hi.setValue(seed)
+            lo.setEnabled(box.isChecked())
+            hi.setEnabled(box.isChecked())
+
+            def _on_toggled(checked: bool, _lo=lo, _hi=hi) -> None:
+                _lo.setEnabled(checked)
+                _hi.setEnabled(checked)
+                commit()
+
+            box.toggled.connect(_on_toggled)
+            lo.valueChanged.connect(lambda _v: commit())
+            hi.valueChanged.connect(lambda _v: commit())
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(box)
+            row_layout.addWidget(lo)
+            row_layout.addWidget(QLabel("to"))
+            row_layout.addWidget(hi)
+            rows[pname] = (box, lo, hi)
+            form.addRow(pname, row)
+
         return scroll
 
     def _revalidate(self, field_name: str) -> None:

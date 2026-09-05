@@ -2,11 +2,11 @@
 Geospatial data-loading nodes: read a vector file from disk into a
 geopandas ``GeoDataFrame``.
 
-These share ``LoaderParams`` with the plain loaders (so the same
-datetime-column handling applies) but output a ``geodataframe`` port.
-A ``GeoDataFrame`` is a pandas ``DataFrame`` subclass, so that output
-can still be wired into any node expecting a plain ``dataframe`` (see
-the dtype compatibility rule in ``engine.graph``).
+These share ``LoaderParams`` with the plain loaders but output a
+``geodataframe`` port. A ``GeoDataFrame`` is a pandas ``DataFrame``
+subclass, so that output can still be wired into any node expecting a
+plain ``dataframe`` (see the dtype compatibility rule in
+``engine.graph``).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pydantic import Field
 from ruyso_app.core.node import Node
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
-from ruyso_app.nodes.loaders import LoaderParams, parse_datetime_columns
+from ruyso_app.nodes.loaders import LoaderParams
 
 
 @register_node
@@ -34,8 +34,7 @@ class GeoJSONLoader(Node):
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         self.validate_inputs(inputs)
-        gdf = gpd.read_file(self.params.filepath)
-        return {"gdf": parse_datetime_columns(gdf, self.params)}
+        return {"gdf": gpd.read_file(self.params.filepath)}
 
 
 @register_node
@@ -50,8 +49,7 @@ class ShapefileLoader(Node):
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         self.validate_inputs(inputs)
-        gdf = gpd.read_file(self.params.filepath)
-        return {"gdf": parse_datetime_columns(gdf, self.params)}
+        return {"gdf": gpd.read_file(self.params.filepath)}
 
 
 class GeoPackageLoaderParams(LoaderParams):
@@ -75,5 +73,4 @@ class GeoPackageLoader(Node):
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         self.validate_inputs(inputs)
-        gdf = gpd.read_file(self.params.filepath, layer=self.params.layer or None)
-        return {"gdf": parse_datetime_columns(gdf, self.params)}
+        return {"gdf": gpd.read_file(self.params.filepath, layer=self.params.layer or None)}

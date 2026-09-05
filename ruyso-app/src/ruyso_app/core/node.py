@@ -73,6 +73,10 @@ class Node(ABC):
 
     node_type: ClassVar[str]
     category: ClassVar[str]
+    #: One or two plain sentences shown read-only in the Options pane
+    #: ("what this node does and how it works"). When left blank the UI
+    #: falls back to the first line of the class docstring.
+    tagline: ClassVar[str] = ""
     inputs: ClassVar[list[Port]] = []
     outputs: ClassVar[list[Port]] = []
     params_schema: ClassVar[type[NodeParams]] = NodeParams

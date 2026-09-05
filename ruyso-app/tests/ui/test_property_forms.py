@@ -34,7 +34,6 @@ def test_required_string_field_defaults_to_empty_and_round_trips(qapp):
     params = extract_params_from_node(node, CSVLoaderParams)
     assert params["filepath"] == "data/train.csv"
     assert params["sep"] == ","
-    assert params["datetime_columns"] is None  # shared loader param, unset
 
 
 def test_optional_list_of_str_round_trips_as_comma_separated_text(qapp):

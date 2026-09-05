@@ -97,9 +97,10 @@ def input_dataframe_columns(
 
     For a node with a table input this is the upstream table's columns;
     for a *source* node (a loader, no table inputs) it is that node's
-    own last-run output columns -- so a loader's ``datetime_columns``
-    picker fills in once the file has been read. ``None`` when nothing
-    is available yet, so the caller offers free text with no validation.
+    own last-run output columns -- so a source node's column pickers,
+    if it has any, fill in once the file has been read. ``None`` when
+    nothing is available yet, so the caller offers free text with no
+    validation.
     """
     frames = _input_dataframes(node, outputs)
     if not frames:

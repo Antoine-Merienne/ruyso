@@ -20,8 +20,11 @@ from pydantic import BaseModel
 # GeoDataFrame is a pandas DataFrame subclass, so a "geodataframe"
 # output may feed a plain "dataframe" input (but not the reverse) --
 # see ``engine.graph`` for that compatibility rule.
+# "optim" carries a fit node's optimize-section run (see
+# ``nodes.models.SklearnFitNode``): a dict of best params/score plus a
+# per-trial score table, consumed by ``optim_diagnostic`` / ``optim_scores``.
 PortDType = Literal[
-    "dataframe", "geodataframe", "array", "model", "figure", "scalar"
+    "dataframe", "geodataframe", "array", "model", "figure", "scalar", "optim"
 ]
 
 

@@ -8,18 +8,28 @@ Datasets come from three bundled sources, named ``"<source>/<name>"``:
   package, always offline). Returned with a ``target`` column.
 * ``statsmodels/...`` -- statsmodels' bundled datasets (offline), good
   for regression / time-series examples.
-* ``seaborn/...``     -- seaborn's example datasets. seaborn fetches
-  these from GitHub on first use and caches them, so the very first
-  load of one needs network access; a clear error is raised otherwise.
+* ``seaborn/...``     -- seaborn's example datasets. Upstream, seaborn
+  fetches these from GitHub on first use and caches them locally; here
+  every dataset seaborn offers under this Literal is pre-seeded as a
+  CSV under ``data/seaborn/`` and passed as seaborn's ``data_home``, so
+  loading one never touches the network (seaborn only downloads when
+  its cache is missing the file -- see ``seaborn.utils.load_dataset``).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
+
+#: Pre-seeded seaborn example-dataset cache bundled with the package
+#: (one <name>.csv per entry in ``_SEABORN`` below). Passed to
+#: ``seaborn.load_dataset(..., data_home=...)`` so seaborn finds every
+#: file already cached and never reaches out to the network.
+_SEABORN_DATA_HOME = Path(__file__).parent / "data" / "seaborn"
 
 _SKLEARN = ("iris", "wine", "diabetes", "breast_cancer", "linnerud")
 _STATSMODELS = (
@@ -82,12 +92,13 @@ class ExampleData(Node):
             import seaborn as sns
 
             try:
-                return {"df": sns.load_dataset(name)}
+                return {"df": sns.load_dataset(name, data_home=str(_SEABORN_DATA_HOME))}
             except Exception as exc:  # noqa: BLE001 - re-raised with context
                 raise ValueError(
-                    f"example_data: could not load seaborn dataset {name!r}; "
-                    f"it is fetched from the web on first use and needs network "
-                    f"access once ({exc})."
+                    f"example_data: could not load seaborn dataset {name!r} from "
+                    f"the bundled cache ({_SEABORN_DATA_HOME}); if the CSV is "
+                    f"missing there, seaborn falls back to fetching it from the "
+                    f"web, which needs network access ({exc})."
                 ) from exc
 
         raise ValueError(f"example_data: unknown dataset {self.params.dataset!r}.")

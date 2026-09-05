@@ -820,3 +820,109 @@ def test_resample_datetime_ohlc_flattens_columns():
         params=ResampleDatetimeParams(datetime_column="ts", rule="W", agg="ohlc")
     ).run(df=_series_df())["df"]
     assert {"v_open", "v_high", "v_low", "v_close"} <= set(out.columns)
+
+
+# --------------------------------------------------------------------------
+# Diff
+# --------------------------------------------------------------------------
+
+from ruyso_app.nodes.transforms import Diff, DiffParams  # noqa: E402
+
+
+def test_diff_default_lag_on_all_numeric_columns():
+    df = pd.DataFrame({"v": [10.0, 12.0, 15.0, 15.0], "lbl": ["a", "b", "c", "d"]})
+    out = Diff(params=DiffParams()).run(df=df)["df"]
+
+    assert "v_diff_1" in out.columns and "lbl_diff_1" not in out.columns
+    assert out["v_diff_1"].tolist()[1:] == [2.0, 3.0, 0.0]
+    assert pd.isna(out["v_diff_1"].iloc[0])
+    assert list(out["lbl"]) == ["a", "b", "c", "d"]  # untouched, kept
+
+
+def test_diff_multiple_lags_and_selected_columns():
+    df = pd.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [0.0, 0.0, 0.0, 0.0]})
+    out = Diff(params=DiffParams(columns=["v"], lags="1, 2")).run(df=df)["df"]
+
+    assert {"v_diff_1", "v_diff_2"} <= set(out.columns)
+    assert "w_diff_1" not in out.columns
+    assert out["v_diff_2"].tolist()[2:] == [3.0, 6.0]
+
+
+def test_diff_replace_drops_the_source_columns():
+    df = pd.DataFrame({"v": [1.0, 3.0, 6.0]})
+    out = Diff(params=DiffParams(columns=["v"], replace=True)).run(df=df)["df"]
+    assert list(out.columns) == ["v_diff_1"]
+
+
+def test_diff_unknown_column_raises():
+    df = pd.DataFrame({"v": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="not found"):
+        Diff(params=DiffParams(columns=["nope"])).run(df=df)
+
+
+def test_diff_malformed_lags_raises():
+    df = pd.DataFrame({"v": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="lags"):
+        Diff(params=DiffParams(lags="one")).run(df=df)
+
+
+# --------------------------------------------------------------------------
+# CustomOperation
+# --------------------------------------------------------------------------
+
+from ruyso_app.nodes.transforms import CustomOperation, CustomOperationParams  # noqa: E402
+
+
+def test_custom_operation_evaluates_an_expression_against_the_dataframe():
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "c": [0.0, 0.0, 0.0]})
+    out = CustomOperation(
+        params=CustomOperationParams(code="df['b'] = df['a'] / np.exp(df['c'])")
+    ).run(df=df)["df"]
+    assert out["b"].tolist() == [1.0, 2.0, 3.0]  # exp(0) == 1
+
+
+def test_custom_operation_can_use_pandas_and_python_builtins():
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    out = CustomOperation(
+        params=CustomOperationParams(
+            code="df['total'] = sum(df['a'])\ndf['n'] = len(df)"
+        )
+    ).run(df=df)["df"]
+    assert out["total"].tolist() == [6, 6, 6]
+    assert out["n"].tolist() == [3, 3, 3]
+
+
+def test_custom_operation_blank_code_is_a_passthrough():
+    df = pd.DataFrame({"a": [1, 2]})
+    out = CustomOperation(params=CustomOperationParams(code="")).run(df=df)["df"]
+    assert out is df
+
+
+def test_custom_operation_does_not_mutate_the_input_dataframe():
+    df = pd.DataFrame({"a": [1, 2]})
+    CustomOperation(params=CustomOperationParams(code="df['b'] = df['a'] * 2")).run(df=df)
+    assert "b" not in df.columns
+
+
+def test_custom_operation_syntax_error_is_a_clear_value_error():
+    df = pd.DataFrame({"a": [1, 2]})
+    with pytest.raises(ValueError, match="syntax error"):
+        CustomOperation(params=CustomOperationParams(code="df['b'] =")).run(df=df)
+
+
+def test_custom_operation_runtime_error_is_a_clear_value_error():
+    df = pd.DataFrame({"a": [1, 2]})
+    with pytest.raises(ValueError, match="custom_operation"):
+        CustomOperation(params=CustomOperationParams(code="1 / 0")).run(df=df)
+
+
+def test_custom_operation_cannot_import():
+    df = pd.DataFrame({"a": [1, 2]})
+    with pytest.raises(ValueError):
+        CustomOperation(params=CustomOperationParams(code="import os")).run(df=df)
+
+
+def test_custom_operation_rejects_a_non_dataframe_result():
+    df = pd.DataFrame({"a": [1, 2]})
+    with pytest.raises(ValueError, match="DataFrame"):
+        CustomOperation(params=CustomOperationParams(code="df = 42")).run(df=df)

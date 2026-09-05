@@ -52,6 +52,8 @@ from ruyso_app.core.params import (
     column_ref_allow_none,
     column_ref_dtypes,
     field_suggestions,
+    is_code_field,
+    is_optimize_bounds_field,
     reactive_choice_spec,
     visible_unless,
     visible_when,
@@ -140,6 +142,10 @@ class FieldSpec:
     column_map: dict | None = None
     #: ``{"lo":.., "hi":.., "step":..}`` for a bounded-float slider, or None.
     unit_interval: dict | None = None
+    #: True for a multi-line Python-source field (``core.params.code_field``).
+    is_code: bool = False
+    #: True for a fit node's "optimize" bounds table (``core.params.optimize_bounds_field``).
+    is_optimize_bounds: bool = False
     #: ``(field, value)`` -- this row is shown only while ``field`` holds
     #: ``value`` -- or None.
     visible_when: tuple[str, str] | None = None
@@ -178,6 +184,8 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             category_map=category_map_spec(field_info),
             column_map=column_map_spec(field_info),
             unit_interval=unit_interval_spec(field_info),
+            is_code=is_code_field(field_info),
+            is_optimize_bounds=is_optimize_bounds_field(field_info),
             visible_when=visible_when(field_info),
             visible_when_set=visible_when_set(field_info),
             visible_when_unset=visible_when_unset(field_info),

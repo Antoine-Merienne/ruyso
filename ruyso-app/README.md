@@ -182,23 +182,22 @@ phases. Decisions taken so far (spec section 8):
   per file format: `csv_loader`, `fixed_width_loader`, `excel_loader`,
   `json_loader`, `parquet_loader`, `feather_loader`, `stata_loader`
   (all -> `dataframe`), plus `geojson_loader`, `shapefile_loader`,
-  `geopackage_loader` (-> `geodataframe`). Every loader shares two
-  parameters, applied after load: `datetime_columns` and
-  `datetime_format`. In the Options panel both are editable dropdowns
-  (same widget as the model/grapher/transform column pickers):
-  `datetime_columns` lists the loaded file's own columns once the file
-  has been read, with an italic-grey **None** entry that clears it;
-  `datetime_format` offers a few common `strptime` patterns (declared
-  via `core.params.suggestions_field`) but accepts any text, with an
-  italic-grey **infer** entry for "let pandas guess". A `geodataframe`
-  output may be wired into any node that expects a plain `dataframe`
-  (a GeoDataFrame is one); the reverse is rejected by
+  `geopackage_loader` (-> `geodataframe`). Loaders only read the file —
+  they do not coerce dtypes; parse a column as datetime downstream with
+  the `change_type` transform (target `datetime`, with an optional
+  `strptime` format) or build one from parts with `combine_datetime`.
+  A `geodataframe` output may be wired into any node that expects a
+  plain `dataframe` (a GeoDataFrame is one); the reverse is rejected by
   `PipelineGraph.validate()`. Alongside the file loaders,
   **`example_data`** loads a bundled dataset with no file and no link —
   a `dataset` dropdown of `sklearn/…` toy sets (iris, wine, …),
   `statsmodels/…` datasets (longley, macrodata, sunspots, …) and
-  `seaborn/…` datasets (tips, penguins, … — these are fetched from the
-  web once and cached; a clear error is raised when offline).
+  `seaborn/…` datasets (tips, penguins, …). Every `seaborn/…` dataset is
+  pre-seeded as a CSV under `nodes/data/seaborn/` and passed to seaborn
+  as its cache dir (`data_home`), so loading one never touches the
+  network. The Micro type dropdown groups `loading`'s entries with a
+  separator line between general file loaders, geo-border formats, and
+  the example loader (`ui.micro_type_groups`).
 - **Transformer family.** `standard_scaler`; `drop_na` and `fill_na`
   (pick columns via a **tickbox list**; `drop_na` chooses `how` =
   any/all, `fill_na` a method — forward/backward fill, mean, median,
@@ -206,7 +205,8 @@ phases. Decisions taken so far (spec section 8):
   an empty tick list is a pass-through, and mean/median on a
   non-numeric column raises); `change_type` (cast one column; the
   target-type dropdown re-filters to the casts that make sense for the
-  chosen column); `column_filter` and `dtype_filter` (keep columns via
+  chosen column; casting to `datetime` reveals a `datetime_format`
+  suggestions box — a `strptime` pattern, blank = infer); `column_filter` and `dtype_filter` (keep columns via
   a tickbox list); `row_filter` (a mode-aware form: filter by row
   position *or* by a column value — the operator dropdown re-filters
   to what's valid for the column's type); `sample` (count or fraction,
@@ -251,9 +251,21 @@ phases. Decisions taken so far (spec section 8):
   aggregator — mean/sum/…/count/ohlc — for the numeric columns, and an
   upsample `fill` — ffill / bfill / interpolate-linear / -time /
   nearest; non-numeric columns take the first value; the key comes back
-  as a column); plus geo transforms `geo_to_dataframe`,
-  `dataframe_to_geo` and `reproject` (CRS from the same suggestions
-  dropdown as the datetime-format field). The reactive behaviour is
+  as a column); `diff` (row-order difference of numeric columns — a
+  comma-separated `lags` list, e.g. `1, 7, 30`, each producing one
+  `<column>_diff_<lag>` via `Series.diff(periods=lag)`; assumes the
+  rows are already time-ordered, e.g. via `sort`); `custom_operation`
+  (a monospace, multi-line code box — `core.params.code_field` — runs
+  the typed Python against the input DataFrame bound as `df`, with `pd`
+  / `np` / common `math` functions already in scope and a read-only
+  hint of the input columns underneath; a reduced builtins set blocks
+  `import` / `open` / `exec` / `eval` as a light guard rail, not a
+  sandbox — this is a local desktop tool); plus geo transforms
+  `geo_to_dataframe`, `dataframe_to_geo` and `reproject` (CRS from the
+  same suggestions dropdown as the datetime-format field). The
+  Micro type dropdown groups the whole `transform` macro type with
+  separator lines — base / filters / type / reshaping / datetime / geo
+  / custom (`ui.micro_type_groups`). The reactive behaviour is
   new Options-panel machinery: `core.params` markers
   (`reactive_choice_field`, `checkbox_list_field`, `category_map_field`,
   `column_map_field`, `visible_field` / `visible_when=` /
@@ -264,9 +276,10 @@ phases. Decisions taken so far (spec section 8):
   categorical columns).
 - **Model family.** Every fit node has the same shape: inputs
   `X_train` (dataframe), `y_train` (array), optional `X_test`/`y_test`
-  (carried alongside, unused by the fit itself); output `model` — the
-  fitted scikit-learn estimator object. Evaluation is done downstream
-  by `model_scores` / `residuals` / the model plots. `linear_regression_fit`,
+  (carried alongside, unused by a plain fit); outputs `model` — the
+  fitted scikit-learn estimator object — and `optim` (see below).
+  Evaluation is done downstream by `model_scores` / `residuals` / the
+  model plots. Supervised: `linear_regression_fit`,
   `logistic_regression_fit`, `ridge_fit`, `lasso_fit`,
   `elastic_net_fit`, `decision_tree_fit`, `random_forest_fit`,
   `gradient_boosting_fit`, `adaboost_fit`, `svm_fit`, `knn_fit`,
@@ -279,7 +292,30 @@ phases. Decisions taken so far (spec section 8):
   bool / dropdown); `nodes/models.py` `SklearnFitNode` filters the
   chosen params against the estimator's signature and maps UI sentinels
   back (`"none"` → `None`, `0` → `None` for `max_depth` / `n_jobs` /
-  `max_iter` / …).
+  `max_iter` / …). Clustering (unsupervised, no target column):
+  `kmeans_fit`, `minibatch_kmeans_fit`, `dbscan_fit`, `hdbscan_fit`,
+  `agglomerative_clustering_fit`, `spectral_clustering_fit`,
+  `gaussian_mixture_fit` — `SklearnClusterFitNode` fits on `X_train`
+  alone (`y_train` stays wireable but is always ignored); DBSCAN /
+  HDBSCAN / agglomerative / spectral have no `predict` on new data
+  (read `labels_` off the fitted `model` instead). The Micro type
+  dropdown groups the whole `model` macro type into *utilities* (the
+  model-consuming nodes below) then an alphabetical *fits* group
+  (`ui.micro_type_groups`).
+  - **Optimize section.** Every supervised fit node's params also
+    carry a shared `optimize` toggle (`SklearnFitParams`). Ticked, its
+    section reveals `optimize_bounds` — a table of that node's own
+    numeric hyperparameters, each with a checkbox and a `[lo, hi]`
+    range — plus `optimize_metric`, an Optuna `optimize_method` (tpe /
+    random / cmaes / grid) and `optimize_n_trials`. `X_test`/`y_test`
+    become required inputs only when `optimize` is on: every trial
+    refits on `X_train`/`y_train` and is scored against them, and the
+    `model` output becomes the best trial's estimator. The `optim`
+    output (a plain dict; `None` when `optimize` is off) carries
+    `method` / `metric` / `direction` / `n_trials` / `best_value` /
+    `best_params` / a per-trial `trials` DataFrame (`train_score` +
+    `test_score` + the sampled values), for `optim_diagnostic` /
+    `optim_scores` to read.
 - **Model-consuming nodes** (`model` macro type, `nodes/model_ops.py`).
   All take a fitted `model` port; the evaluation ones also take the
   `X` (dataframe) + `y` (array) that `train_test_split` produces.
@@ -290,11 +326,18 @@ phases. Decisions taken so far (spec section 8):
   — `model` → a tidy `feature` / value DataFrame (`coef_` +
   `intercept` row, one value column per class for multiclass; falls
   back to `feature_importances_` for trees / forests). `model_scores`
-  — `model` + `X` + `y` → a `metric` / `value` DataFrame; a `task`
-  toggle picks the classification or regression metric set (tickboxes),
-  with an `average` for multiclass precision / recall / f1. `residuals`
+  — `model` + `X` + `y` → a `metric` / `value` DataFrame; classification
+  and regression metrics (tickboxes, both always editable) with an
+  `average` for multiclass precision / recall / f1. Which set is
+  actually computed is detected from the model itself
+  (`sklearn.base.is_classifier`), not a separate toggle — the node
+  produces a sensible result with its defaults as soon as it is wired
+  up, whichever kind of model that is. `residuals`
   — `model` + `X` + `y` → per-row `y_true` / `y_pred` / `residual`
-  (+ `std_residual`), regression only. The three DataFrame outputs are
+  (+ `std_residual`), regression only. `optim_diagnostic` — `optim` →
+  a one-row summary (method, metric, trial count, best score,
+  `best_<param>` per searched parameter). `optim_scores` — `optim` →
+  the per-trial `trials` DataFrame. All five DataFrame outputs are
   browsable in the Table tab automatically.
 - **Model-visualization plots** (`grapher` macro type, in `nodes/viz.py`;
   input `model` + `X` + `y`, output `figure`). `confusion_matrix_plot`
@@ -323,14 +366,36 @@ phases. Decisions taken so far (spec section 8):
   `multiple_testing` (FDR-BH/BY, Bonferroni/Holm/Šidák on a p-value
   column → adjusted p + `reject`; or Fisher/Stouffer meta-combination),
   `timeseries_test` (ADF / KPSS stationarity, Ljung-Box,
-  Durbin-Watson, Granger causality — statsmodels). Plus **`regression`**
-  — statsmodels inference: `model` = OLS / Logit / Poisson-GLM /
-  Probit / RLM, a `y_column` picker + `x_columns` tickbox list,
-  `add_intercept`, robust SEs (OLS), a confidence level; two outputs,
-  a `coeffs` table (term, coef, std_err, t/z, p-value, CI) and a
-  `residuals` DataFrame (row, fitted, residual). Classical tests are
-  powered by scipy; time-series and regressions by statsmodels (both
-  are hard dependencies now).
+  Durbin-Watson, Granger causality — statsmodels). Plus four non-test
+  tools: **`regression`** — statsmodels inference: `model` = OLS /
+  Logit / Poisson-GLM / Probit / RLM, a `y_column` picker + `x_columns`
+  tickbox list, `add_intercept`, robust SEs (OLS), a confidence level;
+  two outputs, a `coeffs` table (term, coef, std_err, t/z, p-value, CI)
+  and a `residuals` DataFrame (row, fitted, residual). **`pca`** —
+  scikit-learn PCA on ticked numeric columns (blank = every numeric
+  column), `n_components` (0 = keep all), `standardize`; three outputs:
+  `scores` (PC1, PC2, … per row), `loadings` (each variable's weight in
+  each component) and `variance` (explained + cumulative variance
+  ratio per component). **`arima`** — statsmodels SARIMAX on a chosen
+  `(p, d, q)` order, with an optional seasonal `(P, D, Q, s)` term
+  (`seasonal` toggle + `seasonal_periods`) — this is how a seasonal
+  pattern is taken out of the series, via seasonal differencing; a
+  `trend` term, `forecast_periods` steps ahead with a confidence
+  interval; two outputs, `fit` (order, AIC/BIC, log-likelihood) and
+  `forecast` (step, forecast, ci_low, ci_high). **`auto_arima`** — the
+  same SARIMAX forecaster, but the order is found by an in-repo
+  Hyndman-Khandakar-style *stepwise* search (`nodes/statistics.py`
+  `_stepwise_search`): `d` from an ADF-based rule (`_select_d`), a
+  hill-climb over `(p, q)` (and `(P, Q)` when `seasonal` is on) from a
+  few seed models, minimizing `information_criterion` (AIC/BIC) until
+  no neighbouring order improves it — a handful of fits, not a full
+  grid; the seasonal differencing order `D` is fixed at 1 when
+  `seasonal` is on (0 otherwise), a simplification over a true
+  seasonal unit-root test. Same two outputs as `arima`. The Micro type
+  dropdown groups the whole macro type — these four non-test tools,
+  then every `*_test` node alphabetically (`ui.micro_type_groups`).
+  Classical tests are powered by scipy; time-series, regressions and
+  ARIMA by statsmodels; PCA by scikit-learn.
 - **Grapher (`matplotlib_plot`).** Draws with a local
   `seaborn-v0_8-whitegrid` style context (never global), a `darkblue`
   default colour, slightly smaller markers/lines and a top/right
@@ -357,22 +422,55 @@ phases. Decisions taken so far (spec section 8):
   for the shape/size split). Shape and size are fully independent — you
   can size-by a column while picking a fixed marker, or shape-by a
   column at a fixed size. Also: a **bar mode** (dodge / stack / layer)
-  for a coloured bar chart; axis grid / frame / label overrides / font
-  size / log scales / figure size; title font size + bold + italic;
-  legend show / title / location / font size. Colouring by a
-  categorical column draws a legend in a translucent box; by a
-  continuous column, a colorbar; colour-by and shape-by on *different*
-  columns get two legends (same column → one combined legend of
-  coloured shapes). (A row may carry any mix of `visible_when=`,
-  `visible_when_set=`, `visible_when_unset=`, `visible_when_kind=` and
-  `visible_unless=`, and shows only while *all* hold. Ratio / fraction
-  floats — `test_size`, `subsample`, `l1_ratio`, `alpha`, … — use
-  `core.params.unit_interval_field`, rendered as a 0→1 slider.)
+  for a coloured bar chart, plus a **`bar_error`** (none / SEM / std /
+  a t-based 95%/99% CI) that draws an error-bar whisker per bar — when
+  it's not "none" each bar becomes a *mean* of its y values (grouped
+  by x, and by the colour-by group if any) rather than a sum or one
+  bar per row, so per-row shape/opacity styling no longer applies
+  (noted on the figure); a **`line_fill`** (area chart) and
+  **`line_stack`** (stacked area — needs a discrete colour-by column,
+  drawn with `ax.stackplot`) for the line kind; axis grid / frame /
+  label overrides / font size / log scales / figure size; title font
+  size + bold + italic; legend show / title / location / font size.
+  Colouring by a categorical column draws a legend in a translucent
+  box; by a continuous column, a colorbar; colour-by and shape-by on
+  *different* columns get two legends (same column → one combined
+  legend of coloured shapes). (A row may carry any mix of
+  `visible_when=`, `visible_when_set=`, `visible_when_unset=`,
+  `visible_when_kind=` and `visible_unless=`, and shows only while
+  *all* hold. Ratio / fraction floats — `test_size`, `subsample`,
+  `l1_ratio`, `alpha`, … — use `core.params.unit_interval_field`,
+  rendered as a 0→1 slider.)
 - **`table_viewer`** (grapher). Renders a *small* DataFrame as a table
   image (matplotlib `ax.table`, no LaTeX needed) that previews and
-  exports like any figure: `decimals` rounding for numeric columns,
-  `max_rows` / `max_cols` truncation (with a note), header fill colour,
-  font size, row height.
+  exports like any figure — intended for a presentation-sized table,
+  not for browsing a full DataFrame (the Table tab is for that):
+  `decimals` rounding for numeric columns, `max_rows` / `max_cols`
+  truncation (with a note), font size, row height, a `padding` slider
+  (`ax.table(bbox=...)`) so the table doesn't touch the figure edge,
+  and a `style` preset — `shaded` (the original look: header fill +
+  zebra rows + bordered cells), `three_line` (the academic three-rule
+  table used by APA / most journals — a rule above and below the
+  header, one at the bottom, no vertical lines), `grid` (a full border
+  on every cell), `striped` (zebra rows, borderless) or `minimal` (no
+  lines at all but a header underline) — see `viz._apply_table_style`.
+  `header_color` only applies to the `shaded` style.
+- **Single-variable plots** (grapher). `pie_chart` — counts of a
+  categorical column as `pie`, `doughnut` (a pie with a hole,
+  `doughnut_width`), or `tile` (a waffle-style grid of unit squares,
+  `tile_columns` wide — capped at ~100 tiles for a large count, each
+  then standing for more than one row); `top_n` groups the smallest
+  categories into "other". `heatmap_1d` — a single numeric column as a
+  strip of coloured cells (`columns_per_row` wraps it into a
+  calendar-style grid), with an optional colourbar and printed values.
+  `autocorrelogram` — ACF and/or PACF of a numeric (time-ordered)
+  column via `statsmodels.graphics.tsaplots.plot_acf` / `plot_pacf`;
+  `show_acf` / `show_pacf` can each be unticked (at least one must stay
+  on) and `show_ci` draws the shaded confidence band.
+- **`density_2d`** (grapher). Bivariate density of two numeric columns
+  — `kind` = `contour` (seaborn `kdeplot`, `fill` + `levels`) or
+  `hexbin` (a binned count grid, better for a lot of data), with an
+  optional light scatter overlay of the raw points.
 - **More grapher nodes** (seaborn-backed, same styling / colour-by
   controls). `box_plot` — a numeric column across a categorical one,
   `kind` = box / violin / boxen / swarm (seaborn's catplot family);
