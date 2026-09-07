@@ -62,3 +62,59 @@ class FigureExport(Node):
         figure = inputs["figure"]
         figure.savefig(self.params.filepath, dpi=self.params.dpi, bbox_inches="tight")
         return {}
+
+
+class ExportToDashboardParams(NodeParams):
+    """
+    Parameters for ExportToDashboard.
+
+    Attributes:
+        title: Heading shown above the figure on the Dashboard tab. It
+            seeds the dashboard block's editable title; leave blank for
+            no heading.
+    """
+
+    title: str = ""
+
+
+@register_node
+class ExportToDashboard(Node):
+    """
+    Send a figure (a grapher plot or a ``table_viewer`` table) to the
+    Dashboard tab.
+
+    Wiring a grapher's ``figure`` output into this node makes a
+    matching, movable/resizable figure block appear on the Dashboard,
+    where it is arranged next to other figures and free-text
+    commentary and exported to PDF / PNG. The block stays keyed to
+    this node and re-renders in place on every run.
+
+    This is a sink node: it has no output ports. The Dashboard reads
+    the figure from the upstream node's own run output, following this
+    node's ``figure`` input wire.
+    """
+
+    node_type = "export_to_dashboard"
+    category = "export"
+    inputs = [Port(name="figure", dtype="figure")]
+    outputs: list[Port] = []
+    params_schema = ExportToDashboardParams
+    tagline = "Send a figure or table to the Dashboard tab."
+    # A sink node: the "figure" value is not reliably hashable by joblib
+    # (see MatplotlibPlot.cacheable / FigureExport) - never cache.
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        """
+        Consume the input figure; the Dashboard tab reads it from the
+        upstream node's run output (via the ``figure`` input wire), so
+        this node itself produces no output port values.
+
+        Args:
+            figure: A matplotlib.figure.Figure (via the "figure" input port).
+
+        Returns:
+            ``{}`` - this node has no output ports.
+        """
+        self.validate_inputs(inputs)
+        return {}

@@ -19,11 +19,11 @@ NodeRegistry.discover_package(ruyso_app.nodes)
 
 
 def _linear_pipeline_graph() -> PipelineGraph:
-    """Build a small, valid graph: csv_loader -> drop_na -> standard_scaler."""
+    """Build a small, valid graph: csv_loader -> drop_na -> scaler."""
     graph = PipelineGraph()
     graph.add_node(NodeSpec(id="load", node_type="csv_loader", params={"filepath": "x.csv"}))
     graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
-    graph.add_node(NodeSpec(id="scale", node_type="standard_scaler", params={}))
+    graph.add_node(NodeSpec(id="scale", node_type="scaler", params={}))
 
     graph.add_connection(
         Connection(source_node="load", source_port="df", target_node="clean", target_port="df")
@@ -88,8 +88,8 @@ def test_validate_rejects_dtype_mismatch():
     graph.add_node(
         NodeSpec(id="split", node_type="train_test_split", params={"target_column": "y"})
     )
-    graph.add_node(NodeSpec(id="scale", node_type="standard_scaler", params={}))
-    # y_train is an "array", standard_scaler's "df" input expects "dataframe".
+    graph.add_node(NodeSpec(id="scale", node_type="scaler", params={}))
+    # y_train is an "array", scaler's "df" input expects "dataframe".
     graph.add_connection(
         Connection(
             source_node="split", source_port="y_train", target_node="scale", target_port="df"

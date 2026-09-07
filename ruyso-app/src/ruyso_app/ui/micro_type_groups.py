@@ -28,7 +28,13 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
             "stata_loader",
         ],
         # geographic / border data
-        ["geojson_loader", "shapefile_loader", "geopackage_loader"],
+        [
+            "geojson_loader",
+            "shapefile_loader",
+            "geopackage_loader",
+            "geoparquet_loader",
+            "geofeather_loader",
+        ],
         # bundled example datasets
         ["example_data"],
     ],
@@ -41,7 +47,7 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
         [
             "change_type",
             "fill_na",
-            "standard_scaler",
+            "scaler",
             "one_hot_encode",
             "ordinal_encode",
             "rename_categories",
@@ -57,11 +63,22 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
             "unpivot",
             "pivot_table",
             "train_test_split",
+            "covariance_matrix",
         ],
         # datetime operations
         ["combine_datetime", "split_datetime", "resample_datetime", "diff"],
-        # geo-related operations
-        ["geo_to_dataframe", "dataframe_to_geo", "reproject"],
+        # geo: conversion & CRS
+        ["dataframe_to_geo", "geo_to_dataframe", "reproject", "set_crs"],
+        # geo: relate / combine layers
+        ["spatial_join", "spatial_filter", "geo_clip", "geo_overlay"],
+        # geo: reshape & derive geometry
+        [
+            "geo_dissolve",
+            "geo_explode",
+            "geo_buffer",
+            "geometry_op",
+            "geo_measures",
+        ],
         # free-form
         ["custom_operation"],
     ],
@@ -75,16 +92,71 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
             "optim_diagnostic",
             "optim_scores",
         ],
-        # everything else (every *_fit node) is a trailing, alphabetical
-        # "fits" group -- new fit nodes join it automatically, with
-        # nothing to update here.
+        # supervised fits (need a target column)
+        [
+            "linear_regression_fit",
+            "logistic_regression_fit",
+            "ridge_fit",
+            "lasso_fit",
+            "elastic_net_fit",
+            "decision_tree_fit",
+            "random_forest_fit",
+            "gradient_boosting_fit",
+            "adaboost_fit",
+            "svm_fit",
+            "knn_fit",
+            "naive_bayes_fit",
+        ],
+        # unsupervised fits (clustering -- no target column) are a
+        # trailing, alphabetical group: everything not listed above.
+        # New clustering nodes join it automatically.
     ],
     "statistics": [
         # non-tests -- model-fitting / data-transforming tools
-        ["regression", "pca", "arima", "auto_arima", "multiple_testing"],
-        # everything else (every *_test node) is a trailing, alphabetical
-        # "tests" group -- new tests join it automatically, with nothing
-        # to update here.
+        ["regression", "pca", "ica", "tsne", "multiple_testing"],
+        # time-series models
+        ["arima", "auto_arima", "var"],
+        # everything else (every *_test node, incl. var_test) is a
+        # trailing, alphabetical "tests" group -- new tests join it
+        # automatically, with nothing to update here.
+    ],
+    "grapher": [
+        # table_viewer stands alone -- it renders a table, not a chart
+        ["table_viewer"],
+        # base plots -- general-purpose, single/two-variable, no model needed
+        [
+            "matplotlib_plot",
+            "box_plot",
+            "histogram_plot",
+            "heatmap_plot",
+            "pie_chart",
+            "heatmap_1d",
+            "density_2d",
+            "autocorrelogram",
+        ],
+        # time-series plots
+        [
+            "time_series_plot",
+            "multivariate_timeseries_plot",
+            "var_forecast_plot",
+            "var_acorr_plot",
+            "irf_plot",
+        ],
+        # ML plots: classification-specific or usable for either task
+        [
+            "confusion_matrix_plot",
+            "roc_curve_plot",
+            "precision_recall_plot",
+            "det_curve_plot",
+            "calibration_curve_plot",
+            "learning_curve_plot",
+        ],
+        # ML plots: regression only
+        ["qq_plot"],
+        # stats plots (PCA, ...)
+        ["pca_scree_plot", "pca_corr_circle"],
+        # geo / maps
+        ["geo_plot", "geo_density"],
     ],
 }
 

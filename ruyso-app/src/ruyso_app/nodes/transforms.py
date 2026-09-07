@@ -66,30 +66,44 @@ class DropNA(Node):
         return {"df": df.dropna(subset=columns, how=self.params.how)}
 
 
-class StandardScalerParams(NodeParams):
+class ScalerParams(NodeParams):
     """
-    Parameters for StandardScalerNode.
+    Parameters for Scaler.
 
     Attributes:
         columns: Numeric columns to scale. If None (default), every
             numeric column in the DataFrame is scaled.
+        method: Which scikit-learn scaler to apply -- "standard"
+            (zero mean, unit variance), "minmax" (linearly rescaled
+            into ``[feature_range_min, feature_range_max]``), or
+            "maxabs" (divided by the maximum absolute value, so a
+            sparse column's zeros stay zero).
+        with_mean / with_std: StandardScaler options -- centre on the
+            mean / scale to unit variance (turning both off is a
+            no-op; each can be dropped independently).
+        feature_range_min / feature_range_max: MinMaxScaler's target range.
     """
 
     columns: list[str] | None = column_field(dtypes=("numeric",), default=None)
+    method: Literal["standard", "minmax", "maxabs"] = "standard"
+    with_mean: bool = visible_field(True, visible_when=("method", "standard"))
+    with_std: bool = visible_field(True, visible_when=("method", "standard"))
+    feature_range_min: float = visible_field(0.0, visible_when=("method", "minmax"))
+    feature_range_max: float = visible_field(1.0, visible_when=("method", "minmax"))
 
 
 @register_node
-class StandardScalerNode(Node):
+class Scaler(Node):
     """
-    Standardize numeric columns to zero mean and unit variance, using
-    scikit-learn's StandardScaler.
+    Rescale numeric columns using one of scikit-learn's StandardScaler /
+    MinMaxScaler / MaxAbsScaler.
     """
 
-    node_type = "standard_scaler"
+    node_type = "scaler"
     category = "transform"
     inputs = [Port(name="df", dtype="dataframe")]
     outputs = [Port(name="df", dtype="dataframe")]
-    params_schema = StandardScalerParams
+    params_schema = ScalerParams
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         """
@@ -102,13 +116,31 @@ class StandardScalerNode(Node):
             {"df": pandas.DataFrame} with the target columns scaled.
         """
         self.validate_inputs(inputs)
-        from sklearn.preprocessing import StandardScaler
 
+        p = self.params
         df = inputs["df"].copy()
-        columns = self.params.columns or df.select_dtypes(
-            include="number"
-        ).columns.tolist()
-        df[columns] = StandardScaler().fit_transform(df[columns])
+        columns = p.columns or df.select_dtypes(include="number").columns.tolist()
+
+        if p.method == "minmax":
+            from sklearn.preprocessing import MinMaxScaler
+
+            lo, hi = float(p.feature_range_min), float(p.feature_range_max)
+            if hi <= lo:
+                raise ValueError(
+                    f"scaler: feature_range_max ({hi}) must be greater than "
+                    f"feature_range_min ({lo})."
+                )
+            scaler = MinMaxScaler(feature_range=(lo, hi))
+        elif p.method == "maxabs":
+            from sklearn.preprocessing import MaxAbsScaler
+
+            scaler = MaxAbsScaler()
+        else:
+            from sklearn.preprocessing import StandardScaler
+
+            scaler = StandardScaler(with_mean=bool(p.with_mean), with_std=bool(p.with_std))
+
+        df[columns] = scaler.fit_transform(df[columns])
         return {"df": df}
 
 
@@ -1320,8 +1352,8 @@ class OneHotEncode(Node):
     columns named ``<column>_<value>``.
 
     Fitted on whatever DataFrame it receives (stateless, like
-    ``standard_scaler``); ``handle_unknown='ignore'`` so it never
-    raises on an unseen value.
+    ``scaler``); ``handle_unknown='ignore'`` so it never raises on an
+    unseen value.
     """
 
     node_type = "one_hot_encode"
@@ -1716,19 +1748,30 @@ class DiffParams(NodeParams):
     Parameters for Diff.
 
     Attributes:
-        columns: Numeric columns to difference. Blank (default) = every
-            numeric column.
+        columns: Columns to difference (tickboxes). Blank (default) =
+            every numeric column. Non-numeric picks are coerced to
+            numbers (non-parsable values become NaN).
         lags: Comma-separated period(s) to diff over, e.g. ``1`` or
             ``1, 7, 30``. Each produces one ``<column>_diff_<lag>``
             column (``Series.diff(periods=lag)``; a negative lag looks
             forward instead of back). Assumes the rows are already
             ordered by time (see the ``sort`` node) -- this is a plain
             row-order difference, not aware of any datetime column.
+        first_value: What to put in the ``lag`` rows a difference cannot
+            fill (the leading rows for a positive lag, trailing for a
+            negative one):
+
+            * ``nan`` -- leave them missing (the pandas default);
+            * ``zero`` -- fill them with ``0``;
+            * ``keep_original`` -- keep the original (un-differenced)
+              value there, so the new column starts from the series
+              level and continues in changes.
         replace: Drop the source columns, keeping only the diff columns.
     """
 
-    columns: list[str] | None = column_field(dtypes=("numeric",), default=None)
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
     lags: str = "1"
+    first_value: Literal["nan", "zero", "keep_original"] = "nan"
     replace: bool = False
 
 
@@ -1766,7 +1809,15 @@ class Diff(Node):
         for column in columns:
             series = pd.to_numeric(df[column], errors="coerce")
             for lag in lags:
-                df[f"{column}_diff_{lag}"] = series.diff(periods=lag)
+                diffed = series.diff(periods=lag)
+                if p.first_value != "nan" and lag != 0:
+                    # The rows a diff of period ``lag`` cannot fill: the
+                    # first ``lag`` for a positive lag, the last for a
+                    # negative one.
+                    edge = slice(0, lag) if lag > 0 else slice(lag, None)
+                    fill = 0 if p.first_value == "zero" else series.iloc[edge]
+                    diffed.iloc[edge] = fill
+                df[f"{column}_diff_{lag}"] = diffed
 
         if p.replace:
             df = df.drop(columns=columns)
@@ -1860,3 +1911,57 @@ class CustomOperation(Node):
                 f"runs (got {got})."
             )
         return {"df": result}
+
+
+# --------------------------------------------------------------------------
+# CovarianceMatrix
+# --------------------------------------------------------------------------
+
+
+class CovarianceMatrixParams(NodeParams):
+    """
+    Parameters for CovarianceMatrix.
+
+    Attributes:
+        columns: Numeric columns to include. Blank (default) = every
+            numeric column.
+        normalize: Compute the correlation matrix (each variable scaled
+            to unit variance) instead of the raw covariance matrix.
+        ddof: Delta degrees of freedom for the covariance estimate
+            (1 = the usual sample covariance, 0 = population).
+            Ignored when ``normalize`` is on -- correlation has no ddof.
+    """
+
+    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
+    normalize: bool = False
+    ddof: int = visible_field(1, visible_unless=("normalize", "True"))
+
+
+@register_node
+class CovarianceMatrix(Node):
+    """Covariance matrix of numeric columns (or, normalized, the correlation matrix)."""
+
+    node_type = "covariance_matrix"
+    category = "transform"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = CovarianceMatrixParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        columns = p.columns or df.select_dtypes(include="number").columns.tolist()
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"covariance_matrix: column(s) not found in the input data: {missing}"
+            )
+        if len(columns) < 2:
+            raise ValueError("covariance_matrix: need at least 2 numeric columns.")
+
+        data = df[columns].apply(pd.to_numeric, errors="coerce")
+        matrix = data.corr() if p.normalize else data.cov(ddof=int(p.ddof))
+        return {"df": matrix.reset_index(names="variable")}

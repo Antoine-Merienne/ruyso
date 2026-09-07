@@ -30,8 +30,8 @@ def test_core_marks_column_params():
     assert column_ref_dtypes(plot.params_schema.model_fields["y"]) == ["any"]
     assert column_ref_dtypes(plot.params_schema.model_fields["kind"]) is None
 
-    # standard_scaler genuinely needs numeric columns.
-    scaler = NodeRegistry.get("standard_scaler")
+    # scaler genuinely needs numeric columns.
+    scaler = NodeRegistry.get("scaler")
     assert column_ref_dtypes(scaler.params_schema.model_fields["columns"]) == ["numeric"]
 
 

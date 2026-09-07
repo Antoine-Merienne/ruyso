@@ -54,7 +54,7 @@ class PipelinePage(QWidget):
         self._horizontal.setStretchFactor(1, 0)
         self._horizontal.setCollapsible(0, False)
         self._horizontal.setCollapsible(1, False)
-        self._horizontal.setSizes([1120, 300])
+        self._horizontal.setSizes([980, 440])
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

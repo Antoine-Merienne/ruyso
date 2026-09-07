@@ -59,6 +59,36 @@ def test_options_title_is_centered(qapp):
     assert panel._title.alignment() & Qt.AlignHCenter
 
 
+def test_options_panel_has_a_generous_minimum_width(qapp):
+    from ruyso_app.ui.options_panel import MIN_PANEL_WIDTH
+
+    assert MIN_PANEL_WIDTH >= 340
+    assert OptionsPanel().minimumWidth() >= 340
+
+
+def test_decimals_for_helper():
+    from ruyso_app.ui.options_panel import _decimals_for
+
+    assert _decimals_for(6.0) == 2  # whole number -> "6.00", not "6.0000"
+    assert _decimals_for(1.5) == 2
+    assert _decimals_for(0.0001) == 4  # small value keeps its precision
+    assert _decimals_for(1e-9) == 9
+    assert _decimals_for(0.0001, 0.00001) == 5  # widened by the current value
+
+
+def test_float_spin_box_uses_a_value_appropriate_decimal_count(qapp):
+    from PySide6.QtWidgets import QDoubleSpinBox
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    spin = panel._field_widgets["fig_width"]  # default 6.0
+    assert isinstance(spin, QDoubleSpinBox)
+    assert spin.decimals() == 2  # "6.00", not "6.0000"
+
+
 def test_node_help_shows_a_description_under_micro_type(qapp):
     graph = _graph(qapp)
     node = graph.create_node(qt_type_for("drop_na"), name="clean")
@@ -119,8 +149,8 @@ def test_user_type_change_emits_signal_but_programmatic_populate_does_not(qapp):
     panel.show_node(node, BY_CAT)
     assert seen == []  # repopulating the combos must not fire
 
-    panel._micro_combo.setCurrentText("standard_scaler")
-    assert seen == ["standard_scaler"]
+    panel._micro_combo.setCurrentText("scaler")
+    assert seen == ["scaler"]
 
 
 def test_changing_macro_type_requests_first_node_of_new_macro(qapp):
@@ -173,7 +203,7 @@ def test_path_field_has_a_browse_button_and_an_expanding_edit(qapp):
 
 def test_non_path_field_has_no_browse_button(qapp):
     graph = _graph(qapp)
-    node = graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    node = graph.create_node(qt_type_for("scaler"), name="scale")
     panel = OptionsPanel()
     panel.show_node(node, BY_CAT)
 
@@ -200,7 +230,7 @@ def test_grapher_column_field_lists_columns_and_warns_only_on_unknown(qapp):
 
 def test_numeric_only_column_field_warns_on_wrong_type(qapp):
     graph = _graph(qapp)
-    scaler = graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    scaler = graph.create_node(qt_type_for("scaler"), name="scale")
     panel = OptionsPanel()
     panel.show_node(scaler, BY_CAT, input_columns={"age": "numeric", "city": "categorical"})
 
@@ -221,7 +251,7 @@ def test_list_column_field_uses_one_editable_combo_like_single_fields(qapp):
     from PySide6.QtWidgets import QToolButton
 
     graph = _graph(qapp)
-    scaler = graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    scaler = graph.create_node(qt_type_for("scaler"), name="scale")
     panel = OptionsPanel()
     panel.show_node(scaler, BY_CAT, input_columns={"age": "numeric", "weight": "numeric"})
 
@@ -235,7 +265,7 @@ def test_list_column_field_uses_one_editable_combo_like_single_fields(qapp):
 
 def test_list_column_field_toggles_picked_columns_into_the_value(qapp):
     graph = _graph(qapp)
-    scaler = graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    scaler = graph.create_node(qt_type_for("scaler"), name="scale")
     panel = OptionsPanel()
     panel.show_node(scaler, BY_CAT, input_columns={"age": "numeric", "weight": "numeric"})
 
@@ -263,7 +293,7 @@ def test_list_column_field_toggles_picked_columns_into_the_value(qapp):
 
 def test_list_column_field_value_survives_a_form_rebuild(qapp):
     graph = _graph(qapp)
-    scaler = graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    scaler = graph.create_node(qt_type_for("scaler"), name="scale")
     cols = {"a": "numeric", "b": "numeric", "c": "numeric"}
     panel = OptionsPanel()
     panel.show_node(scaler, BY_CAT, input_columns=cols)
@@ -340,13 +370,15 @@ def test_transform_micro_type_dropdown_is_grouped_with_separators(qapp):
         else:
             groups[-1].append(entry)
 
-    # 7 curated groups (base / filters / type / reshaping / datetime /
-    # geo / custom) -> 6 separators, nothing lost or duplicated.
-    assert len(groups) == 7
+    # 9 curated groups (base / filters / type / reshaping / datetime /
+    # geo-convert / geo-relate / geo-derive / custom), nothing lost.
+    assert len(groups) == 9
     assert sorted(t for g in groups for t in g) == BY_CAT["transform"]
     assert groups[0] == ["head", "tail", "sample", "drop_na", "sort", "reset_index"]
     assert groups[1] == ["row_filter", "column_filter", "dtype_filter"]
     assert "diff" in groups[4]  # datetime operations
+    assert "spatial_join" in groups[6]  # geo: relate / combine
+    assert "geo_buffer" in groups[7]  # geo: reshape / derive
     assert groups[-1] == ["custom_operation"]
 
 
@@ -364,11 +396,73 @@ def test_statistics_micro_type_dropdown_separates_tests_from_non_tests(qapp):
         else:
             groups[-1].append(entry)
 
-    assert len(groups) == 2  # non-tests, then every *_test node
+    assert len(groups) == 3  # tools, time-series models, then every *_test node
     assert sorted(t for g in groups for t in g) == BY_CAT["statistics"]
-    assert groups[0] == ["regression", "pca", "arima", "auto_arima", "multiple_testing"]
-    assert groups[1] == sorted(groups[1])
-    assert all(t.endswith("_test") for t in groups[1])
+    assert groups[0] == ["regression", "pca", "ica", "tsne", "multiple_testing"]
+    assert groups[1] == ["arima", "auto_arima", "var"]
+    assert groups[2] == sorted(groups[2])
+    assert all(t.endswith("_test") for t in groups[2])
+
+
+def _micro_groups(panel):
+    groups: list[list[str]] = [[]]
+    for entry in _combo_entries(panel._micro_combo):
+        groups.append([]) if entry is None else groups[-1].append(entry)
+    return groups
+
+
+def test_model_micro_type_dropdown_splits_supervised_from_unsupervised(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("predict"), name="p")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    groups = _micro_groups(panel)
+    assert len(groups) == 3  # utilities / supervised fits / unsupervised fits
+    assert sorted(t for g in groups for t in g) == BY_CAT["model"]
+    assert set(groups[0]) == {
+        "predict", "model_coeffs", "model_scores", "residuals",
+        "optim_diagnostic", "optim_scores",
+    }
+    assert "linear_regression_fit" in groups[1] and "kmeans_fit" not in groups[1]
+    assert set(groups[2]) == {
+        "kmeans_fit", "minibatch_kmeans_fit", "dbscan_fit", "hdbscan_fit",
+        "agglomerative_clustering_fit", "spectral_clustering_fit", "gaussian_mixture_fit",
+    }
+
+
+def test_grapher_micro_type_dropdown_has_seven_ordered_groups(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    groups = _micro_groups(panel)
+    assert len(groups) == 7  # table / base / time-series / ML clf / ML reg / stats / geo
+    assert sorted(t for g in groups for t in g) == BY_CAT["grapher"]
+    assert groups[0] == ["table_viewer"]
+    assert "matplotlib_plot" in groups[1] and "pie_chart" in groups[1]
+    assert "time_series_plot" in groups[2] and "irf_plot" in groups[2]
+    assert "confusion_matrix_plot" in groups[3] and "learning_curve_plot" in groups[3]
+    assert groups[4] == ["qq_plot"]
+    assert groups[5] == ["pca_scree_plot", "pca_corr_circle"]
+    assert groups[6] == ["geo_plot", "geo_density"]
+
+
+def test_visible_when_in_shows_the_row_for_any_listed_value(qapp):
+    # box_plot's `show_outliers` uses visible_when_in=("kind", ("box","boxen"))
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("box_plot"), name="bp")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    assert _rows(panel)["show outliers"] is True  # kind defaults to "box"
+    panel._field_widgets["kind"].setCurrentText("boxen")
+    assert _rows(panel)["show outliers"] is True
+    panel._field_widgets["kind"].setCurrentText("violin")
+    assert _rows(panel)["show outliers"] is False
+    panel._field_widgets["kind"].setCurrentText("swarm")
+    assert _rows(panel)["show outliers"] is False
 
 
 def test_custom_operation_code_field_is_a_multiline_editor_with_a_column_hint(qapp):

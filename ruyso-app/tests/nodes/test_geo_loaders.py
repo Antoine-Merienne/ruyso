@@ -9,9 +9,11 @@ import pytest
 from shapely.geometry import Point
 
 from ruyso_app.nodes.geo_loaders import (
+    GeoFeatherLoader,
     GeoJSONLoader,
     GeoPackageLoader,
     GeoPackageLoaderParams,
+    GeoParquetLoader,
     ShapefileLoader,
 )
 from ruyso_app.nodes.loaders import LoaderParams
@@ -53,3 +55,36 @@ def test_geopackage_loader_with_layer(tmp_path, gdf):
         params=GeoPackageLoaderParams(filepath=str(path), layer="places")
     ).run()["gdf"]
     assert list(out["name"]) == ["a", "b", "c"]
+
+
+def test_geoparquet_loader_reconstructs_geometry_and_crs(tmp_path, gdf):
+    path = tmp_path / "s.parquet"
+    gdf.to_parquet(path)
+
+    out = GeoParquetLoader(params=LoaderParams(filepath=str(path))).run()["gdf"]
+
+    assert isinstance(out, gpd.GeoDataFrame)
+    assert out.crs.to_epsg() == 4326
+    assert out.geometry.iloc[2] == Point(2, 2)
+
+
+def test_geofeather_loader_reconstructs_geometry_and_crs(tmp_path, gdf):
+    path = tmp_path / "s.feather"
+    gdf.to_feather(path)
+
+    out = GeoFeatherLoader(params=LoaderParams(filepath=str(path))).run()["gdf"]
+
+    assert isinstance(out, gpd.GeoDataFrame)
+    assert out.crs.to_epsg() == 4326
+    assert list(out["name"]) == ["a", "b", "c"]
+
+
+def test_plain_parquet_loader_cannot_read_geoparquet_geometry(tmp_path, gdf):
+    # Why the dedicated node exists: the tabular loader yields raw WKB bytes.
+    from ruyso_app.nodes.loaders import ParquetLoader, ParquetLoaderParams
+
+    path = tmp_path / "s.parquet"
+    gdf.to_parquet(path)
+    out = ParquetLoader(params=ParquetLoaderParams(filepath=str(path))).run()["df"]
+    assert not isinstance(out, gpd.GeoDataFrame)
+    assert isinstance(out["geometry"].iloc[0], bytes)

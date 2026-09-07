@@ -27,6 +27,7 @@ from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
     checkbox_list_field,
     column_field,
+    suggestions_field,
     unit_interval_field,
     visible_field,
 )
@@ -880,8 +881,6 @@ class Regression(Node):
 class PCAParams(NodeParams):
     """
     Attributes:
-        columns: Numeric columns to include (tickboxes; blank = every
-            numeric column).
         n_components: Number of components to keep. 0 = keep every
             component (``min(n_rows, n_columns)``).
         standardize: Standardize each column (zero mean, unit variance)
@@ -889,9 +888,11 @@ class PCAParams(NodeParams):
             already on comparable scales, since PCA is sensitive to it.
         random_state: Seed for the randomized SVD solver (large inputs
             only; ignored otherwise).
+
+    Runs on every numeric column of the input -- drop the ones you
+    don't want with a ``column_filter`` / ``dtype_filter`` first.
     """
 
-    columns: list[str] | None = checkbox_list_field(source="columns", default=None)
     n_components: int = 0
     standardize: bool = True
     random_state: int = 0
@@ -924,10 +925,7 @@ class PCA(Node):
 
         p = self.params
         df = inputs["df"]
-        columns = p.columns or df.select_dtypes(include="number").columns.tolist()
-        missing = [c for c in columns if c not in df.columns]
-        if missing:
-            raise ValueError(f"pca: column(s) not found in the input data: {missing}")
+        columns = df.select_dtypes(include="number").columns.tolist()
         if len(columns) < 2:
             raise ValueError("pca: need at least 2 numeric columns.")
 
@@ -960,6 +958,177 @@ class PCA(Node):
             }
         )
         return {"scores": scores, "loadings": loadings, "variance": variance}
+
+
+# --------------------------------------------------------------------------
+# ICA
+# --------------------------------------------------------------------------
+
+
+class ICAParams(NodeParams):
+    """
+    Attributes:
+        n_components: Number of independent components to extract.
+            0 = same as the number of input columns.
+        algorithm: FastICA fitting strategy -- "parallel" (all
+            components at once) or "deflation" (one at a time).
+        fun: Nonlinearity used to approximate negentropy -- "logcosh"
+            (general-purpose default), "exp" or "cube".
+        whiten: Whitening strategy before unmixing.
+        standardize: Standardize each column (zero mean, unit variance)
+            before fitting.
+        max_iter / tol: Fitting controls.
+        random_state: Seed.
+
+    Runs on every numeric column of the input.
+    """
+
+    n_components: int = 0
+    algorithm: Literal["parallel", "deflation"] = "parallel"
+    fun: Literal["logcosh", "exp", "cube"] = "logcosh"
+    whiten: Literal["unit-variance", "arbitrary-variance"] = "unit-variance"
+    standardize: bool = True
+    max_iter: int = 200
+    tol: float = 1e-4
+    random_state: int = 0
+
+
+@register_node
+class ICA(Node):
+    """
+    Independent component analysis: separate numeric columns into
+    statistically independent source signals. ``sources`` is the
+    transformed data (IC1, IC2, ...); ``mixing`` is each original
+    variable's weight in each source (the FastICA mixing matrix,
+    the ICA analogue of PCA's loadings).
+    """
+
+    node_type = "ica"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [
+        Port(name="sources", dtype="dataframe"),
+        Port(name="mixing", dtype="dataframe"),
+    ]
+    params_schema = ICAParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        from sklearn.decomposition import FastICA
+        from sklearn.preprocessing import StandardScaler
+
+        p = self.params
+        df = inputs["df"]
+        columns = df.select_dtypes(include="number").columns.tolist()
+        if len(columns) < 2:
+            raise ValueError("ica: need at least 2 numeric columns.")
+
+        data = df[columns].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(data) < 2:
+            raise ValueError("ica: not enough complete rows (need at least 2).")
+
+        X = data.to_numpy("float64")
+        if p.standardize:
+            X = StandardScaler().fit_transform(X)
+
+        n_components = min(int(p.n_components), len(columns), len(data)) if p.n_components else None
+        model = FastICA(
+            n_components=n_components, algorithm=p.algorithm, fun=p.fun,
+            whiten=p.whiten, max_iter=int(p.max_iter), tol=float(p.tol),
+            random_state=int(p.random_state),
+        )
+        transformed = model.fit_transform(X)
+
+        ic_names = [f"IC{i + 1}" for i in range(transformed.shape[1])]
+        sources = pd.DataFrame(transformed, columns=ic_names, index=data.index)
+        mixing = pd.DataFrame(
+            model.mixing_, index=pd.Index(columns, name="variable"), columns=ic_names
+        ).reset_index()
+        return {"sources": sources, "mixing": mixing}
+
+
+# --------------------------------------------------------------------------
+# t-SNE
+# --------------------------------------------------------------------------
+
+
+class TSNEParams(NodeParams):
+    """
+    Attributes:
+        n_components: Embedding dimensionality (2 or 3, typically).
+        perplexity: Roughly the number of effective nearest neighbours
+            considered for each point; balances local vs. global
+            structure. Must be less than the number of rows.
+        learning_rate: "auto" (scikit-learn's heuristic, the default)
+            or a fixed positive number.
+        max_iter: Maximum optimisation iterations.
+        metric: Distance metric in the original space.
+        init: Embedding initialisation -- "pca" (deterministic,
+            default) or "random".
+        standardize: Standardize each column before fitting.
+        random_state: Seed.
+
+    Runs on every numeric column of the input.
+    """
+
+    n_components: int = 2
+    perplexity: float = 30.0
+    learning_rate: str = suggestions_field(
+        suggestions=["auto", "10", "50", "200", "500", "1000"], default="auto",
+    )
+    max_iter: int = 1000
+    metric: Literal["euclidean", "manhattan", "cosine", "chebyshev"] = "euclidean"
+    init: Literal["pca", "random"] = "pca"
+    standardize: bool = True
+    random_state: int = 0
+
+
+@register_node
+class TSNE(Node):
+    """
+    t-SNE: a nonlinear embedding (2D/3D, typically) for visualising
+    structure/clusters in numeric columns. Direct output only (an
+    embedding table) -- t-SNE has no ``transform`` for new data, so
+    there is no reusable "model" the way a fit node produces one.
+    """
+
+    node_type = "tsne"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [Port(name="df", dtype="dataframe")]
+    params_schema = TSNEParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        from sklearn.manifold import TSNE as SkTSNE
+        from sklearn.preprocessing import StandardScaler
+
+        p = self.params
+        df = inputs["df"]
+        columns = df.select_dtypes(include="number").columns.tolist()
+        if len(columns) < 2:
+            raise ValueError("tsne: need at least 2 numeric columns.")
+
+        data = df[columns].apply(pd.to_numeric, errors="coerce").dropna()
+        n_components = max(int(p.n_components), 1)
+        if len(data) < n_components + 1:
+            raise ValueError("tsne: not enough complete rows.")
+
+        X = data.to_numpy("float64")
+        if p.standardize:
+            X = StandardScaler().fit_transform(X)
+
+        lr_text = (p.learning_rate or "auto").strip()
+        learning_rate: str | float = "auto" if lr_text.lower() == "auto" else float(lr_text)
+
+        model = SkTSNE(
+            n_components=n_components, perplexity=float(p.perplexity),
+            learning_rate=learning_rate, max_iter=int(p.max_iter),
+            metric=p.metric, init=p.init, random_state=int(p.random_state),
+        )
+        embedding = model.fit_transform(X)
+        names = [f"tsne_{i + 1}" for i in range(embedding.shape[1])]
+        return {"df": pd.DataFrame(embedding, columns=names, index=data.index)}
 
 
 # --------------------------------------------------------------------------
@@ -1278,4 +1447,341 @@ class AutoArima(Node):
         return {
             "fit": _fit_summary_table(res, order, seasonal_order),
             "forecast": _forecast_table(res, p.forecast_periods, p.confidence_level),
+        }
+
+
+# --------------------------------------------------------------------------
+# VAR / VECM (vector autoregression, statsmodels)
+# --------------------------------------------------------------------------
+
+
+def _var_data(df: pd.DataFrame, variables: list[str] | None, dt_col: str, ctx: str):
+    """(numeric DataFrame of the chosen variables, index name) for a VAR/VECM fit."""
+    cols = [c for c in (variables or []) if c in df.columns and c != dt_col]
+    if len(cols) < 2:
+        raise ValueError(f"{ctx}: tick at least two variables to include in the model.")
+    data = df[cols].apply(pd.to_numeric, errors="coerce")
+    index_name = "index"
+    if dt_col and dt_col in df.columns:
+        idx = pd.to_datetime(df[dt_col], errors="coerce")
+        data = data.set_index(idx).sort_index()
+        index_name = dt_col
+    data = data.dropna()
+    if len(data) < 3 * len(cols) + 5:
+        raise ValueError(f"{ctx}: not enough complete rows to fit the model.")
+    return data, index_name
+
+
+def _var_coeff_table(res: Any) -> pd.DataFrame:
+    """Long coefficient table for a fitted ``VARResults`` (one row per equation x term)."""
+    params, se = res.params, res.stderr
+    tvals, pvals = res.tvalues, res.pvalues
+    rows = []
+    for eq in params.columns:
+        for term in params.index:
+            rows.append(
+                {
+                    "equation": str(eq),
+                    "term": str(term),
+                    "coef": float(params.loc[term, eq]),
+                    "std_err": float(se.loc[term, eq]),
+                    "stat": float(tvals.loc[term, eq]),
+                    "pvalue": float(pvals.loc[term, eq]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _vecm_coeff_table(res: Any, names: list[str]) -> pd.DataFrame:
+    """Long coefficient table for a fitted ``VECMResults`` (short-run + loadings)."""
+    neqs = len(names)
+    gamma = np.asarray(res.gamma, dtype="float64")
+    k_ar_diff = gamma.shape[1] // neqs if neqs else 0
+    se_g = np.asarray(getattr(res, "stderr_gamma", np.full_like(gamma, np.nan)))
+    pv_g = np.asarray(getattr(res, "pvalues_gamma", np.full_like(gamma, np.nan)))
+    alpha = np.asarray(res.alpha, dtype="float64")
+    se_a = np.asarray(getattr(res, "stderr_alpha", np.full_like(alpha, np.nan)))
+    pv_a = np.asarray(getattr(res, "pvalues_alpha", np.full_like(alpha, np.nan)))
+    rows = []
+    for i, eq in enumerate(names):
+        for d in range(k_ar_diff):
+            for j in range(neqs):
+                col = d * neqs + j
+                rows.append(
+                    {
+                        "equation": eq,
+                        "term": f"L{d + 1}.d.{names[j]}",
+                        "coef": float(gamma[i, col]),
+                        "std_err": float(se_g[i, col]),
+                        "stat": np.nan,
+                        "pvalue": float(pv_g[i, col]),
+                    }
+                )
+        for k in range(alpha.shape[1]):
+            rows.append(
+                {
+                    "equation": eq,
+                    "term": f"ec{k + 1}",  # loading on cointegration relation k
+                    "coef": float(alpha[i, k]),
+                    "std_err": float(se_a[i, k]),
+                    "stat": np.nan,
+                    "pvalue": float(pv_a[i, k]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+class VarParams(NodeParams):
+    """
+    Parameters for Var.
+
+    Attributes:
+        method: ``var`` -- a level VAR (``statsmodels`` ``VAR``);
+            ``vecm`` -- a vector error-correction model for cointegrated
+            series (``statsmodels`` ``VECM``).
+        datetime_column: Optional datetime column to use as the time
+            index (blank = keep the row order). Rows are sorted by it.
+        variables: The series to include in the system (tickboxes,
+            two or more).
+        lags: VAR order (number of lagged levels), or for a VECM the
+            number of lagged differences ``k_ar_diff``. When
+            ``optimize_lag`` is on this is the *maximum* order searched.
+        optimize_lag: Search every order from 1 up to ``lags`` and keep
+            the one that minimises ``ic`` (``VAR.fit(ic=...)`` /
+            ``vecm.select_order``).
+        ic: Information criterion for the ``optimize_lag`` search.
+        trend: VAR only -- deterministic terms (``n`` none, ``c``
+            constant, ``ct`` constant + trend, ``ctt`` + quadratic).
+        deterministic: VECM only -- deterministic terms inside /
+            outside the cointegration relation (``ci`` constant inside,
+            ``co`` constant outside, ``li`` / ``lo`` linear trend,
+            ``n`` none).
+        coint_rank: VECM only -- number of cointegration relations.
+        forecast_periods: Steps ahead for the ``forecast`` output.
+        confidence_level: Confidence level for the forecast interval.
+    """
+
+    method: Literal["var", "vecm"] = "var"
+    datetime_column: str = column_field(dtypes=("datetime", "any"), allow_none=True, default="")
+    variables: list[str] | None = checkbox_list_field(source="columns", default=None)
+    lags: int = 1
+    optimize_lag: bool = False
+    ic: Literal["aic", "bic", "hqic", "fpe"] = visible_field(
+        "aic", visible_when=("optimize_lag", "True"),
+        description="Information criterion for the lag-order search.",
+    )
+    trend: Literal["n", "c", "ct", "ctt"] = visible_field(
+        "c", visible_when=("method", "var"),
+    )
+    deterministic: Literal["n", "co", "ci", "lo", "li"] = visible_field(
+        "ci", visible_when=("method", "vecm"),
+    )
+    coint_rank: int = visible_field(1, visible_when=("method", "vecm"))
+    forecast_periods: int = 10
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+
+
+@register_node
+class Var(Node):
+    """
+    Fit a vector autoregression (VAR) or vector error-correction model
+    (VECM) on two or more time series.
+
+    Outputs the full coefficient table (``coeffs``), the per-equation
+    residuals (``residuals``), a multi-step forecast with interval
+    (``forecast``), and the fitted ``model`` object -- consumed by
+    ``var_test`` and the ``var_*`` / ``irf`` grapher nodes.
+    """
+
+    node_type = "var"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [
+        Port(name="coeffs", dtype="dataframe"),
+        Port(name="residuals", dtype="dataframe"),
+        Port(name="forecast", dtype="dataframe"),
+        Port(name="model", dtype="model"),
+    ]
+    params_schema = VarParams
+    # statsmodels results wrappers are heavy and not reliably hashable.
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        data, index_name = _var_data(
+            inputs["df"], p.variables, p.datetime_column, "var"
+        )
+        names = list(data.columns)
+        alpha = 1.0 - float(p.confidence_level)
+        lags = max(int(p.lags), 1)
+        steps_ahead = max(int(p.forecast_periods), 1)
+
+        if p.method == "var":
+            from statsmodels.tsa.api import VAR
+
+            if p.optimize_lag:
+                fitted = VAR(data).fit(maxlags=lags, ic=p.ic, trend=p.trend)
+            else:
+                fitted = VAR(data).fit(lags, trend=p.trend)
+            selected_lag = int(fitted.k_ar)
+            coeffs = _var_coeff_table(fitted)
+            resid = fitted.resid.copy()
+            resid.index.name = index_name
+            residuals = resid.reset_index()
+            mid, low, high = fitted.forecast_interval(
+                data.values[-fitted.k_ar:], steps_ahead, alpha=alpha,
+            )
+        else:
+            from statsmodels.tsa.vector_ar.vecm import VECM, select_order
+
+            if p.optimize_lag:
+                k_ar_diff = int(
+                    select_order(
+                        data, maxlags=lags, deterministic=p.deterministic
+                    ).selected_orders[p.ic]
+                )
+            else:
+                k_ar_diff = lags
+            selected_lag = k_ar_diff
+            fitted = VECM(
+                data, k_ar_diff=k_ar_diff, coint_rank=max(int(p.coint_rank), 1),
+                deterministic=p.deterministic,
+            ).fit()
+            coeffs = _vecm_coeff_table(fitted, names)
+            resid_arr = np.asarray(fitted.resid, dtype="float64")
+            resid = pd.DataFrame(
+                resid_arr, columns=names, index=data.index[-len(resid_arr):]
+            )
+            resid.index.name = index_name
+            residuals = resid.reset_index()
+            mid, low, high = fitted.predict(steps=steps_ahead, alpha=alpha)
+
+        steps = np.arange(1, len(mid) + 1)
+        forecast = pd.DataFrame(
+            {
+                "step": np.repeat(steps, len(names)),
+                "variable": np.tile(names, len(steps)),
+                "forecast": np.asarray(mid, dtype="float64").ravel(),
+                "ci_low": np.asarray(low, dtype="float64").ravel(),
+                "ci_high": np.asarray(high, dtype="float64").ravel(),
+            }
+        )
+
+        # Stashed for the var_* grapher nodes (history + names + settings,
+        # no re-derivation).
+        fitted.ruyso_names = names
+        fitted.ruyso_endog = data
+        fitted.ruyso_method = p.method
+        fitted.ruyso_forecast_periods = steps_ahead
+        fitted.ruyso_selected_lag = selected_lag
+        return {
+            "coeffs": coeffs,
+            "residuals": residuals,
+            "forecast": forecast,
+            "model": fitted,
+        }
+
+
+class VarTestParams(NodeParams):
+    """
+    Parameters for VarTest.
+
+    Attributes:
+        test: Which diagnostic to run on the fitted VAR/VECM:
+
+            * ``granger_causality`` -- do the ``causing`` variables
+              Granger-cause the ``caused`` ones (Wald / F test on the
+              lag coefficients)?
+            * ``instantaneous_causality`` -- contemporaneous
+              (same-period) causality between ``causing`` and the rest.
+            * ``normality`` -- Jarque-Bera on the residuals (joint,
+              skew, kurtosis).
+            * ``whiteness`` -- Portmanteau / Ljung-Box test for
+              residual autocorrelation up to ``whiteness_lags``.
+        causing / caused: Variable subsets for the causality tests
+            (tickboxes).
+        whiteness_lags: Number of lags for the whiteness test.
+        adjusted: Use the small-sample-adjusted (Ljung-Box) statistic.
+        signif: Significance level for the reported conclusion.
+    """
+
+    test: Literal[
+        "granger_causality", "instantaneous_causality", "normality", "whiteness"
+    ] = "granger_causality"
+    causing: list[str] | None = checkbox_list_field(
+        source="columns", default=None,
+        visible_when_in=("test", ("granger_causality", "instantaneous_causality")),
+    )
+    caused: list[str] | None = checkbox_list_field(
+        source="columns", default=None,
+        visible_when_in=("test", ("granger_causality",)),
+    )
+    whiteness_lags: int = visible_field(12, visible_when=("test", "whiteness"))
+    adjusted: bool = visible_field(False, visible_when=("test", "whiteness"))
+    signif: float = unit_interval_field(0.05, lo=0.001, hi=0.2)
+
+
+@register_node
+class VarTest(Node):
+    """
+    Diagnostic hypothesis tests on a fitted VAR / VECM (``model`` port
+    from the ``var`` node): Granger / instantaneous causality, residual
+    normality, and residual whiteness (no autocorrelation).
+    """
+
+    node_type = "var_test"
+    category = "statistics"
+    inputs = [Port(name="model", dtype="model")]
+    outputs = list(_STATS_OUTPUTS)
+    params_schema = VarTestParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        model = inputs["model"]
+        names = list(getattr(model, "ruyso_names", []) or getattr(model, "names", []) or [])
+        signif = float(p.signif)
+
+        def _pick(sel: list[str] | None, fallback: list[str]) -> list[str]:
+            chosen = [c for c in (sel or []) if c in names]
+            return chosen or fallback
+
+        if p.test in ("granger_causality", "instantaneous_causality"):
+            causing = _pick(p.causing, names[:1])
+            if p.test == "granger_causality":
+                caused = _pick(p.caused, [c for c in names if c not in causing] or names)
+                fn = getattr(model, "test_causality", None) or getattr(
+                    model, "test_granger_causality"
+                )
+                res = fn(caused, causing, signif=signif)
+                extra = {"causing": ", ".join(causing), "caused": ", ".join(caused)}
+            else:
+                fn = getattr(model, "test_inst_causality")
+                res = fn(causing, signif=signif)
+                extra = {"causing": ", ".join(causing), "caused": ""}
+        elif p.test == "normality":
+            res = model.test_normality(signif=signif)
+            extra = {}
+        else:  # whiteness
+            res = model.test_whiteness(
+                nlags=max(int(p.whiteness_lags), 1), signif=signif,
+                adjusted=bool(p.adjusted),
+            )
+            extra = {"nlags": int(p.whiteness_lags)}
+
+        df_val = getattr(res, "df", None)
+        conclusion = getattr(res, "conclusion_str", None) or getattr(res, "conclusion", "")
+        return {
+            "df": _row(
+                test=p.test,
+                statistic=float(res.test_statistic),
+                pvalue=float(res.pvalue),
+                df=str(df_val) if df_val is not None else "",
+                crit_value=float(getattr(res, "crit_value", float("nan"))),
+                signif=signif,
+                conclusion=str(conclusion).replace("Conclusion: ", ""),
+                **extra,
+            )
         }

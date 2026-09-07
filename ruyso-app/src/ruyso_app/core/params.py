@@ -33,7 +33,9 @@ Every helper stashes a small marker dict in the field's
   is empty; ``visible_unless=`` shows it while another field does *not*
   hold a given value; ``visible_when_kind=(field, kinds)`` shows it
   while the column named by ``field`` has one of ``kinds`` (or the
-  kind is not known yet). Conditions combine with AND.
+  kind is not known yet); ``visible_when_in=(field, values)`` shows it
+  while another field's value is one of ``values`` (an "OR" version of
+  ``visible_when=`` for more than one match). Conditions combine with AND.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ VISIBLE_WHEN_SET_KEY = "ruyso_visible_when_set"
 VISIBLE_WHEN_UNSET_KEY = "ruyso_visible_when_unset"
 VISIBLE_WHEN_KIND_KEY = "ruyso_visible_when_kind"
 VISIBLE_UNLESS_KEY = "ruyso_visible_unless"
+VISIBLE_WHEN_IN_KEY = "ruyso_visible_when_in"
 
 #: Accepted values for a column reference's ``dtypes`` list. ``"any"``
 #: means no type restriction.
@@ -81,6 +84,7 @@ def _visible_markers(
     visible_unless: tuple[str, str] | None = None,
     visible_when_unset: str | None = None,
     visible_when_kind: tuple[str, tuple[str, ...]] | None = None,
+    visible_when_in: tuple[str, tuple[str, ...]] | None = None,
 ) -> dict | None:
     marker: dict[str, Any] = {}
     if visible_when is not None:
@@ -96,6 +100,9 @@ def _visible_markers(
     if visible_unless is not None:
         field, equals = visible_unless
         marker[VISIBLE_UNLESS_KEY] = {"field": field, "equals": equals}
+    if visible_when_in is not None:
+        field, values = visible_when_in
+        marker[VISIBLE_WHEN_IN_KEY] = {"field": field, "values": list(values)}
     return marker or None
 
 
@@ -104,7 +111,7 @@ def _visible_markers(
 #: pydantic's ``Field`` never sees them.
 _VISIBLE_KEYS = (
     "visible_when", "visible_when_set", "visible_unless",
-    "visible_when_unset", "visible_when_kind",
+    "visible_when_unset", "visible_when_kind", "visible_when_in",
 )
 
 
@@ -414,3 +421,8 @@ def visible_when_kind(field_info: FieldInfo) -> tuple[str, tuple[str, ...]] | No
 def visible_unless(field_info: FieldInfo) -> tuple[str, str] | None:
     marker = _marker(field_info, VISIBLE_UNLESS_KEY)
     return (marker["field"], marker["equals"]) if marker is not None else None
+
+
+def visible_when_in(field_info: FieldInfo) -> tuple[str, tuple[str, ...]] | None:
+    marker = _marker(field_info, VISIBLE_WHEN_IN_KEY)
+    return (marker["field"], tuple(marker["values"])) if marker is not None else None

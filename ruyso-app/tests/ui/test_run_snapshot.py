@@ -41,7 +41,7 @@ def test_downstream_only_change_does_not_flag_upstream():
 def test_new_node_absent_from_snapshot_is_flagged():
     snapshot = pipeline_signatures(_pipeline())
     grown = _pipeline()
-    grown.add_node(NodeSpec(id="scale", node_type="standard_scaler", params={}))
+    grown.add_node(NodeSpec(id="scale", node_type="scaler", params={}))
     grown.add_connection(
         Connection(source_node="clean", source_port="df", target_node="scale", target_port="df")
     )

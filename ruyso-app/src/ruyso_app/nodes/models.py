@@ -31,8 +31,14 @@ error-style metric, minimise) the chosen score on ``X_test``/``y_test``
 -- which become required inputs only in that case. The additional
 ``optim`` output carries the full run (best params, best score, and a
 per-trial train/test score table) for the ``optim_diagnostic`` /
-``optim_scores`` nodes in ``model_ops.py`` to consume. Clustering nodes
-(unsupervised, no target/test score) do not get this section.
+``optim_scores`` nodes in ``model_ops.py`` to consume.
+
+Clustering nodes (``kmeans_fit`` etc., :class:`SklearnClusterFitNode`)
+are the exception to all of the above: unsupervised, so they are
+shaped like a transform -- input ``df`` -> output ``df`` with a
+``cluster`` label column (plus the fitted estimator on a secondary
+``model`` port) -- with no target, no train/test split and no
+optimize section.
 """
 
 from typing import Any, ClassVar, Literal
@@ -769,31 +775,84 @@ class NaiveBayesFit(SklearnFitNode):
 # --------------------------------------------------------------------------
 
 
-class SklearnClusterFitNode(SklearnFitNode):
+class ClusterParams(NodeParams):
     """
-    Base for clustering model nodes: fit ``ESTIMATORS["cluster"]`` on
-    ``X_train`` alone. Clustering is unsupervised, so unlike
-    :class:`SklearnFitNode` this never requires (or passes) a target --
-    ``y_train`` stays a wireable but optional input purely so a
-    ``train_test_split`` output can still be plugged in directly
-    without rewiring, and is otherwise ignored.
+    Fields shared by every clustering node (see
+    :class:`SklearnClusterFitNode`).
+
+    Attributes:
+        standardize: Standardize every numeric column (zero mean, unit
+            variance) before clustering. Recommended -- distance-based
+            clustering is very sensitive to column scale.
+        cluster_column: Name of the label column appended to the output
+            DataFrame.
     """
 
-    inputs = [
-        Port(name="X_train", dtype="dataframe"),
-        Port(name="y_train", dtype="array", required=False),
-        Port(name="X_test", dtype="dataframe", required=False),
-        Port(name="y_test", dtype="array", required=False),
+    standardize: bool = True
+    cluster_column: str = "cluster"
+
+
+class SklearnClusterFitNode(SklearnFitNode):
+    """
+    Base for clustering model nodes -- unsupervised, so shaped like a
+    transform, not like the supervised fit nodes: input ``df`` -> output
+    ``df`` with a ``cluster`` column holding each row's cluster label
+    (``-1`` = noise for DBSCAN/HDBSCAN, or a row with missing numeric
+    values). Every numeric column is used; drop the ones you don't want
+    with ``column_filter`` first.
+
+    The fitted estimator is also exposed on a secondary ``model``
+    output. Its usefulness varies: KMeans / MiniBatchKMeans /
+    GaussianMixture can ``predict`` new rows and carry
+    ``cluster_centers_`` / ``means_``; DBSCAN, HDBSCAN, agglomerative
+    and spectral are transductive -- their ``model`` only really holds
+    ``labels_`` (already in the output ``df``) and, for agglomerative,
+    the merge tree ``children_``.
+    """
+
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [
+        Port(name="df", dtype="dataframe"),
+        Port(name="model", dtype="model", required=False),
     ]
 
     def run(self, **inputs: Any) -> dict[str, Any]:
         self.validate_inputs(inputs)
+        import numpy as np
+        from sklearn.preprocessing import StandardScaler
+
+        p = self.params
+        df = inputs["df"]
+        numeric = df.select_dtypes(include="number")
+        if numeric.shape[1] < 1:
+            raise ValueError(f"{self.node_type}: no numeric columns to cluster on.")
+
+        X = numeric.to_numpy("float64")
+        complete = ~np.isnan(X).any(axis=1)
+        if int(complete.sum()) < 2:
+            raise ValueError(
+                f"{self.node_type}: need at least 2 rows with no missing "
+                f"numeric values."
+            )
+        fit_X = X[complete]
+        if getattr(p, "standardize", True):
+            fit_X = StandardScaler().fit_transform(fit_X)
+
         estimator = self._make_estimator()
-        estimator.fit(inputs["X_train"])
-        return {"model": estimator}
+        estimator.fit(fit_X)
+        labels = getattr(estimator, "labels_", None)
+        if labels is None:  # GaussianMixture keeps no labels_ -- ask it
+            labels = estimator.predict(fit_X)
+
+        full_labels = np.full(len(df), -1, dtype="int64")
+        full_labels[np.flatnonzero(complete)] = np.asarray(labels, dtype="int64")
+
+        out = df.copy()
+        out[p.cluster_column or "cluster"] = full_labels
+        return {"df": out, "model": estimator}
 
 
-class KMeansFitParams(NodeParams):
+class KMeansFitParams(ClusterParams):
     """Parameters for KMeansFit (scikit-learn KMeans)."""
 
     n_clusters: int = 8
@@ -814,7 +873,7 @@ class KMeansFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "KMeans")}
 
 
-class MiniBatchKMeansFitParams(NodeParams):
+class MiniBatchKMeansFitParams(ClusterParams):
     """Parameters for MiniBatchKMeansFit (scikit-learn MiniBatchKMeans)."""
 
     n_clusters: int = 8
@@ -836,7 +895,7 @@ class MiniBatchKMeansFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "MiniBatchKMeans")}
 
 
-class DBSCANFitParams(NodeParams):
+class DBSCANFitParams(ClusterParams):
     """Parameters for DBSCANFit (scikit-learn DBSCAN)."""
 
     eps: float = 0.5
@@ -861,7 +920,7 @@ class DBSCANFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "DBSCAN")}
 
 
-class HDBSCANFitParams(NodeParams):
+class HDBSCANFitParams(ClusterParams):
     """Parameters for HDBSCANFit (scikit-learn HDBSCAN)."""
 
     min_cluster_size: int = 5
@@ -889,7 +948,7 @@ class HDBSCANFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "HDBSCAN")}
 
 
-class AgglomerativeClusteringFitParams(NodeParams):
+class AgglomerativeClusteringFitParams(ClusterParams):
     """Parameters for AgglomerativeClusteringFit (scikit-learn AgglomerativeClustering)."""
 
     n_clusters: int = 2
@@ -910,7 +969,7 @@ class AgglomerativeClusteringFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "AgglomerativeClustering")}
 
 
-class SpectralClusteringFitParams(NodeParams):
+class SpectralClusteringFitParams(ClusterParams):
     """Parameters for SpectralClusteringFit (scikit-learn SpectralClustering)."""
 
     n_clusters: int = 8
@@ -933,7 +992,7 @@ class SpectralClusteringFit(SklearnClusterFitNode):
     ESTIMATORS = {"cluster": ("sklearn.cluster", "SpectralClustering")}
 
 
-class GaussianMixtureFitParams(NodeParams):
+class GaussianMixtureFitParams(ClusterParams):
     """Parameters for GaussianMixtureFit (scikit-learn GaussianMixture)."""
 
     n_components: int = 1

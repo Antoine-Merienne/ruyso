@@ -92,7 +92,7 @@ def test_full_round_trip_canvas_json_canvas_preserves_pipeline(qapp):
     original_canvas = PipelineCanvas()
     loader = original_canvas.graph.create_node(qt_type_for("csv_loader"), name="load")
     loader.set_property("filepath", "data.csv")
-    scaler = original_canvas.graph.create_node(qt_type_for("standard_scaler"), name="scale")
+    scaler = original_canvas.graph.create_node(qt_type_for("scaler"), name="scale")
     loader.outputs()["df"].connect_to(scaler.inputs()["df"])
 
     original_pipeline = canvas_to_pipeline(original_canvas.graph)

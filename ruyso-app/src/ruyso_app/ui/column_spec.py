@@ -89,6 +89,29 @@ def _input_dataframes(node: BaseNode, outputs: dict[str, dict]) -> list:
     return frames
 
 
+def _model_input_series(node: BaseNode, outputs: dict[str, dict]) -> list[str]:
+    """
+    Series names carried by a ``model`` input port's value, if it exposes
+    them (``ruyso_names`` -- set by the ``var`` node on its fitted
+    result). Lets a model-only plot node (``var_forecast_plot`` /
+    ``irf_plot``) offer tickboxes of the model's variables.
+    """
+    core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
+    if core_cls is None:
+        return []
+    names: list[str] = []
+    for port in core_cls.inputs:
+        if getattr(port, "dtype", None) != "model":
+            continue
+        canvas_port = node.inputs().get(port.name)
+        for connected in canvas_port.connected_ports() if canvas_port else []:
+            value = outputs.get(connected.node().name(), {}).get(connected.name())
+            for name in getattr(value, "ruyso_names", []) or []:
+                if name not in names:
+                    names.append(str(name))
+    return names
+
+
 def input_dataframe_columns(
     node: BaseNode, outputs: dict[str, dict]
 ) -> dict[str, str] | None:
@@ -102,15 +125,18 @@ def input_dataframe_columns(
     nothing is available yet, so the caller offers free text with no
     validation.
     """
-    frames = _input_dataframes(node, outputs)
-    if not frames:
-        return None
     columns: dict[str, str] = {}
-    for df in frames:
+    for df in _input_dataframes(node, outputs):
         columns.update(
-            {str(name): dtype_kind(dtype) for name, dtype in df.dtypes.items()}
+            {
+                str(name): dtype_kind(dtype)
+                for name, dtype in df.dtypes.items()
+                if str(dtype) != "geometry"  # a GeoDataFrame's geometry column
+            }
         )
-    return columns
+    for name in _model_input_series(node, outputs):
+        columns.setdefault(name, NUMERIC)
+    return columns or None
 
 
 #: Cap on distinct values surfaced per categorical column (keeps the

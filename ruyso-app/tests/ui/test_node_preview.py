@@ -31,7 +31,9 @@ def _graph(qapp):
 
 def test_is_figure_core_class():
     assert is_figure_core_class(NodeRegistry.get("matplotlib_plot"))  # grapher
-    assert is_figure_core_class(NodeRegistry.get("figure_export"))  # figure input
+    # Export / sink nodes carry a figure input but get no on-canvas preview.
+    assert not is_figure_core_class(NodeRegistry.get("figure_export"))
+    assert not is_figure_core_class(NodeRegistry.get("export_to_dashboard"))
     assert not is_figure_core_class(NodeRegistry.get("csv_loader"))
     assert not is_figure_core_class(None)
 

@@ -72,7 +72,7 @@ def test_discover_package_registers_all_beta_nodes():
     expected_node_types = {
         "csv_loader",
         "drop_na",
-        "standard_scaler",
+        "scaler",
         "train_test_split",
         "linear_regression_fit",
         "matplotlib_plot",
@@ -94,7 +94,7 @@ def test_by_category_groups_registered_nodes_by_macro_type():
     assert {"confusion_matrix_plot", "roc_curve_plot", "precision_recall_plot",
             "det_curve_plot", "calibration_curve_plot", "learning_curve_plot",
             "qq_plot"} <= set(grouped["grapher"])
-    assert {"drop_na", "standard_scaler", "change_type", "column_filter",
+    assert {"drop_na", "scaler", "change_type", "column_filter",
             "row_filter", "dtype_filter"} <= set(grouped["transform"])
     # encoders and the train/test split are transforms
     assert {"one_hot_encode", "ordinal_encode", "train_test_split"} <= set(

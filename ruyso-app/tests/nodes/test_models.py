@@ -218,7 +218,11 @@ def _two_blobs(n=60):
     rng = np.random.default_rng(2)
     a = rng.normal(loc=0.0, scale=0.3, size=(n // 2, 2))
     b = rng.normal(loc=6.0, scale=0.3, size=(n // 2, 2))
-    return pd.DataFrame(np.vstack([a, b]), columns=["x", "y"])
+    df = pd.DataFrame(np.vstack([a, b]), columns=["x", "y"])
+    # ground truth as a *string* column so the clustering node (which
+    # uses every numeric column) never sees it.
+    df["blob"] = ["A"] * (n // 2) + ["B"] * (n - n // 2)
+    return df
 
 
 @pytest.mark.parametrize(
@@ -233,34 +237,46 @@ def _two_blobs(n=60):
         (GaussianMixtureFit, GaussianMixtureFitParams(n_components=2, random_state=0)),
     ],
 )
-def test_clustering_nodes_fit_on_x_alone_and_separate_two_blobs(node_cls, params):
-    X = _two_blobs()
-    result = node_cls(params=params).run(X_train=X)
-    model = result["model"]
-    labels = getattr(model, "labels_", None)
-    if labels is None:  # GaussianMixture: no labels_, use predict instead
-        labels = model.predict(X)
-    labels = np.asarray(labels)
-    # two well-separated blobs -> every real cluster label should be
-    # "pure" (all its members from the same blob); DBSCAN/HDBSCAN may
-    # also emit -1 (noise), which is excluded from this check.
-    blob = np.array([0] * (len(X) // 2) + [1] * (len(X) - len(X) // 2))
+def test_clustering_nodes_take_df_and_append_a_pure_cluster_column(node_cls, params):
+    df = _two_blobs()
+    result = node_cls(params=params).run(df=df)
+    out = result["df"]
+    assert list(out.columns) == ["x", "y", "blob", "cluster"]  # input preserved
+    assert len(out) == len(df)
+    labels = out["cluster"].to_numpy()
+    # two well-separated blobs -> every real cluster label is "pure"
+    # (its members all come from one blob); -1 (noise) is excluded.
     for label in set(labels) - {-1}:
-        assert len(set(blob[labels == label])) == 1
+        assert len(set(out.loc[labels == label, "blob"])) == 1
+    assert hasattr(result["model"], "fit")  # the fitted estimator is also exposed
 
 
-def test_clustering_nodes_do_not_require_a_target_column():
-    node_cls = KMeansFit
-    assert node_cls.inputs[1].name == "y_train" and not node_cls.inputs[1].required
+def test_clustering_nodes_have_df_ports_not_a_target():
+    # unsupervised -- shaped like a transform: df in, df out (+ a
+    # secondary model port). No X_train / y_train / y_test.
+    assert [p.name for p in KMeansFit.inputs] == ["df"]
+    assert [p.name for p in KMeansFit.outputs] == ["df", "model"]
+    assert not KMeansFit.outputs[1].required
 
 
-def test_clustering_base_ignores_y_train_even_if_wired():
-    X = _two_blobs()
-    y = pd.Series(np.zeros(len(X)))  # a bogus target, should simply be ignored
-    result = KMeansFit(params=KMeansFitParams(n_clusters=2, random_state=0)).run(
-        X_train=X, y_train=y
-    )
-    assert hasattr(result["model"], "labels_")
+def test_clustering_cluster_column_name_is_configurable():
+    out = KMeansFit(
+        params=KMeansFitParams(n_clusters=2, random_state=0, cluster_column="grp")
+    ).run(df=_two_blobs())["df"]
+    assert "grp" in out.columns and "cluster" not in out.columns
+
+
+def test_clustering_marks_rows_with_missing_numeric_values_as_noise():
+    df = _two_blobs()
+    df.loc[0, "x"] = np.nan
+    out = KMeansFit(params=KMeansFitParams(n_clusters=2, random_state=0)).run(df=df)["df"]
+    assert out["cluster"].iloc[0] == -1  # incomplete row -> -1
+    assert (out["cluster"].iloc[1:] != -1).all()
+
+
+def test_clustering_needs_at_least_one_numeric_column():
+    with pytest.raises(ValueError, match="no numeric columns"):
+        KMeansFit(params=KMeansFitParams()).run(df=pd.DataFrame({"lbl": ["a", "b", "c"]}))
 
 
 def test_clustering_nodes_are_registered_under_the_model_category():

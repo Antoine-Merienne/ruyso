@@ -61,7 +61,7 @@ from ruyso_app.ui.micro_type_groups import grouped_micro_types
 from ruyso_app.ui.property_forms import iter_field_specs
 
 #: Minimum width; the panel lives in a splitter and can be widened.
-MIN_PANEL_WIDTH = 240
+MIN_PANEL_WIDTH = 340
 
 _WARNING_STYLE = "color: #d9822b; font-size: 11px;"
 
@@ -72,6 +72,32 @@ _SENTINEL_COLOR = QColor(150, 150, 150)
 
 #: "no column" row in a column-map table dropdown.
 _BLANK = "—"
+
+
+#: Floor / ceiling for a float spin box's decimal places.
+_MIN_SPIN_DECIMALS = 2
+_MAX_SPIN_DECIMALS = 10
+
+
+def _decimals_for(*values: object) -> int:
+    """
+    How many decimal places a float spin box needs so it never rounds
+    away any of ``values`` -- at least ``_MIN_SPIN_DECIMALS`` (so a
+    whole number still shows "6.00", not "6.0000"), at most
+    ``_MAX_SPIN_DECIMALS``.
+    """
+    needed = _MIN_SPIN_DECIMALS
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number != number or number in (float("inf"), float("-inf")):
+            continue
+        text = f"{abs(number):.{_MAX_SPIN_DECIMALS}f}".rstrip("0")
+        frac = text.split(".", 1)[1] if "." in text else ""
+        needed = max(needed, len(frac))
+    return min(needed, _MAX_SPIN_DECIMALS)
 
 
 def _node_tagline(core_cls: type) -> str:
@@ -140,7 +166,7 @@ class OptionsPanel(QWidget):
         # form row index -> [(field, kind, target)]; the row is shown only
         # while *every* condition holds. kind is "eq" (field == target) or
         # "set" (field holds any non-empty value; target None).
-        self._row_conditions: dict[int, list[tuple[str, str, str | None]]] = {}
+        self._row_conditions: dict[int, list[tuple[str, str, str | tuple[str, ...] | None]]] = {}
         # controlling field name -> set of rows whose visibility depends on it
         self._visibility_controllers: dict[str, set[int]] = {}
         # reactive-choice field name -> (combo, generator key, depends-on field)
@@ -448,6 +474,8 @@ class OptionsPanel(QWidget):
                 )
             if spec.visible_unless:
                 conditions.append((spec.visible_unless[0], "ne", spec.visible_unless[1]))
+            if spec.visible_when_in:
+                conditions.append((spec.visible_when_in[0], "in", spec.visible_when_in[1]))
             if conditions:
                 self._row_conditions[row] = conditions
                 for field, _kind, _target in conditions:
@@ -509,6 +537,8 @@ class OptionsPanel(QWidget):
                 ok = is_set and (col_kind is None or col_kind in target)
             elif kind == "ne":
                 ok = current != target
+            elif kind == "in":
+                ok = current in target
             else:
                 ok = current == target
             if not ok:
@@ -610,7 +640,7 @@ class OptionsPanel(QWidget):
         if spec.widget == enum.FLOAT:
             spin = QDoubleSpinBox()
             spin.setRange(-1e9, 1e9)
-            spin.setDecimals(4)
+            spin.setDecimals(_decimals_for(spec.default, current))
             spin.setValue(float(current or 0.0))
             spin.valueChanged.connect(lambda v, n=name: node.set_property(n, float(v)))
             return spin
@@ -1216,11 +1246,14 @@ class OptionsPanel(QWidget):
             box = QCheckBox()
             lo = QDoubleSpinBox()
             hi = QDoubleSpinBox()
+            bounds = current.get(pname)
+            spin_decimals = _decimals_for(
+                node.get_property(pname), *(bounds or ())
+            )
             for spin in (lo, hi):
                 spin.setRange(-1_000_000_000, 1_000_000_000)
-                spin.setDecimals(4)
+                spin.setDecimals(spin_decimals)
 
-            bounds = current.get(pname)
             if bounds and len(bounds) == 2:
                 box.setChecked(True)
                 lo.setValue(float(bounds[0]))

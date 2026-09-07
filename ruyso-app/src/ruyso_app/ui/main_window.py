@@ -51,7 +51,7 @@ from ruyso_app.ui.node_factory import (
     register_node_context_menu_actions,
 )
 from ruyso_app.ui.node_menu import install_new_node_menu
-from ruyso_app.ui.node_preview import NodePreviewOverlay
+from ruyso_app.ui.node_preview import NodePreviewOverlay, resolve_source_node
 from ruyso_app.ui.pipeline_page import PipelinePage
 from ruyso_app.ui.run_snapshot import modified_since_run, pipeline_signatures
 from ruyso_app.ui.tab_bar import TabBar
@@ -87,6 +87,9 @@ class MainWindow(QMainWindow):
         self._graph = self._canvas.graph
         self._worker: PipelineExecutionWorker | None = None
         self._last_outputs: dict[str, dict] = {}
+        # Node ids that raised in the most recent (auto-)run; drives the
+        # Dashboard tab's "· modified" flag on figures that failed.
+        self._last_run_errors: dict[str, str] = {}
         # Signatures of the pipeline as it was when last run successfully
         # (see ui.run_snapshot); drives the Table tab's "· modified" tags.
         self._run_snapshot: dict[str, str] = {}
@@ -117,6 +120,12 @@ class MainWindow(QMainWindow):
         self._tab_bar.tab_changed.connect(self._on_tab_changed)
         self._tab_bar.run_button.clicked.connect(self._on_run_pipeline)
         self._dashboard_page.export_requested.connect(self._on_export_dashboard)
+        self._dashboard_page.figure_block_selected.connect(
+            self._on_dashboard_figure_selected
+        )
+        self._dashboard_page.options_panel.node_type_change_requested.connect(
+            self._on_dashboard_node_type_change
+        )
         self._options.node_type_change_requested.connect(self._on_node_type_change)
         self._graph.node_selection_changed.connect(self._on_selection_changed)
 
@@ -140,6 +149,9 @@ class MainWindow(QMainWindow):
         # edits, which the Options panel batches until it loses focus.
         self._graph.property_changed.connect(self._on_property_changed)
         self._options.recompute_requested.connect(self._auto_run.schedule)
+        self._dashboard_page.options_panel.recompute_requested.connect(
+            self._auto_run.schedule
+        )
 
         self._build_menus()
         self._on_tab_changed(self._tab_bar.current_key())
@@ -192,6 +204,13 @@ class MainWindow(QMainWindow):
 
         # -- Dashboard menu (Dashboard tab only) ---------------------
         self._dashboard_menu = menu_bar.addMenu("Dashboard")
+        self._dashboard_menu.addAction(
+            "Add Title", lambda: self._dashboard_page.add_text_block(is_title=True)
+        )
+        self._dashboard_menu.addAction(
+            "Add Text Box", lambda: self._dashboard_page.add_text_block(is_title=False)
+        )
+        self._dashboard_menu.addSeparator()
         self._dashboard_menu.addAction("Exporter...", self._on_export_dashboard)
 
         # -- View menu (always) --------------------------------------
@@ -224,6 +243,13 @@ class MainWindow(QMainWindow):
             # Rebuild from the current canvas each time the tab is shown.
             self._table_page.refresh(
                 self._graph, self._last_outputs, self._table_modified_set()
+            )
+        elif key == "dashboard":
+            self._dashboard_page.sync_figures(
+                self._graph,
+                self._last_outputs,
+                self._table_modified_set(),
+                set(self._last_run_errors),
             )
 
     def current_tab(self) -> str:
@@ -305,19 +331,70 @@ class MainWindow(QMainWindow):
         self._options.clear()
 
     def _on_ctx_add_to_dashboard(self, _graph: object, node: BaseNode) -> None:
-        # Phase 4 turns this into a real dashboard figure block.
-        self.statusBar().showMessage(
-            f"'{node.name()}' queued for the dashboard (wired in a later phase).", 4000
+        """Drop an ``export_to_dashboard`` node wired to this node's figure."""
+        outputs = node.outputs()
+        if "figure" not in outputs:
+            self.statusBar().showMessage("This node has no figure output.", 4000)
+            return
+        pos = node.pos()
+        export_node = self._graph.create_node(
+            qt_type_for("export_to_dashboard"), pos=[pos[0] + 260, pos[1]]
         )
+        outputs["figure"].connect_to(export_node.inputs()["figure"])
+        self._select_only(export_node)
+        self.statusBar().showMessage(
+            f"Added an export_to_dashboard node after '{node.name()}'. "
+            "Run the pipeline to see it on the Dashboard.",
+            5000,
+        )
+
+    # -- Dashboard interaction -----------------------------------------
+
+    def _on_dashboard_figure_selected(self, export_node_id: str) -> None:
+        """A dashboard figure block was picked: edit its source plot's params."""
+        node = next(
+            (n for n in self._graph.all_nodes() if n.name() == export_node_id), None
+        )
+        source = resolve_source_node(node) if node is not None else None
+        if source is None:
+            self._dashboard_page.set_canvas_message(
+                "This figure's source plot is disconnected — "
+                "reconnect it in the Pipeline tab."
+            )
+            return
+        self._dashboard_page.set_canvas_message(None)
+        self._populate_dashboard_panel(source)
+
+    def _populate_dashboard_panel(self, source_node: BaseNode) -> None:
+        self._dashboard_page.options_panel.show_node(
+            source_node,
+            core_node_types_by_category(),
+            input_dataframe_columns(source_node, self._last_outputs),
+            input_column_values(source_node, self._last_outputs),
+        )
+        self._dashboard_page.show_options_page()
+
+    def _on_dashboard_node_type_change(self, new_type: str) -> None:
+        node = self._dashboard_page.options_panel.current_node()
+        if node is None:
+            return
+        new_node = change_node_micro_type(self._graph, node, new_type)
+        self._populate_dashboard_panel(new_node)
 
     # -- Dashboard menu actions ------------------------------------------
 
     def _on_export_dashboard(self) -> None:
-        QMessageBox.information(
-            self,
-            "Export dashboard",
-            "Dashboard export (PDF / PNG) is implemented in a later phase.",
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Dashboard", "", "PDF (*.pdf);;PNG image (*.png)"
         )
+        if not path:
+            return
+        try:
+            self._dashboard_page.export(path, dpi=200)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            self._show_error("Could not export dashboard", exc)
+        else:
+            self.statusBar().showMessage(f"Exported dashboard to {path}", 5000)
 
     # -- View menu actions -----------------------------------------------
 
@@ -422,8 +499,12 @@ class MainWindow(QMainWindow):
             for port_name, value in node_outputs.items():
                 self._pipeline_page.append_log(f"[{node_id}] {port_name} = {value!r}")
         self._last_outputs = outputs
+        self._last_run_errors = {}
         self._run_snapshot = self._pending_snapshot
         self._preview_overlay.set_run_outputs(outputs)
+        self._dashboard_page.sync_figures(
+            self._graph, outputs, self._table_modified_set(), set()
+        )
         self._table_page.refresh(self._graph, outputs, self._table_modified_set())
 
     def _on_run_failed(self, message: str) -> None:
@@ -432,9 +513,16 @@ class MainWindow(QMainWindow):
         self._pipeline_page.append_log(f"ERROR: {message}")
         self._show_error("Pipeline execution failed", message)
 
-    def _on_auto_run_finished(self, outputs: dict[str, dict], _errors: dict) -> None:
+    def _on_auto_run_finished(self, outputs: dict[str, dict], errors: dict) -> None:
         """Merge a background auto-run's results without any dialog/log noise."""
+        self._last_run_errors = dict(errors or {})
         if not outputs:
+            # Nothing new computed, but the error set may have changed --
+            # refresh the dashboard's "· modified" flags and bail.
+            self._dashboard_page.sync_figures(
+                self._graph, self._last_outputs,
+                self._table_modified_set(), set(self._last_run_errors),
+            )
             return
         self._last_outputs = {**self._last_outputs, **outputs}
         try:
@@ -447,12 +535,23 @@ class MainWindow(QMainWindow):
                 self._run_snapshot[node_id] = signatures[node_id]
 
         self._preview_overlay.set_run_outputs(self._last_outputs)
+        self._dashboard_page.sync_figures(
+            self._graph, self._last_outputs,
+            self._table_modified_set(), set(self._last_run_errors),
+        )
         node = self._options.current_node()
         if node is not None:
             self._options.set_input_columns(
                 input_dataframe_columns(node, self._last_outputs),
                 input_column_values(node, self._last_outputs),
             )
+        if self._dashboard_page.is_editing_figure():
+            dsource = self._dashboard_page.options_panel.current_node()
+            if dsource is not None:
+                self._dashboard_page.options_panel.set_input_columns(
+                    input_dataframe_columns(dsource, self._last_outputs),
+                    input_column_values(dsource, self._last_outputs),
+                )
         if self.current_tab() == "table":
             self._table_page.refresh(
                 self._graph, self._last_outputs, self._table_modified_set()

@@ -57,6 +57,7 @@ from ruyso_app.core.params import (
     reactive_choice_spec,
     visible_unless,
     visible_when,
+    visible_when_in,
     visible_when_kind,
     visible_when_set,
     visible_when_unset,
@@ -161,6 +162,9 @@ class FieldSpec:
     #: ``(field, value)`` -- this row is shown only while ``field`` does
     #: *not* hold ``value`` -- or None.
     visible_unless: tuple[str, str] | None = None
+    #: ``(field, values)`` -- this row is shown only while ``field``
+    #: holds one of ``values`` -- or None.
+    visible_when_in: tuple[str, tuple[str, ...]] | None = None
 
 
 def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
@@ -191,6 +195,7 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             visible_when_unset=visible_when_unset(field_info),
             visible_when_kind=visible_when_kind(field_info),
             visible_unless=visible_unless(field_info),
+            visible_when_in=visible_when_in(field_info),
         )
 
 

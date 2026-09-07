@@ -1,6 +1,6 @@
 """
-Tests for transformation nodes (DropNA, StandardScalerNode): known
-input DataFrame -> expected output DataFrame.
+Tests for transformation nodes (DropNA, Scaler): known input DataFrame
+-> expected output DataFrame.
 """
 
 import numpy as np
@@ -10,8 +10,8 @@ import pytest
 from ruyso_app.nodes.transforms import (
     DropNA,
     DropNAParams,
-    StandardScalerNode,
-    StandardScalerParams,
+    Scaler,
+    ScalerParams,
 )
 
 
@@ -41,9 +41,9 @@ def test_drop_na_respects_column_subset_and_how_all():
     assert result.shape == (2, 2)
 
 
-def test_standard_scaler_produces_zero_mean_unit_variance():
+def test_scaler_standard_method_produces_zero_mean_unit_variance():
     df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
-    node = StandardScalerNode(params=StandardScalerParams())
+    node = Scaler(params=ScalerParams())  # method="standard" is the default
 
     result = node.run(df=df)["df"]
 
@@ -51,15 +51,49 @@ def test_standard_scaler_produces_zero_mean_unit_variance():
     assert np.isclose(result["x"].std(ddof=0), 1.0, atol=1e-9)
 
 
-def test_standard_scaler_only_scales_requested_columns():
+def test_scaler_only_scales_requested_columns():
     df = pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [100.0, 200.0, 300.0]})
-    node = StandardScalerNode(params=StandardScalerParams(columns=["x"]))
+    node = Scaler(params=ScalerParams(columns=["x"]))
 
     result = node.run(df=df)["df"]
 
     # "y" must be untouched.
     assert result["y"].tolist() == [100.0, 200.0, 300.0]
     assert np.isclose(result["x"].mean(), 0.0, atol=1e-9)
+
+
+def test_scaler_standard_with_mean_or_std_off():
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
+    no_center = Scaler(params=ScalerParams(with_mean=False)).run(df=df)["df"]
+    assert not np.isclose(no_center["x"].mean(), 0.0, atol=1e-6)  # not centred
+
+    no_scale = Scaler(params=ScalerParams(with_std=False)).run(df=df)["df"]
+    assert np.isclose(no_scale["x"].mean(), 0.0, atol=1e-9)
+    assert not np.isclose(no_scale["x"].std(ddof=0), 1.0, atol=1e-6)  # not unit variance
+
+
+def test_scaler_minmax_rescales_into_the_feature_range():
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
+    result = Scaler(
+        params=ScalerParams(method="minmax", feature_range_min=-1.0, feature_range_max=1.0)
+    ).run(df=df)["df"]
+    assert np.isclose(result["x"].min(), -1.0)
+    assert np.isclose(result["x"].max(), 1.0)
+
+
+def test_scaler_minmax_rejects_an_inverted_range():
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+    with pytest.raises(ValueError, match="feature_range_max"):
+        Scaler(
+            params=ScalerParams(method="minmax", feature_range_min=1.0, feature_range_max=0.0)
+        ).run(df=df)
+
+
+def test_scaler_maxabs_divides_by_the_largest_absolute_value():
+    df = pd.DataFrame({"x": [-4.0, 2.0, 4.0]})
+    result = Scaler(params=ScalerParams(method="maxabs")).run(df=df)["df"]
+    assert np.isclose(result["x"].abs().max(), 1.0)
+    assert result["x"].tolist() == [-1.0, 0.5, 1.0]
 
 
 # -- ChangeType ---------------------------------------------------------
@@ -866,6 +900,39 @@ def test_diff_malformed_lags_raises():
         Diff(params=DiffParams(lags="one")).run(df=df)
 
 
+def test_diff_selects_multiple_columns_via_tickboxes():
+    df = pd.DataFrame({"a": [10.0, 12.0, 15.0], "b": [1.0, 3.0, 6.0], "c": [0.0, 0.0, 0.0]})
+    out = Diff(params=DiffParams(columns=["a", "b"], lags="1")).run(df=df)["df"]
+    assert {"a_diff_1", "b_diff_1"} <= set(out.columns)
+    assert "c_diff_1" not in out.columns
+
+
+def test_diff_first_value_handling():
+    df = pd.DataFrame({"v": [10.0, 12.0, 15.0, 19.0]})
+
+    nan = Diff(params=DiffParams(columns=["v"], lags="1, 2", first_value="nan")).run(df=df)["df"]
+    assert pd.isna(nan["v_diff_1"].iloc[0]) and pd.isna(nan["v_diff_2"].iloc[1])
+
+    zero = Diff(params=DiffParams(columns=["v"], lags="1, 2", first_value="zero")).run(df=df)["df"]
+    assert zero["v_diff_1"].iloc[0] == 0.0
+    assert zero["v_diff_2"].tolist()[:2] == [0.0, 0.0]
+
+    keep = Diff(
+        params=DiffParams(columns=["v"], lags="1, 2", first_value="keep_original")
+    ).run(df=df)["df"]
+    assert keep["v_diff_1"].iloc[0] == 10.0  # starts from the level
+    assert keep["v_diff_2"].tolist()[:2] == [10.0, 12.0]
+    assert keep["v_diff_1"].tolist()[1:] == [2.0, 3.0, 4.0]  # then changes
+
+
+def test_diff_first_value_keep_original_for_negative_lag():
+    df = pd.DataFrame({"v": [10.0, 12.0, 15.0, 19.0]})
+    out = Diff(
+        params=DiffParams(columns=["v"], lags="-1", first_value="keep_original")
+    ).run(df=df)["df"]
+    assert out["v_diff_-1"].iloc[-1] == 19.0  # trailing row kept as the level
+
+
 # --------------------------------------------------------------------------
 # CustomOperation
 # --------------------------------------------------------------------------
@@ -926,3 +993,54 @@ def test_custom_operation_rejects_a_non_dataframe_result():
     df = pd.DataFrame({"a": [1, 2]})
     with pytest.raises(ValueError, match="DataFrame"):
         CustomOperation(params=CustomOperationParams(code="df = 42")).run(df=df)
+
+
+# --------------------------------------------------------------------------
+# CovarianceMatrix
+# --------------------------------------------------------------------------
+
+from ruyso_app.nodes.transforms import CovarianceMatrix, CovarianceMatrixParams  # noqa: E402
+
+
+def _cov_df():
+    rng = np.random.default_rng(0)
+    n = 200
+    a = rng.normal(size=n)
+    b = a * 0.7 + rng.normal(scale=0.5, size=n)
+    c = rng.normal(size=n)
+    return pd.DataFrame({"a": a, "b": b, "c": c})
+
+
+def test_covariance_matrix_is_symmetric_and_square():
+    out = CovarianceMatrix(params=CovarianceMatrixParams()).run(df=_cov_df())["df"]
+    assert list(out.columns) == ["variable", "a", "b", "c"]
+    assert list(out["variable"]) == ["a", "b", "c"]
+    values = out[["a", "b", "c"]].to_numpy()
+    np.testing.assert_allclose(values, values.T, atol=1e-9)
+
+
+def test_covariance_matrix_normalize_gives_a_correlation_matrix():
+    out = CovarianceMatrix(params=CovarianceMatrixParams(normalize=True)).run(df=_cov_df())["df"]
+    diag = [out.loc[out["variable"] == v, v].iloc[0] for v in ("a", "b", "c")]
+    np.testing.assert_allclose(diag, 1.0, atol=1e-9)
+    assert (out[["a", "b", "c"]].to_numpy() <= 1.0001).all()
+    assert (out[["a", "b", "c"]].to_numpy() >= -1.0001).all()
+
+
+def test_covariance_matrix_column_subset():
+    out = CovarianceMatrix(params=CovarianceMatrixParams(columns=["a", "b"])).run(
+        df=_cov_df()
+    )["df"]
+    assert list(out.columns) == ["variable", "a", "b"]
+
+
+def test_covariance_matrix_needs_at_least_two_columns():
+    with pytest.raises(ValueError, match="at least 2"):
+        CovarianceMatrix(params=CovarianceMatrixParams(columns=["a"])).run(df=_cov_df())
+
+
+def test_covariance_matrix_unknown_column_raises():
+    with pytest.raises(ValueError, match="not found"):
+        CovarianceMatrix(params=CovarianceMatrixParams(columns=["a", "nope"])).run(
+            df=_cov_df()
+        )

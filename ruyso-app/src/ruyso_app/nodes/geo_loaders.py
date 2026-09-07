@@ -74,3 +74,46 @@ class GeoPackageLoader(Node):
     def run(self, **inputs: Any) -> dict[str, Any]:
         self.validate_inputs(inputs)
         return {"gdf": gpd.read_file(self.params.filepath, layer=self.params.layer or None)}
+
+
+@register_node
+class GeoParquetLoader(Node):
+    """
+    Load a GeoParquet file into a GeoDataFrame.
+
+    Uses ``geopandas.read_parquet``, which decodes the WKB geometry
+    column and reads the CRS from the file's ``geo`` metadata. The
+    plain ``parquet_loader`` cannot do this -- it would hand back the
+    geometry column as raw bytes.
+    """
+
+    node_type = "geoparquet_loader"
+    category = "loading"
+    inputs: list[Port] = []
+    outputs = [Port(name="gdf", dtype="geodataframe")]
+    params_schema = LoaderParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        return {"gdf": gpd.read_parquet(self.params.filepath)}
+
+
+@register_node
+class GeoFeatherLoader(Node):
+    """
+    Load a GeoArrow / GeoFeather file into a GeoDataFrame.
+
+    Uses ``geopandas.read_feather`` (WKB geometry + CRS from the
+    Arrow file's ``geo`` metadata); the plain ``feather_loader``
+    cannot reconstruct the geometry.
+    """
+
+    node_type = "geofeather_loader"
+    category = "loading"
+    inputs: list[Port] = []
+    outputs = [Port(name="gdf", dtype="geodataframe")]
+    params_schema = LoaderParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        return {"gdf": gpd.read_feather(self.params.filepath)}

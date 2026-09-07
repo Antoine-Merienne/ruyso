@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
+    checkbox_list_field,
     color_field,
     column_field,
     reactive_choice_field,
@@ -125,6 +126,37 @@ _LEGEND_LOCATIONS = Literal[
 
 def _fig_size(p: Any) -> tuple[float, float]:
     return (max(float(p.fig_width), 1.0), max(float(p.fig_height), 1.0))
+
+
+def _z_value(confidence_level: float) -> float:
+    """Two-sided standard-normal critical value for ``confidence_level``."""
+    from scipy import stats as _spstats
+
+    return float(_spstats.norm.ppf((1.0 + float(confidence_level)) / 2.0))
+
+
+def _new_figure(p: Any, nrows: int = 1, ncols: int = 1, *, squeeze: bool = True):
+    """
+    A standalone matplotlib ``Figure`` (plus its ``Axes``) sized from ``p``.
+
+    Deliberately uses the object-oriented ``Figure`` constructor rather
+    than ``pyplot.subplots``: a ``pyplot`` figure is registered in the
+    global figure manager and is only released by ``pyplot.close``, so
+    in a long-running session every (auto-)run would leak one figure per
+    grapher node (eventually tripping matplotlib's ``max_open_warning``).
+    A directly constructed ``Figure`` is owned solely by its caller and
+    freed by normal garbage collection once the pipeline output holding
+    it is dropped. ``savefig`` / ``FigureCanvasAgg`` attach a canvas on
+    demand, so the returned figure renders exactly as before.
+
+    Call this inside a ``with plt.style.context(_BASE_STYLE):`` block so
+    the axes still pick up the shared style.
+    """
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=_fig_size(p))
+    axes = fig.subplots(nrows, ncols, squeeze=squeeze)
+    return fig, axes
 
 
 def _place_legend(
@@ -651,7 +683,7 @@ class MatplotlibPlot(Node):
         legend_label = p.legend_title or (p.color_by or "").strip()
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
 
             # -- scatter --------------------------------------------
             if p.kind == "scatter":
@@ -1040,7 +1072,7 @@ class TableViewerParams(NodeParams):
         0.08, lo=0.0, hi=0.3,
         description="Empty margin between the figure edge and the table.",
     )
-    fig_width: float = 8.0
+    fig_width: float = 6.0
     fig_height: float = 5.0
     title: str | None = None
     title_font_size: int = 12
@@ -1096,7 +1128,7 @@ class TableViewer(Node):
             cell_text = [[""] * max(len(col_labels), 1)]
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             ax.axis("off")
             pad = float(p.padding)
             table = ax.table(
@@ -1135,6 +1167,100 @@ class TableViewer(Node):
         return {"figure": fig}
 
 
+def _stat_box_bounds(values: Any, box_stat: str, std_k: float, confidence_level: float) -> tuple[float, float]:
+    """(low, high) for one group's custom stat box -- mean +/- k*std, or a
+    t-based confidence interval around the mean. ``values`` is already
+    numeric with NaNs removed."""
+    import numpy as np
+
+    arr = np.asarray(values, dtype="float64")
+    mean = float(np.mean(arr)) if arr.size else 0.0
+    if arr.size < 2:
+        return mean, mean
+    std = float(np.std(arr, ddof=1))
+    if box_stat == "std_dev":
+        half = std * float(std_k)
+    else:  # "ci"
+        from scipy import stats as _spstats
+
+        sem = std / np.sqrt(arr.size)
+        t = float(_spstats.t.ppf((1 + float(confidence_level)) / 2, df=arr.size - 1))
+        half = t * sem
+    return mean - half, mean + half
+
+
+def _draw_stat_box(
+    ax: Any, df: Any, category_column: str, value_column: str,
+    hue_col: str | None, box_stat: str, std_k: float, confidence_level: float,
+    colors: list, single_color: str, vertical: bool, alpha: float,
+) -> tuple[list, list]:
+    """
+    Draw a box per category (per hue sub-group, if ``hue_col``) spanning
+    a mean +/- std / CI range instead of seaborn's quartile box -- see
+    ``BoxPlotParams.box_stat``. Returns (categories, legend_handles).
+    """
+    import pandas as pd
+    from matplotlib.patches import Patch
+
+    categories = list(dict.fromkeys(df[category_column].tolist()))
+    hue_cats = list(dict.fromkeys(df[hue_col].tolist())) if hue_col else [None]
+    n_groups = max(len(hue_cats), 1)
+    span = 0.7
+    handles: list = []
+
+    for hi, hue_val in enumerate(hue_cats):
+        color = colors[hi] if hue_col else (single_color or _DEFAULT_COLOR)
+        if hue_col:
+            handles.append(Patch(facecolor=color, label=str(hue_val)))
+        for ci, cat in enumerate(categories):
+            sub = df[df[category_column] == cat]
+            if hue_col:
+                sub = sub[sub[hue_col] == hue_val]
+            values = pd.to_numeric(sub[value_column], errors="coerce").dropna().to_numpy("float64")
+            if values.size == 0:
+                continue
+            lo, hi_val = _stat_box_bounds(values, box_stat, std_k, confidence_level)
+            mean = (lo + hi_val) / 2
+
+            if hue_col:
+                w = span / n_groups
+                pos = ci + hi * w - span / 2 + w / 2
+                width = w * 0.9
+            else:
+                pos, width = float(ci), span
+
+            if vertical:
+                ax.bar(
+                    pos, hi_val - lo, bottom=lo, width=width, color=color,
+                    alpha=alpha, edgecolor="0.2", linewidth=1.0, zorder=3,
+                )
+                ax.plot(
+                    [pos - width / 2, pos + width / 2], [mean, mean],
+                    color="0.15", linewidth=1.4, zorder=4,
+                )
+            else:
+                ax.barh(
+                    pos, hi_val - lo, left=lo, height=width, color=color,
+                    alpha=alpha, edgecolor="0.2", linewidth=1.0, zorder=3,
+                )
+                ax.plot(
+                    [mean, mean], [pos - width / 2, pos + width / 2],
+                    color="0.15", linewidth=1.4, zorder=4,
+                )
+
+    ticks = list(range(len(categories)))
+    labels = [str(c) for c in categories]
+    if vertical:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels)
+        ax.set_xlim(-0.5, len(categories) - 0.5)
+    else:
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(labels)
+        ax.set_ylim(-0.5, len(categories) - 0.5)
+    return categories, handles
+
+
 class BoxPlotParams(NodeParams):
     """
     Parameters for BoxPlot.
@@ -1150,6 +1276,18 @@ class BoxPlotParams(NodeParams):
         swarm_max_points: For "swarm", if the data has more rows than
             this a seeded random subsample is drawn (and noted on the
             figure) so the plot stays responsive.
+        alpha: Fill opacity of the box / violin / boxen / swarm points.
+        show_outliers: Show individual outlier points beyond the
+            whiskers (box / boxen only; ignored for violin/swarm, which
+            have no "outlier" concept of their own).
+        box_stat: What the box spans (box kind only): "iqr" (the
+            default -- Q1 to Q3, whiskers per the usual 1.5x-IQR rule),
+            "std_dev" (mean +/- ``std_k`` standard deviations) or "ci"
+            (a ``confidence_level`` confidence interval around the
+            mean). The std_dev / ci boxes are drawn directly (not by
+            seaborn) and show no whiskers or outlier points.
+        std_k: Standard-deviation multiplier for ``box_stat="std_dev"``.
+        confidence_level: Confidence level for ``box_stat="ci"``.
         color_by: Optional categorical column that splits each category
             into hue sub-groups; a continuous column is rejected.
         colormap / single_color: Palette for the hue groups / colour
@@ -1173,6 +1311,30 @@ class BoxPlotParams(NodeParams):
         2000,
         visible_when=("kind", "swarm"),
         description="Rows above this are randomly subsampled (seeded) for the swarm.",
+    )
+    alpha: float = unit_interval_field(
+        0.9, description="Fill opacity of the box / violin / boxen / swarm points."
+    )
+    show_outliers: bool = visible_field(
+        True,
+        visible_when_in=("kind", ("box", "boxen")),
+        description="Show individual outlier points beyond the whiskers.",
+    )
+    box_stat: Literal["iqr", "std_dev", "ci"] = visible_field(
+        "iqr",
+        visible_when=("kind", "box"),
+        description="What the box spans: the interquartile range, "
+        "mean +/- k*std, or a confidence interval around the mean.",
+    )
+    std_k: float = visible_field(
+        1.0,
+        visible_when=("box_stat", "std_dev"),
+        description="Standard-deviation multiplier for the std_dev box.",
+    )
+    confidence_level: float = unit_interval_field(
+        0.95, lo=0.5, hi=0.999,
+        visible_when=("box_stat", "ci"),
+        description="Confidence level for the ci box.",
     )
 
     color_by: str = column_field(
@@ -1257,29 +1419,54 @@ class BoxPlot(Node):
                 f"(seeded random subsample)"
             )
 
+        custom_box = p.kind == "box" and p.box_stat != "iqr"
+
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             vertical = p.orientation == "vertical"
             axis_kw = (
                 {"x": p.category_column, "y": p.value_column}
                 if vertical
                 else {"x": p.value_column, "y": p.category_column}
             )
-            draw_kw: dict[str, Any] = {"data": plot_df, "ax": ax, **axis_kw}
-            if hue:
-                draw_kw["hue"] = hue
-                draw_kw["palette"] = p.colormap or "tab10"
-            else:
-                draw_kw["color"] = p.single_color or _DEFAULT_COLOR
-            if p.kind == "swarm":
-                draw_kw["size"] = float(p.point_size)
 
-            plot_fn(**draw_kw)
-
-            if hue and p.show_legend:
-                _place_legend(ax, p, p.legend_title or hue)
+            if custom_box:
+                if hue:
+                    cmap = plt.get_cmap(p.colormap or "tab10")
+                    hue_cats = list(dict.fromkeys(df[hue].tolist()))
+                    box_colors = [cmap(i % cmap.N) for i in range(len(hue_cats))]
+                else:
+                    box_colors = []
+                _categories, handles = _draw_stat_box(
+                    ax, plot_df, p.category_column, p.value_column, hue,
+                    p.box_stat, float(p.std_k), float(p.confidence_level),
+                    box_colors, p.single_color or _DEFAULT_COLOR, vertical, float(p.alpha),
+                )
+                if hue and p.show_legend and handles:
+                    _place_legend(ax, p, p.legend_title or hue, handles=handles)
+                else:
+                    _remove_legend(ax)
             else:
-                _remove_legend(ax)
+                draw_kw: dict[str, Any] = {"data": plot_df, "ax": ax, **axis_kw}
+                if hue:
+                    draw_kw["hue"] = hue
+                    draw_kw["palette"] = p.colormap or "tab10"
+                else:
+                    draw_kw["color"] = p.single_color or _DEFAULT_COLOR
+                if p.kind == "swarm":
+                    draw_kw["size"] = float(p.point_size)
+                if p.kind in ("box", "boxen"):
+                    draw_kw["showfliers"] = bool(p.show_outliers)
+
+                plot_fn(**draw_kw)
+
+                for artist in list(ax.patches) + list(ax.collections):
+                    artist.set_alpha(float(p.alpha))
+
+                if hue and p.show_legend:
+                    _place_legend(ax, p, p.legend_title or hue)
+                else:
+                    _remove_legend(ax)
 
             if note:
                 fig.text(
@@ -1398,7 +1585,7 @@ class HistogramPlot(Node):
         hue = _categorical_hue(df, p.color_by)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             common: dict[str, Any] = {"data": df, "x": p.value_column, "ax": ax}
             if hue:
                 common["hue"] = hue
@@ -1555,7 +1742,7 @@ class HeatmapPlot(Node):
             )
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             sns.heatmap(
                 table,
                 ax=ax,
@@ -1673,7 +1860,7 @@ class ConfusionMatrixPlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = False
     show_box: bool = True
-    fig_width: float = 5.0
+    fig_width: float = 6.0
     fig_height: float = 4.0
     title: str | None = None
     title_font_size: int = 12
@@ -1706,7 +1893,7 @@ class ConfusionMatrixPlot(Node):
         X = _aligned_X(inputs)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             ConfusionMatrixDisplay.from_estimator(
                 model,
                 X,
@@ -1790,7 +1977,7 @@ def _draw_ovr_curve(
         return line if kind == "det" else {"curve_kwargs": line}
 
     with plt.style.context(_BASE_STYLE):
-        fig, ax = plt.subplots(figsize=_fig_size(p))
+        fig, ax = _new_figure(p)
 
         if len(classes) <= 2:
             kw: dict[str, Any] = {
@@ -1950,7 +2137,7 @@ class CalibrationCurvePlot(Node):
         X = _aligned_X(inputs)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             CalibrationDisplay.from_estimator(
                 model,
                 X,
@@ -2039,7 +2226,7 @@ class LearningCurvePlot(Node):
         X = _aligned_X(inputs)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             LearningCurveDisplay.from_estimator(
                 clone(model),
                 X,
@@ -2130,7 +2317,7 @@ class QQPlot(Node):
         )
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             ax.scatter(
                 theoretical, ordered, s=p.point_size,
                 color=p.point_color or _DEFAULT_COLOR,
@@ -2186,8 +2373,8 @@ class PieChartParams(NodeParams):
     colormap: str = reactive_choice_field(
         options="colormaps", depends_on="column", default="tab10",
     )
-    fig_width: float = 5.0
-    fig_height: float = 5.0
+    fig_width: float = 6.0
+    fig_height: float = 6.0
     title: str | None = None
     title_font_size: int = 12
     title_bold: bool = False
@@ -2236,7 +2423,7 @@ class PieChart(Node):
         colors = [cmap(i % cmap.N) for i in range(len(values))]
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
 
             if p.style in ("pie", "doughnut"):
                 width = float(p.doughnut_width) if p.style == "doughnut" else 1.0
@@ -2311,8 +2498,8 @@ class Heatmap1DParams(NodeParams):
     )
     show_colorbar: bool = True
     show_values: bool = False
-    decimals: int = visible_field(1, visible_when=("show_values", "True"))
-    fig_width: float = 8.0
+    decimals: int = visible_field(2, visible_when=("show_values", "True"))
+    fig_width: float = 6.0
     fig_height: float = 2.2
     title: str | None = None
     title_font_size: int = 12
@@ -2358,7 +2545,7 @@ class Heatmap1D(Node):
         grid = padded.reshape(rows, cols)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             im = ax.imshow(grid, aspect="auto", cmap=p.colormap or "viridis")
             ax.set_yticks([])
             ax.set_xticks([])
@@ -2409,7 +2596,7 @@ class AutocorrelogramParams(NodeParams):
     pacf_method: Literal["ywm", "ywadjusted", "ols", "ld"] = visible_field(
         "ywm", visible_when=("show_pacf", "True"),
     )
-    fig_width: float = 7.0
+    fig_width: float = 6.0
     fig_height: float = 4.0
     title: str | None = None
     title_font_size: int = 12
@@ -2454,7 +2641,7 @@ class Autocorrelogram(Node):
         n_plots = int(p.show_acf) + int(p.show_pacf)
 
         with plt.style.context(_BASE_STYLE):
-            fig, axes = plt.subplots(n_plots, 1, figsize=_fig_size(p), squeeze=False)
+            fig, axes = _new_figure(p, n_plots, 1, squeeze=False)
             axes = axes[:, 0]
             i = 0
             if p.show_acf:
@@ -2553,7 +2740,7 @@ class Density2D(Node):
             raise ValueError("density_2d: need at least 3 complete (x, y) rows.")
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = plt.subplots(figsize=_fig_size(p))
+            fig, ax = _new_figure(p)
             if p.kind == "contour":
                 import seaborn as sns
 
@@ -2570,4 +2757,946 @@ class Density2D(Node):
             if p.show_points:
                 ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
             _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
+        return {"figure": fig}
+
+
+# ==========================================================================
+# PCA-specific plots: pca_scree_plot, pca_corr_circle
+# ==========================================================================
+
+
+class PCAScreePlotParams(NodeParams):
+    """
+    Parameters for PCAScreePlot.
+
+    Attributes:
+        show_cumulative: Overlay the cumulative variance-ratio line (on
+            a secondary y-axis).
+        show_kaiser_line: Draw a reference line at the point where a
+            component's own eigenvalue would equal 1 (the Kaiser
+            criterion -- keep components above it).
+        bar_color / line_color: Colours for the bars / cumulative line.
+        the remaining fields: axes + figure size + title styling.
+    """
+
+    show_cumulative: bool = True
+    show_kaiser_line: bool = False
+    bar_color: str = color_field(suggestions=_COMMON_COLORS, default=_DEFAULT_COLOR)
+    line_color: str = color_field(
+        suggestions=_COMMON_COLORS, default="crimson", visible_when=("show_cumulative", "True"),
+    )
+    x_label: str = ""
+    y_label: str = ""
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    fig_width: float = 6.0
+    fig_height: float = 4.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class PCAScreePlot(Node):
+    """
+    Scree plot: percentage of variance explained by each PCA
+    component (bars), with an optional cumulative line -- takes the
+    ``pca`` node's ``variance`` output directly.
+    """
+
+    node_type = "pca_scree_plot"
+    category = "grapher"
+    inputs = [Port(name="variance", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = PCAScreePlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        p = self.params
+        variance = inputs["variance"]
+        required = {
+            "component", "explained_variance",
+            "explained_variance_ratio", "cumulative_variance_ratio",
+        }
+        missing = required - set(variance.columns)
+        if missing:
+            raise ValueError(
+                "pca_scree_plot: expected the pca node's 'variance' output; "
+                f"missing column(s): {sorted(missing)}"
+            )
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = _new_figure(p)
+            positions = range(len(variance))
+            ax.bar(
+                positions, variance["explained_variance_ratio"] * 100,
+                color=p.bar_color or _DEFAULT_COLOR,
+            )
+            ax.set_xticks(list(positions))
+            ax.set_xticklabels(list(variance["component"]))
+
+            if p.show_kaiser_line:
+                total_variance = float(variance["explained_variance"].sum())
+                if total_variance > 0:
+                    kaiser_pct = 100.0 / total_variance
+                    ax.axhline(kaiser_pct, color="0.3", linestyle="--", linewidth=1.2)
+
+            if p.show_cumulative:
+                ax2 = ax.twinx()
+                ax2.plot(
+                    list(positions), variance["cumulative_variance_ratio"] * 100,
+                    color=p.line_color or "crimson", marker="o",
+                )
+                ax2.set_ylim(0, 105)
+                ax2.set_ylabel("cumulative % variance", fontsize=p.axis_font_size)
+                ax2.tick_params(axis="y", labelsize=p.axis_font_size)
+
+            _finalize_plot(
+                fig, ax, p,
+                default_xlabel="component", default_ylabel="% variance explained",
+            )
+        return {"figure": fig}
+
+
+class PCACorrCirclePlotParams(NodeParams):
+    """
+    Parameters for PCACorrCirclePlot.
+
+    Attributes:
+        x_component / y_component: Which two components to plot (the
+            PC column names from the pca node's ``loadings`` output).
+        show_circle: Draw the unit circle -- the "perfect correlation"
+            boundary every vector must fall within.
+        arrow_color: Vector colour.
+        label_font_size: Variable name label size.
+        the remaining fields: axes + figure size + title styling.
+    """
+
+    x_component: str = column_field(dtypes=("numeric",), default="PC1")
+    y_component: str = column_field(dtypes=("numeric",), default="PC2")
+    show_circle: bool = True
+    arrow_color: str = color_field(suggestions=_COMMON_COLORS, default=_DEFAULT_COLOR)
+    label_font_size: int = 9
+    x_label: str = ""
+    y_label: str = ""
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    fig_width: float = 6.0
+    fig_height: float = 6.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class PCACorrCirclePlot(Node):
+    """
+    PCA correlation circle: each original variable as a vector whose
+    length is its correlation with the two chosen components -- the
+    pca node's raw loadings scaled by sqrt(explained variance), the
+    standard convention, so every vector is bounded within the unit
+    circle. Takes the ``pca`` node's ``loadings`` *and* ``variance``
+    outputs (the latter only for that scaling).
+    """
+
+    node_type = "pca_corr_circle"
+    category = "grapher"
+    inputs = [
+        Port(name="loadings", dtype="dataframe"),
+        Port(name="variance", dtype="dataframe"),
+    ]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = PCACorrCirclePlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+
+        p = self.params
+        loadings = inputs["loadings"]
+        variance = inputs["variance"]
+        if "variable" not in loadings.columns:
+            raise ValueError(
+                "pca_corr_circle: expected the pca node's 'loadings' output "
+                "(needs a 'variable' column)."
+            )
+        if not {"component", "explained_variance"} <= set(variance.columns):
+            raise ValueError(
+                "pca_corr_circle: expected the pca node's 'variance' output "
+                "(needs 'component' and 'explained_variance' columns)."
+            )
+        for col in (p.x_component, p.y_component):
+            if col not in loadings.columns:
+                raise ValueError(
+                    f"pca_corr_circle: component {col!r} is not in the loadings table."
+                )
+
+        var_lookup = dict(zip(variance["component"], variance["explained_variance"]))
+        missing = {p.x_component, p.y_component} - set(var_lookup)
+        if missing:
+            raise ValueError(
+                f"pca_corr_circle: component(s) {sorted(missing)} not found in "
+                f"the variance table."
+            )
+        scale_x = float(var_lookup[p.x_component]) ** 0.5
+        scale_y = float(var_lookup[p.y_component]) ** 0.5
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = _new_figure(p)
+            if p.show_circle:
+                ax.add_patch(
+                    Circle((0, 0), 1.0, fill=False, edgecolor="0.5", linestyle="--")
+                )
+            for _, row in loadings.iterrows():
+                vx = float(row[p.x_component]) * scale_x
+                vy = float(row[p.y_component]) * scale_y
+                ax.annotate(
+                    "", xy=(vx, vy), xytext=(0, 0),
+                    arrowprops={"arrowstyle": "->", "color": p.arrow_color or _DEFAULT_COLOR},
+                )
+                ax.text(
+                    vx * 1.1, vy * 1.1, str(row["variable"]),
+                    fontsize=p.label_font_size, ha="center", va="center",
+                )
+            ax.set_xlim(-1.2, 1.2)
+            ax.set_ylim(-1.2, 1.2)
+            ax.set_aspect("equal")
+            ax.axhline(0, color="0.85", linewidth=0.8)
+            ax.axvline(0, color="0.85", linewidth=0.8)
+            _finalize_plot(
+                fig, ax, p, default_xlabel=p.x_component, default_ylabel=p.y_component,
+            )
+        return {"figure": fig}
+
+
+# ==========================================================================
+# Time-series plots (datetime x axis; VAR / VECM diagnostics)
+# ==========================================================================
+
+_TIME_FREQ = Literal["auto", "year", "quarter", "month", "week", "day", "hour"]
+
+
+def _apply_time_ticks(ax: Any, freq: str) -> None:
+    """Set the x-axis major locator / formatter for a datetime axis."""
+    import matplotlib.dates as mdates
+
+    if freq == "auto":
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        return
+    locator, fmt = {
+        "year": (mdates.YearLocator(), "%Y"),
+        "quarter": (mdates.MonthLocator(bymonth=(1, 4, 7, 10)), "%Y-%m"),
+        "month": (mdates.MonthLocator(), "%Y-%m"),
+        "week": (mdates.WeekdayLocator(byweekday=mdates.MO), "%Y-%m-%d"),
+        "day": (mdates.DayLocator(), "%Y-%m-%d"),
+        "hour": (mdates.HourLocator(), "%m-%d %H:%M"),
+    }[freq]
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+    for label in ax.get_xticklabels():
+        label.set_rotation(30)
+        label.set_horizontalalignment("right")
+
+
+_CI_STYLE = Literal["band", "lines", "errorbar", "none"]
+
+
+def _draw_ci(ax: Any, x: Any, mid: Any, low: Any, high: Any, color: Any, style: str) -> None:
+    """Draw a confidence interval around ``mid`` in one of several styles."""
+    if style == "band":
+        ax.fill_between(x, low, high, color=color, alpha=0.22, linewidth=0)
+    elif style == "lines":
+        ax.plot(x, low, color=color, linestyle="--", linewidth=0.9)
+        ax.plot(x, high, color=color, linestyle="--", linewidth=0.9)
+    elif style == "errorbar":
+        import numpy as _np
+
+        yerr = _np.vstack([_np.asarray(mid) - _np.asarray(low),
+                           _np.asarray(high) - _np.asarray(mid)])
+        ax.errorbar(x, mid, yerr=yerr, fmt="none", ecolor=color,
+                    elinewidth=0.9, capsize=2, alpha=0.85)
+    # "none" -> nothing
+
+
+def _var_history(model: Any, ctx: str):
+    """(endog DataFrame, variable names, 'var'|'vecm') for a fitted VAR/VECM model."""
+    endog = getattr(model, "ruyso_endog", None)
+    names = list(getattr(model, "ruyso_names", []) or [])
+    method = getattr(model, "ruyso_method", "")
+    if endog is None or not names or not hasattr(model, "irf"):
+        raise ValueError(
+            f"{ctx}: connect the 'model' output of a 'var' node (VAR or VECM)."
+        )
+    return endog, names, method
+
+
+class TimeSeriesPlotParams(NodeParams):
+    """
+    Parameters for TimeSeriesPlot.
+
+    Attributes:
+        x_column: The time axis -- coerced to datetime; rows are sorted
+            by it.
+        y_column: The numeric series to plot.
+        mark: line / line+markers / markers (scatter) / bars.
+        x_tick_freq: Major x-tick spacing (ticks only -- resample the
+            data first with the Resample node to change its frequency).
+        color_by: Optional categorical column -- one series per level,
+            coloured from ``colormap``.
+        style_by: Optional categorical column -- one series per level,
+            given a different marker shape (markers) / line style (line)
+            / bar hatch (bars) from ``shape_map``. If ``color_by`` is
+            also set it **must name the same column**; either can be set
+            on its own.
+        multiple: layer (overlaid), stack (stacked areas / bars) or
+            dodge (side-by-side bars; falls back to layer for lines).
+        alpha: Opacity of the lines / markers / bars.
+        colormap / single_color: Palette / fixed colour.
+        shape_map: Series of shapes for a ``style_by`` column's levels
+            (assorted / geometric / bold / minimal).
+        marker_shape / line_style / bar_hatch: The fixed shape used when
+            ``style_by`` is not set.
+    """
+
+    x_column: str = column_field(dtypes=("datetime", "any"))
+    y_column: str = column_field(dtypes=("numeric",))
+    mark: Literal["line", "line+markers", "markers", "bars"] = "line"
+    x_tick_freq: _TIME_FREQ = "auto"
+
+    # -- grouping: colour and/or shape by the same column ------------
+    color_by: str = column_field(
+        dtypes=("categorical", "boolean"), default="", allow_none=True,
+        description="Colour one series per level of this column.",
+    )
+    style_by: str = column_field(
+        dtypes=("categorical", "boolean"), default="", allow_none=True,
+        description="Vary the marker shape / line style / bar hatch by this "
+        "column. If 'color by' is also set it must be the same column.",
+    )
+    multiple: Literal["layer", "stack", "dodge"] = "layer"
+    alpha: float = unit_interval_field(0.9)
+    colormap: str = reactive_choice_field(
+        options="colormaps", depends_on="color_by", default="tab10",
+        visible_when_set="color_by",
+    )
+    single_color: str = color_field(
+        suggestions=_COMMON_COLORS, default=_DEFAULT_COLOR, visible_when=("color_by", ""),
+    )
+    shape_map: Literal["assorted", "geometric", "bold", "minimal"] = visible_field(
+        "assorted", visible_when_set="style_by",
+        description="Series of shapes assigned to the style-by column's levels.",
+    )
+    marker_shape: Literal[
+        "circle", "square", "triangle", "diamond", "plus", "cross", "star", "point"
+    ] = visible_field(
+        "circle",
+        visible_when_in=("mark", ("markers", "line+markers")),
+        visible_when_unset="style_by",
+        description="Marker shape (fixed).",
+    )
+    line_style: Literal["solid", "dashed", "dash-dot", "dotted"] = visible_field(
+        "solid",
+        visible_when_in=("mark", ("line", "line+markers")),
+        visible_when_unset="style_by",
+        description="Line style (fixed).",
+    )
+    bar_hatch: Literal[
+        "none", "diagonal", "back-diagonal", "cross", "dots", "stars"
+    ] = visible_field(
+        "none", visible_when=("mark", "bars"), visible_when_unset="style_by",
+        description="Bar hatch pattern (fixed).",
+    )
+
+    x_label: str = ""
+    y_label: str = ""
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    log_y: bool = False
+    fig_width: float = 6.0
+    fig_height: float = 4.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+    show_legend: bool = True
+    legend_title: str = ""
+    legend_location: _LEGEND_LOCATIONS = "best"
+    legend_font_size: int = 9
+
+
+@register_node
+class TimeSeriesPlot(Node):
+    """A single numeric series over a datetime axis: line, markers, or bars."""
+
+    node_type = "time_series_plot"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = TimeSeriesPlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        for col in (p.x_column, p.y_column):
+            if col not in df.columns:
+                raise ValueError(f"time_series_plot: column {col!r} is not in the input data.")
+
+        color_col = (p.color_by or "").strip()
+        style_col = (p.style_by or "").strip()
+        if color_col and style_col and color_col != style_col:
+            raise ValueError(
+                "time_series_plot: 'color by' and 'style by' must name the same "
+                f"column (got {color_col!r} and {style_col!r})."
+            )
+        group_col = color_col or style_col
+        hue = _categorical_hue(df, group_col)
+
+        work = pd.DataFrame(
+            {
+                "x": pd.to_datetime(df[p.x_column], errors="coerce"),
+                "y": pd.to_numeric(df[p.y_column], errors="coerce"),
+            }
+        )
+        if hue:
+            work["g"] = df[group_col].astype("string").to_numpy()
+        work = work.dropna(subset=["x", "y"]).sort_values("x")
+        if work.empty:
+            raise ValueError("time_series_plot: no rows left after dropping missing x / y.")
+
+        groups = list(work.groupby("g", observed=True)) if hue else [(None, work)]
+        color_active = bool(hue and color_col)
+        style_active = bool(hue and style_col)
+
+        with plt.style.context(_BASE_STYLE):
+            fig, ax = _new_figure(p)
+            if color_active:
+                cmap = plt.get_cmap(p.colormap or "tab10")
+                colors = [cmap(i % cmap.N) for i in range(len(groups))]
+            else:
+                colors = [p.single_color or _DEFAULT_COLOR] * max(len(groups), 1)
+            shapes = self._shapes(p, style_active, len(groups))
+
+            if p.mark == "bars":
+                self._draw_bars(ax, groups, colors, shapes, p, np)
+            else:
+                self._draw_lines(ax, groups, colors, shapes, p, hue, style_active, np)
+
+            _apply_time_ticks(ax, p.x_tick_freq)
+            if hue and p.show_legend:
+                _place_legend(ax, p, p.legend_title or group_col)
+            elif not hue:
+                _remove_legend(ax)
+            _finalize_plot(
+                fig, ax, p, default_xlabel=p.x_column, default_ylabel=p.y_column,
+            )
+        return {"figure": fig}
+
+    @staticmethod
+    def _shapes(p, style_active: bool, n: int) -> list:
+        """Per-group shape value (marker / line style / hatch) for ``mark``."""
+        markish = p.mark in ("markers", "line+markers")
+        if style_active:
+            kind = "scatter" if markish else ("bar" if p.mark == "bars" else "line")
+            seq = _shape_sequence(kind, p.shape_map)
+            return [seq[i % len(seq)] for i in range(max(n, 1))]
+        if markish:
+            fixed = _MARKER_SHAPES.get(p.marker_shape, "o")
+        elif p.mark == "bars":
+            fixed = _BAR_HATCHES.get(p.bar_hatch)
+        else:
+            fixed = _LINE_STYLES.get(p.line_style, "-")
+        return [fixed] * max(n, 1)
+
+    @staticmethod
+    def _draw_lines(ax, groups, colors, shapes, p, hue, style_active, np) -> None:
+        base_ls = _LINE_STYLES.get(p.line_style, "-")
+        if hue and p.multiple == "stack":
+            union = np.array(sorted(set(np.concatenate([g["x"].to_numpy() for _, g in groups]))))
+            stacks = [
+                g.set_index("x")["y"].reindex(union).fillna(0.0).to_numpy() for _, g in groups
+            ]
+            ax.stackplot(
+                union, *stacks, labels=[str(k) for k, _ in groups],
+                colors=colors, alpha=float(p.alpha),
+            )
+            return
+        for (key, g), color, shape in zip(groups, colors, shapes):
+            if p.mark == "markers":
+                kw = {"linestyle": "none", "marker": shape}
+            elif p.mark == "line+markers":
+                kw = {"linestyle": base_ls, "marker": shape}
+            else:  # line
+                kw = {"linestyle": shape, "marker": ""}
+            ax.plot(
+                g["x"].to_numpy(), g["y"].to_numpy(), color=color, alpha=float(p.alpha),
+                markersize=4, label=(str(key) if key is not None else None), **kw,
+            )
+
+    @staticmethod
+    def _draw_bars(ax, groups, colors, shapes, p, np) -> None:
+        all_x = np.array(sorted(set(np.concatenate([g["x"].to_numpy() for _, g in groups]))))
+        span = (
+            np.median(np.diff(all_x)) / np.timedelta64(1, "D") if all_x.size > 1 else 1.0
+        )
+        width = 0.8 * float(span)
+        n = len(groups)
+        bottom = {}
+        for i, ((key, g), color, hatch) in enumerate(zip(groups, colors, shapes)):
+            x = g["x"].to_numpy()
+            y = g["y"].to_numpy()
+            label = str(key) if key is not None else None
+            if p.multiple == "dodge" and n > 1:
+                offset = (i - (n - 1) / 2) * (width / n)
+                ax.bar(
+                    x + np.timedelta64(int(offset * 86400), "s"), y, width=width / n,
+                    color=color, alpha=float(p.alpha), hatch=hatch, label=label,
+                )
+            elif p.multiple == "stack" and n > 1:
+                base = np.array([bottom.get(t, 0.0) for t in x])
+                ax.bar(
+                    x, y, width=width, bottom=base, color=color, alpha=float(p.alpha),
+                    hatch=hatch, label=label,
+                )
+                for t, v in zip(x, y):
+                    bottom[t] = bottom.get(t, 0.0) + v
+            else:  # layer / single
+                ax.bar(
+                    x, y, width=width, color=color, alpha=float(p.alpha),
+                    hatch=hatch, label=label,
+                )
+
+
+class MultivariateTimeSeriesPlotParams(NodeParams):
+    """
+    Parameters for MultivariateTimeSeriesPlot.
+
+    Attributes:
+        datetime_column: The time axis (coerced to datetime; rows sorted
+            by it).
+        variables: Numeric series to draw (tickboxes).
+        layout: ``overlay`` -- all series on one axes; ``grid`` -- one
+            stacked panel per series (shared x).
+        normalize: z-score each series (useful when scales differ, for
+            ``overlay``).
+        x_tick_freq: Major x-tick spacing.
+        alpha / colormap: Line opacity / palette.
+    """
+
+    datetime_column: str = column_field(dtypes=("datetime", "any"))
+    variables: list[str] | None = checkbox_list_field(source="columns", default=None)
+    layout: Literal["overlay", "grid"] = "overlay"
+    normalize: bool = False
+    x_tick_freq: _TIME_FREQ = "auto"
+    alpha: float = unit_interval_field(0.9)
+    colormap: str = reactive_choice_field(
+        options="colormaps", depends_on="variables", default="tab10",
+    )
+
+    x_label: str = ""
+    y_label: str = ""
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    fig_width: float = 6.5
+    fig_height: float = 4.5
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+    show_legend: bool = True
+    legend_title: str = ""
+    legend_location: _LEGEND_LOCATIONS = "best"
+    legend_font_size: int = 9
+
+
+@register_node
+class MultivariateTimeSeriesPlot(Node):
+    """Several numeric series over a shared datetime axis (overlaid or stacked panels)."""
+
+    node_type = "multivariate_timeseries_plot"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = MultivariateTimeSeriesPlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        p = self.params
+        df = inputs["df"]
+        if p.datetime_column not in df.columns:
+            raise ValueError(
+                f"multivariate_timeseries_plot: column {p.datetime_column!r} is not "
+                "in the input data."
+            )
+        cols = [c for c in (p.variables or []) if c in df.columns and c != p.datetime_column]
+        if not cols:
+            raise ValueError("multivariate_timeseries_plot: tick at least one series.")
+
+        x = pd.to_datetime(df[p.datetime_column], errors="coerce")
+        data = df[cols].apply(pd.to_numeric, errors="coerce")
+        work = pd.concat([x.rename("x"), data], axis=1).dropna(subset=["x"]).sort_values("x")
+        if p.normalize:
+            for c in cols:
+                s = work[c]
+                std = s.std(ddof=0)
+                work[c] = (s - s.mean()) / std if std else s - s.mean()
+
+        with plt.style.context(_BASE_STYLE):
+            if p.layout == "grid":
+                fig, axes = _new_figure(p, len(cols), 1, squeeze=False)
+                axes = list(axes[:, 0])
+            else:
+                fig, ax = _new_figure(p)
+                axes = [ax] * len(cols)
+            cmap = plt.get_cmap(p.colormap or "tab10")
+
+            for i, col in enumerate(cols):
+                a = axes[i]
+                a.plot(
+                    work["x"].to_numpy(), work[col].to_numpy(),
+                    color=cmap(i % cmap.N), alpha=float(p.alpha), label=col,
+                )
+                if p.layout == "grid":
+                    a.set_ylabel(col, fontsize=p.axis_font_size)
+                    a.tick_params(axis="both", labelsize=p.axis_font_size)
+                    a.grid(bool(p.show_grid))
+                    if i < len(cols) - 1:
+                        a.tick_params(labelbottom=False)
+
+            last = axes[-1]
+            _apply_time_ticks(last, p.x_tick_freq)
+            if p.layout == "overlay":
+                if p.show_legend:
+                    _place_legend(axes[0], p, p.legend_title or "series")
+                _finalize_plot(
+                    fig, axes[0], p,
+                    default_xlabel=p.datetime_column, default_ylabel=p.y_label or "value",
+                )
+            else:
+                last.set_xlabel(p.x_label or p.datetime_column, fontsize=p.axis_font_size)
+                if p.title:
+                    fig.suptitle(
+                        p.title, fontsize=p.title_font_size,
+                        fontweight="bold" if p.title_bold else "normal",
+                        fontstyle="italic" if p.title_italic else "normal",
+                    )
+                fig.tight_layout()
+        return {"figure": fig}
+
+
+class VarForecastPlotParams(NodeParams):
+    """
+    Parameters for VarForecastPlot.
+
+    Attributes:
+        variables: Which of the model's variables to draw (tickboxes;
+            blank = all). Populated from the connected ``var`` model.
+        confidence_level: Level for the forecast interval.
+        history_window: Trailing history points to show (0 = all).
+        history_color / forecast_color: Line colours for the observed
+            history and the forecast.
+        ci_style: How the interval is drawn -- ``band`` (a lighter fill
+            in the forecast colour), ``lines`` (dashed bounds),
+            ``errorbar`` (a bar per step), or ``none``.
+
+    The forecast horizon is taken from the ``var`` node's
+    ``forecast_periods`` -- set it there.
+    """
+
+    variables: list[str] | None = checkbox_list_field(source="columns", default=None)
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+    history_window: int = 0
+    history_color: str = color_field(suggestions=_COMMON_COLORS, default=_DEFAULT_COLOR)
+    forecast_color: str = color_field(suggestions=_COMMON_COLORS, default="#d1495b")
+    ci_style: _CI_STYLE = "band"
+
+    axis_font_size: int = 10
+    show_grid: bool = True
+    fig_width: float = 6.5
+    fig_height: float = 5.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class VarForecastPlot(Node):
+    """History + multi-step forecast (with interval) for chosen variables of a VAR / VECM."""
+
+    node_type = "var_forecast_plot"
+    category = "grapher"
+    inputs = [Port(name="model", dtype="model")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = VarForecastPlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+
+        p = self.params
+        model = inputs["model"]
+        endog, names, method = _var_history(model, "var_forecast_plot")
+        steps = max(int(getattr(model, "ruyso_forecast_periods", 10)), 1)
+        alpha = 1.0 - float(p.confidence_level)
+
+        if method == "vecm":
+            mid, low, high = model.predict(steps=steps, alpha=alpha)
+        else:
+            mid, low, high = model.forecast_interval(
+                endog.values[-model.k_ar:], steps, alpha=alpha
+            )
+        mid, low, high = (np.asarray(a, dtype="float64") for a in (mid, low, high))
+
+        chosen = [c for c in (p.variables or names) if c in names] or names
+        hist = endog if p.history_window <= 0 else endog.iloc[-int(p.history_window):]
+        hx = hist.index
+        if isinstance(hx, pd.DatetimeIndex) and hx.freq is not None:
+            fx = pd.date_range(hx[-1], periods=steps + 1, freq=hx.freq)[1:]
+        elif isinstance(hx, pd.DatetimeIndex) and len(hx) > 1:
+            fx = pd.date_range(hx[-1], periods=steps + 1, freq=hx[-1] - hx[-2])[1:]
+        else:
+            fx = np.arange(len(endog), len(endog) + steps)
+            hx = np.arange(len(endog) - len(hist), len(endog))
+
+        with plt.style.context(_BASE_STYLE):
+            fig, axes = _new_figure(p, len(chosen), 1, squeeze=False)
+            for ax, name in zip(axes[:, 0], chosen):
+                j = names.index(name)
+                ax.plot(hx, hist[name].to_numpy(), color=p.history_color, label="history")
+                ax.plot(fx, mid[:, j], color=p.forecast_color, label="forecast")
+                _draw_ci(ax, fx, mid[:, j], low[:, j], high[:, j],
+                         p.forecast_color, p.ci_style)
+                ax.set_ylabel(name, fontsize=p.axis_font_size)
+                ax.tick_params(axis="both", labelsize=p.axis_font_size)
+                ax.grid(bool(p.show_grid))
+            axes[0, 0].legend(fontsize=8, loc="best")
+            if p.title:
+                fig.suptitle(
+                    p.title, fontsize=p.title_font_size,
+                    fontweight="bold" if p.title_bold else "normal",
+                    fontstyle="italic" if p.title_italic else "normal",
+                )
+            fig.tight_layout()
+        return {"figure": fig}
+
+
+class VarAcorrPlotParams(NodeParams):
+    """
+    Parameters for VarAcorrPlot.
+
+    Attributes:
+        max_lag: Number of lags on each panel.
+        confidence_level: Level for the +/- band (white-noise bounds).
+    """
+
+    max_lag: int = 12
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+    fig_width: float = 6.5
+    fig_height: float = 6.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class VarAcorrPlot(Node):
+    """Residual auto- and cross-correlation grid of a fitted VAR / VECM (a whiteness check)."""
+
+    node_type = "var_acorr_plot"
+    category = "grapher"
+    inputs = [Port(name="model", dtype="model")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = VarAcorrPlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from statsmodels.tsa.stattools import ccf
+
+        p = self.params
+        model = inputs["model"]
+        _, names, _ = _var_history(model, "var_acorr_plot")
+        resid = np.asarray(model.resid, dtype="float64")
+        k = len(names)
+        n = resid.shape[0]
+        max_lag = max(int(p.max_lag), 1)
+        z = float(_z_value(p.confidence_level))
+        band = z / np.sqrt(n)
+        lags = np.arange(max_lag + 1)
+
+        with plt.style.context(_BASE_STYLE):
+            fig, axes = _new_figure(p, k, k, squeeze=False)
+            for i in range(k):
+                for j in range(k):
+                    ax = axes[i, j]
+                    cc = ccf(resid[:, j], resid[:, i], adjusted=False)[: max_lag + 1]
+                    ax.vlines(lags, 0, cc, color=_DEFAULT_COLOR)
+                    ax.axhline(0, color="0.6", linewidth=0.8)
+                    ax.axhline(band, color="0.7", linestyle="--", linewidth=0.8)
+                    ax.axhline(-band, color="0.7", linestyle="--", linewidth=0.8)
+                    ax.set_ylim(-1.05, 1.05)
+                    if i == 0:
+                        ax.set_title(names[j], fontsize=9)
+                    if j == 0:
+                        ax.set_ylabel(names[i], fontsize=9)
+                    ax.tick_params(labelsize=7)
+            fig.suptitle(
+                p.title or "Residual autocorrelation",
+                fontsize=p.title_font_size,
+                fontweight="bold" if p.title_bold else "normal",
+                fontstyle="italic" if p.title_italic else "normal",
+            )
+            fig.tight_layout()
+        return {"figure": fig}
+
+
+class IrfPlotParams(NodeParams):
+    """
+    Parameters for IrfPlot.
+
+    Attributes:
+        periods: Horizon (steps) of the impulse response.
+        orthogonalized: Use orthogonalised (Cholesky) shocks.
+        cumulative: Plot the cumulative response instead of per-period.
+        responses: Response variables to show as rows (tickboxes; blank
+            = all). shocks: Impulse variables to show as columns
+            (tickboxes; blank = all). Both are populated from the
+            connected ``var`` model.
+        line_color: Colour of the impulse-response line.
+        ci_style: How the +/- standard-error interval is drawn --
+            ``band`` / ``lines`` / ``errorbar`` / ``none``.
+        confidence_level: Level for the standard-error interval.
+    """
+
+    periods: int = 10
+    orthogonalized: bool = True
+    cumulative: bool = False
+    responses: list[str] | None = checkbox_list_field(source="columns", default=None)
+    shocks: list[str] | None = checkbox_list_field(source="columns", default=None)
+    line_color: str = color_field(suggestions=_COMMON_COLORS, default=_DEFAULT_COLOR)
+    ci_style: _CI_STYLE = "band"
+    confidence_level: float = unit_interval_field(0.95, lo=0.5, hi=0.999)
+    fig_width: float = 6.5
+    fig_height: float = 6.0
+    title: str | None = None
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+
+@register_node
+class IrfPlot(Node):
+    """Impulse-response functions of a fitted VAR / VECM, with a standard-error band."""
+
+    node_type = "irf_plot"
+    category = "grapher"
+    inputs = [Port(name="model", dtype="model")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = IrfPlotParams
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        p = self.params
+        model = inputs["model"]
+        _, names, _ = _var_history(model, "irf_plot")
+        periods = max(int(p.periods), 1)
+        irf = model.irf(periods)
+
+        if p.cumulative:
+            effects = irf.orth_cum_effects if p.orthogonalized else irf.cum_effects
+            stderr = irf.cum_effect_stderr(orth=p.orthogonalized)
+        else:
+            effects = irf.orth_irfs if p.orthogonalized else irf.irfs
+            stderr = irf.stderr(orth=p.orthogonalized)
+        effects = np.asarray(effects, dtype="float64")
+        stderr = np.asarray(stderr, dtype="float64")
+        z = float(_z_value(p.confidence_level))
+        horizons = np.arange(effects.shape[0])
+
+        def _sel(chosen: list[str] | None) -> list[int]:
+            idx = [names.index(c) for c in (chosen or []) if c in names]
+            return idx or list(range(len(names)))
+
+        responses = _sel(p.responses)
+        impulses = _sel(p.shocks)
+
+        with plt.style.context(_BASE_STYLE):
+            fig, axes = _new_figure(p, len(responses), len(impulses), squeeze=False)
+            for ri, r in enumerate(responses):
+                for ci, c in enumerate(impulses):
+                    ax = axes[ri, ci]
+                    mid = effects[:, r, c]
+                    se = stderr[:, r, c]
+                    ax.plot(horizons, mid, color=p.line_color)
+                    _draw_ci(ax, horizons, mid, mid - z * se, mid + z * se,
+                             p.line_color, p.ci_style)
+                    ax.axhline(0, color="0.6", linewidth=0.8)
+                    if ri == 0:
+                        ax.set_title(f"shock: {names[c]}", fontsize=9)
+                    if ci == 0:
+                        ax.set_ylabel(f"resp: {names[r]}", fontsize=9)
+                    ax.tick_params(labelsize=7)
+            kind = "Cumulative " if p.cumulative else ""
+            orth = "orthogonalised" if p.orthogonalized else "simple"
+            fig.suptitle(
+                p.title or f"{kind}IRF ({orth})",
+                fontsize=p.title_font_size,
+                fontweight="bold" if p.title_bold else "normal",
+                fontstyle="italic" if p.title_italic else "normal",
+            )
+            fig.tight_layout()
         return {"figure": fig}

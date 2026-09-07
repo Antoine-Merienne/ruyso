@@ -62,6 +62,12 @@ def is_figure_core_class(core_cls: type | None) -> bool:
     """Whether a core ``Node`` subclass should get an on-canvas figure preview."""
     if core_cls is None:
         return False
+    if core_cls.category == "export":
+        # Export / sink nodes (figure_export, export_to_dashboard) carry
+        # a figure-typed *input* but are not previewed on the canvas --
+        # the figure is shown by the sink they feed (a file, the
+        # Dashboard tab), not next to the export node.
+        return False
     if core_cls.category in _ALWAYS_PREVIEW_CATEGORIES:
         return True
     ports = list(core_cls.inputs) + list(core_cls.outputs)
@@ -116,17 +122,62 @@ def resolve_figure(node: BaseNode, outputs: dict[str, dict]) -> Figure | None:
     return None
 
 
+def resolve_source_node(node: BaseNode) -> BaseNode | None:
+    """
+    The node feeding ``node``'s ``figure`` input port, if any.
+
+    Used by the Dashboard tab: an ``export_to_dashboard`` node's block
+    is edited through the parameter form of the *plot* node upstream of
+    it (the grapher / ``table_viewer`` that actually renders the
+    figure), not the export node itself.
+    """
+    core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
+    if core_cls is None:
+        return None
+    for port in core_cls.inputs:
+        if getattr(port, "dtype", None) != FIGURE_DTYPE:
+            continue
+        canvas_port = node.inputs().get(port.name)
+        connected = canvas_port.connected_ports() if canvas_port is not None else []
+        if connected:
+            return connected[0].node()
+    return None
+
+
 def _looks_like_figure(value: Any) -> bool:
     return hasattr(value, "savefig") and hasattr(value, "axes")
 
 
-def _figure_to_pixmap(figure: Figure) -> QPixmap:
+def figure_to_pixmap(figure: Figure) -> QPixmap:
     """Rasterize ``figure`` to a QPixmap without disturbing its Qt canvas."""
     agg = FigureCanvasAgg(figure)
     agg.draw()
     width, height = agg.get_width_height()
     image = QImage(bytes(agg.buffer_rgba()), width, height, QImage.Format_RGBA8888)
     return QPixmap.fromImage(image.copy())
+
+
+def figure_to_svg_bytes(figure: Figure) -> bytes:
+    """
+    Serialise ``figure`` to an SVG document that Qt's SVG renderer can
+    draw cleanly.
+
+    Used by the Dashboard tab, which renders figures as vectors so they
+    stay sharp at any zoom / export scale. ``svg.fonttype="none"`` keeps
+    text as ``<text>`` elements (drawn with Qt fonts) instead of glyph
+    outlines referenced via ``<use>`` -- QtSvg does not resolve the
+    latter and would drop every label. Goes through matplotlib's own SVG
+    backend rather than the figure's live Qt canvas, so it does not
+    disturb an on-screen preview of the same figure.
+    """
+    import io
+
+    import matplotlib.pyplot as plt
+
+    buffer = io.BytesIO()
+    with plt.rc_context({"svg.fonttype": "none"}):
+        figure.savefig(buffer, format="svg", bbox_inches="tight")
+    return buffer.getvalue()
 
 
 # --------------------------------------------------------------------------
@@ -191,7 +242,7 @@ class FigureThumbnail(QWidget):
 
     def show_figure(self, figure: Figure) -> None:
         self._figure = figure
-        self._pixmap = _figure_to_pixmap(figure)
+        self._pixmap = figure_to_pixmap(figure)
         self._label.setText("")
         self._rescale_pixmap()
 

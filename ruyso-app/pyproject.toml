@@ -17,6 +17,7 @@ dependencies = [
     "networkx",
     "joblib",
     "geopandas>=1",
+    "mapclassify>=2.6",
     "pyarrow",
     "openpyxl",
     "optuna",

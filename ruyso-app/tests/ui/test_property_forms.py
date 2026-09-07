@@ -8,7 +8,7 @@ from NodeGraphQt import BaseNode
 from ruyso_app.core.node import NodeParams
 from ruyso_app.nodes.loaders import CSVLoaderParams
 from ruyso_app.nodes.models import LinearRegressionFitParams, TrainTestSplitParams
-from ruyso_app.nodes.transforms import DropNAParams, StandardScalerParams
+from ruyso_app.nodes.transforms import DropNAParams, ScalerParams
 from ruyso_app.nodes.viz import MatplotlibPlotParams
 from ruyso_app.ui.property_forms import add_properties_to_node, extract_params_from_node
 
@@ -46,8 +46,8 @@ def test_optional_list_of_str_round_trips_as_comma_separated_text(qapp):
 
 
 def test_optional_list_left_blank_parses_back_to_none(qapp):
-    node = _node_for(StandardScalerParams, qapp)
-    params = extract_params_from_node(node, StandardScalerParams)
+    node = _node_for(ScalerParams, qapp)
+    params = extract_params_from_node(node, ScalerParams)
     assert params["columns"] is None
 
 

@@ -126,7 +126,7 @@ def test_micro_type_change_recreates_the_underlying_node(window):
     window._on_pick_macro_type("transform")
     node = window._canvas.graph.all_nodes()[0]
     original_type = type(node).CORE_NODE_TYPE
-    other_type = "standard_scaler" if original_type == "drop_na" else "drop_na"
+    other_type = "scaler" if original_type == "drop_na" else "drop_na"
 
     window._pipeline_page.options_panel.node_type_change_requested.emit(other_type)
 
@@ -145,7 +145,7 @@ def test_retype_via_options_updates_the_node_name(window):
     window._on_pick_macro_type("transform")
     node = window._canvas.graph.all_nodes()[0]
     start_type = type(node).CORE_NODE_TYPE
-    other = "standard_scaler" if start_type == "drop_na" else "drop_na"
+    other = "scaler" if start_type == "drop_na" else "drop_na"
 
     window._on_node_type_change(other)
 
@@ -209,6 +209,97 @@ def test_switching_to_table_tab_populates_the_navigator_from_the_canvas(window):
         for i in range(window._table_page._nav.count())
     ]
     assert len(labels) == 2  # one table each for the loader and the transformer
+
+
+def test_dashboard_menu_has_add_title_and_text_box_actions(window):
+    labels = [a.text() for a in window._dashboard_menu.actions()]
+    assert "Add Title" in labels
+    assert "Add Text Box" in labels
+    assert "Exporter..." in labels
+
+
+def test_add_to_dashboard_context_action_wires_an_export_node(window):
+    window._on_pick_macro_type("grapher")
+    plot = window._canvas.graph.all_nodes()[0]
+
+    window._on_ctx_add_to_dashboard(window._graph, plot)
+
+    types = {type(n).CORE_NODE_TYPE for n in window._canvas.graph.all_nodes()}
+    assert "export_to_dashboard" in types
+    export = next(
+        n for n in window._canvas.graph.all_nodes()
+        if type(n).CORE_NODE_TYPE == "export_to_dashboard"
+    )
+    assert export.inputs()["figure"].connected_ports()  # wired to the plot
+
+
+def test_run_populates_a_dashboard_block_editable_via_the_source_plot(window):
+    import matplotlib.pyplot as plt
+
+    window._on_pick_macro_type("grapher")
+    plot = window._canvas.graph.all_nodes()[0]
+    window._on_ctx_add_to_dashboard(window._graph, plot)
+    export = next(
+        n for n in window._canvas.graph.all_nodes()
+        if type(n).CORE_NODE_TYPE == "export_to_dashboard"
+    )
+
+    # the export node is a sink: its figure comes from the grapher's output
+    window._on_run_succeeded({plot.name(): {"figure": plt.figure()}})
+
+    assert export.name() in window._dashboard_page._figure_items
+    item = window._dashboard_page._figure_items[export.name()]
+    assert item._renderer is not None  # rendered from SVG
+    item.setSelected(True)
+
+    # the dashboard Options panel is now bound to the upstream plot node
+    assert window._dashboard_page.options_panel.current_node() is plot
+    assert window._dashboard_page.is_editing_figure()
+
+
+def test_disconnected_figure_shows_a_canvas_message_not_an_options_page(window):
+    import matplotlib.pyplot as plt
+
+    window._on_pick_macro_type("grapher")
+    plot = window._canvas.graph.all_nodes()[0]
+    window._on_ctx_add_to_dashboard(window._graph, plot)
+    export = next(
+        n for n in window._canvas.graph.all_nodes()
+        if type(n).CORE_NODE_TYPE == "export_to_dashboard"
+    )
+    window._on_run_succeeded({plot.name(): {"figure": plt.figure()}})
+
+    plot.outputs()["figure"].disconnect_from(export.inputs()["figure"])
+    item = window._dashboard_page._figure_items[export.name()]
+    item.setSelected(True)
+
+    assert window._dashboard_page._view.overlay.text() != ""  # canvas overlay
+    assert not window._dashboard_page.is_editing_figure()
+
+
+def test_editing_a_source_param_flags_its_dashboard_figure_modified(window):
+    import matplotlib.pyplot as plt
+
+    window._on_pick_macro_type("grapher")
+    plot = window._canvas.graph.all_nodes()[0]
+    window._on_ctx_add_to_dashboard(window._graph, plot)
+    export = next(
+        n for n in window._canvas.graph.all_nodes()
+        if type(n).CORE_NODE_TYPE == "export_to_dashboard"
+    )
+    # first sync: fresh, not stale
+    window._dashboard_page.sync_figures(
+        window._graph, {plot.name(): {"figure": plt.figure()}}, set(), set()
+    )
+    item = window._dashboard_page._figure_items[export.name()]
+    assert not item.is_stale()
+
+    # a later (auto-)run reports the source plot as modified since the run
+    window._dashboard_page.sync_figures(
+        window._graph, {plot.name(): {"figure": plt.figure()}},
+        {plot.name()}, set(),
+    )
+    assert item.is_stale()
 
 
 def test_every_macro_type_has_an_enabled_new_node_action(window):

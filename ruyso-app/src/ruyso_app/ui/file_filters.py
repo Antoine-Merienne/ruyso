@@ -20,6 +20,8 @@ FILE_FILTERS: dict[str, str] = {
     "geojson_loader": "GeoJSON (*.geojson *.json);;All files (*)",
     "shapefile_loader": "Shapefile (*.shp);;All files (*)",
     "geopackage_loader": "GeoPackage (*.gpkg);;All files (*)",
+    "geoparquet_loader": "GeoParquet (*.parquet *.pq);;All files (*)",
+    "geofeather_loader": "GeoFeather / GeoArrow (*.feather *.arrow);;All files (*)",
     "figure_export": "Images (*.png *.pdf *.svg *.jpg *.jpeg);;All files (*)",
 }
 

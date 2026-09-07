@@ -313,6 +313,12 @@ QLabel#ruysoEmptyHint {{
     font-size: 22px;
 }}
 
+/* Empty-state hint drawn over the Dashboard page frame. */
+QLabel#ruysoDashboardHint {{
+    color: #8a8a8a;
+    font-size: 16px;
+}}
+
 /* Custom tab band at the top of the window (see ui/tab_bar.py). */
 QWidget#ruysoTabBar {{
     background-color: {theme.window_background};

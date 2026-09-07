@@ -212,10 +212,18 @@ def test_regression_needs_predictors(frame):
 # -- PCA -------------------------------------------------------------
 
 
-def test_pca_scores_loadings_and_variance(frame):
-    out = S.PCA(params=S.PCAParams(columns=["a", "b"])).run(df=frame)
-    assert list(out["scores"].columns) == ["PC1", "PC2"]
-    assert len(out["scores"]) == len(frame)
+def _two_numeric_df(n=50, seed=0):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(size=n)
+    return pd.DataFrame({"a": a, "b": a * 0.8 + rng.normal(scale=0.3, size=n),
+                         "label": ["x"] * n})  # a non-numeric column is ignored
+
+
+def test_pca_runs_on_every_numeric_column():
+    df = _two_numeric_df()
+    out = S.PCA(params=S.PCAParams()).run(df=df)
+    assert list(out["scores"].columns) == ["PC1", "PC2"]  # 2 numeric cols
+    assert len(out["scores"]) == len(df)
     assert set(out["loadings"]["variable"]) == {"a", "b"}
     assert list(out["variance"]["component"]) == ["PC1", "PC2"]
     assert abs(out["variance"]["cumulative_variance_ratio"].iloc[-1] - 1.0) < 1e-9
@@ -230,14 +238,62 @@ def test_pca_n_components_limits_the_output():
     assert list(out["scores"].columns) == ["PC1"]
 
 
-def test_pca_needs_at_least_two_numeric_columns(frame):
+def test_pca_needs_at_least_two_numeric_columns():
     with pytest.raises(ValueError, match="at least 2"):
-        S.PCA(params=S.PCAParams(columns=["a"])).run(df=frame)
+        S.PCA(params=S.PCAParams()).run(df=pd.DataFrame({"a": [1.0, 2, 3], "lbl": list("xyz")}))
 
 
-def test_pca_unknown_column_raises(frame):
-    with pytest.raises(ValueError, match="not found"):
-        S.PCA(params=S.PCAParams(columns=["a", "nope"])).run(df=frame)
+# -- ICA ---------------------------------------------------------------
+
+
+def _mixed_sources_df(n=300, seed=0):
+    rng = np.random.default_rng(seed)
+    s1 = np.sin(np.linspace(0, 20, n))
+    s2 = rng.uniform(-1, 1, n)
+    mix = np.c_[s1 + 0.3 * s2, 0.5 * s1 - s2, 0.2 * s1 + 0.8 * s2]
+    return pd.DataFrame(mix, columns=["a", "b", "c"])
+
+
+def test_ica_sources_and_mixing_shapes():
+    out = S.ICA(params=S.ICAParams(n_components=2, random_state=0)).run(
+        df=_mixed_sources_df()
+    )
+    assert list(out["sources"].columns) == ["IC1", "IC2"]
+    assert len(out["sources"]) == 300
+    assert list(out["mixing"].columns) == ["variable", "IC1", "IC2"]
+    assert list(out["mixing"]["variable"]) == ["a", "b", "c"]
+
+
+def test_ica_needs_at_least_two_numeric_columns():
+    with pytest.raises(ValueError, match="at least 2"):
+        S.ICA(params=S.ICAParams()).run(df=pd.DataFrame({"a": [1.0, 2, 3], "lbl": list("xyz")}))
+
+
+# -- t-SNE ---------------------------------------------------------------
+
+
+def test_tsne_embedding_shape_and_columns():
+    out = S.TSNE(
+        params=S.TSNEParams(n_components=2, perplexity=10, random_state=0)
+    ).run(df=_mixed_sources_df(n=100))["df"]
+    assert list(out.columns) == ["tsne_1", "tsne_2"]
+    assert len(out) == 100
+
+
+def test_tsne_learning_rate_auto_and_numeric_both_work():
+    df = _mixed_sources_df(n=60)
+    out_auto = S.TSNE(
+        params=S.TSNEParams(perplexity=10, learning_rate="auto", random_state=0)
+    ).run(df=df)["df"]
+    out_fixed = S.TSNE(
+        params=S.TSNEParams(perplexity=10, learning_rate="200", random_state=0)
+    ).run(df=df)["df"]
+    assert len(out_auto) == len(out_fixed) == 60
+
+
+def test_tsne_needs_at_least_two_numeric_columns():
+    with pytest.raises(ValueError, match="at least 2"):
+        S.TSNE(params=S.TSNEParams()).run(df=pd.DataFrame({"a": [1.0, 2, 3], "lbl": list("xyz")}))
 
 
 # -- ARIMA / AutoARIMA ------------------------------------------------
@@ -317,5 +373,102 @@ def test_all_statistics_nodes_are_in_the_statistics_category():
         nt for nt, cls in NodeRegistry.all().items() if cls.category == "statistics"
     }
     assert "regression" in stat_nodes
-    assert {"pca", "arima", "auto_arima"} <= stat_nodes
-    assert len(stat_nodes) >= 14
+    assert {"pca", "ica", "tsne", "arima", "auto_arima", "var", "var_test"} <= stat_nodes
+    assert len(stat_nodes) >= 16
+
+
+# --------------------------------------------------------------------------
+# VAR / VECM + var_test
+# --------------------------------------------------------------------------
+
+
+def _var_frame(n: int = 160, seed: int = 7) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    e = rng.normal(size=(n, 3))
+    y = np.zeros((n, 3))
+    for t in range(1, n):
+        y[t, 0] = 0.4 * y[t - 1, 0] + 0.25 * y[t - 1, 1] + e[t, 0]
+        y[t, 1] = -0.3 * y[t - 1, 0] + 0.35 * y[t - 1, 1] + e[t, 1]
+        y[t, 2] = 0.2 * y[t - 1, 1] + 0.5 * y[t - 1, 2] + e[t, 2]
+    return pd.DataFrame(
+        {
+            "gdp": y[:, 0], "cpi": y[:, 1], "rate": y[:, 2],
+            "t": pd.date_range("2000-01-01", periods=n, freq="MS"),
+        }
+    )
+
+
+@pytest.mark.parametrize("method", ["var", "vecm"])
+def test_var_outputs_coeffs_residuals_forecast_and_model(method):
+    df = _var_frame()
+    out = S.Var(
+        params=S.VarParams(
+            method=method, datetime_column="t",
+            variables=["gdp", "cpi", "rate"], lags=2, forecast_periods=6,
+        )
+    ).run(df=df)
+
+    assert set(out) == {"coeffs", "residuals", "forecast", "model"}
+    assert {"equation", "term", "coef", "pvalue"} <= set(out["coeffs"].columns)
+    assert list(out["residuals"].columns[1:]) == ["gdp", "cpi", "rate"]
+    assert set(out["forecast"]["variable"]) == {"gdp", "cpi", "rate"}
+    assert out["forecast"]["step"].max() == 6
+    assert out["model"].ruyso_names == ["gdp", "cpi", "rate"]
+    assert out["model"].ruyso_method == method
+
+
+def test_var_needs_at_least_two_variables():
+    with pytest.raises(ValueError, match="at least two"):
+        S.Var(params=S.VarParams(variables=["gdp"])).run(df=_var_frame())
+
+
+@pytest.mark.parametrize("method", ["var", "vecm"])
+def test_var_optimize_lag_picks_an_order_within_the_max(method):
+    df = _var_frame()
+    fixed = S.Var(
+        params=S.VarParams(method=method, variables=["gdp", "cpi", "rate"], lags=6)
+    ).run(df=df)["model"]
+    assert fixed.ruyso_selected_lag == 6
+
+    opt = S.Var(
+        params=S.VarParams(
+            method=method, variables=["gdp", "cpi", "rate"],
+            lags=6, optimize_lag=True, ic="bic",
+        )
+    ).run(df=df)["model"]
+    assert 0 <= opt.ruyso_selected_lag <= 6
+    assert opt.ruyso_selected_lag < 6  # the DGP is order 1, bic should trim it
+
+
+def test_var_forecast_periods_are_stashed_on_the_model():
+    model = S.Var(
+        params=S.VarParams(variables=["gdp", "cpi"], lags=1, forecast_periods=13)
+    ).run(df=_var_frame())["model"]
+    assert model.ruyso_forecast_periods == 13
+
+
+@pytest.mark.parametrize(
+    "test", ["granger_causality", "instantaneous_causality", "normality", "whiteness"]
+)
+def test_var_test_runs_every_diagnostic(test):
+    df = _var_frame()
+    model = S.Var(
+        params=S.VarParams(variables=["gdp", "cpi", "rate"], lags=2)
+    ).run(df=df)["model"]
+
+    res = S.VarTest(
+        params=S.VarTestParams(test=test, causing=["cpi"], caused=["gdp"])
+    ).run(model=model)["df"]
+
+    assert res["test"].iloc[0] == test
+    assert 0.0 <= res["pvalue"].iloc[0] <= 1.0
+    assert res["conclusion"].iloc[0] in ("reject H_0", "fail to reject H_0")
+
+
+def test_var_test_works_on_a_vecm_model():
+    df = _var_frame()
+    model = S.Var(
+        params=S.VarParams(method="vecm", variables=["gdp", "cpi", "rate"], lags=1)
+    ).run(df=df)["model"]
+    res = S.VarTest(params=S.VarTestParams(test="whiteness")).run(model=model)["df"]
+    assert 0.0 <= res["pvalue"].iloc[0] <= 1.0

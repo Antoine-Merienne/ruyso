@@ -465,6 +465,103 @@ def test_box_plot_rejects_a_continuous_colour_by_column():
         ).run(df=_cat_df())
 
 
+def test_box_plot_alpha_is_applied_to_the_box_fill():
+    ax = BoxPlot(
+        params=BoxPlotParams(category_column="team", value_column="score", alpha=0.4)
+    ).run(df=_cat_df())["figure"].axes[0]
+    assert any(round(p.get_alpha(), 2) == 0.4 for p in ax.patches)
+
+
+def _flier_lines(ax):
+    """Flier markers are Line2D with a marker but no connecting segment
+    (whisker/cap/median lines have no marker: '' or 'None')."""
+    return [l for l in ax.lines if l.get_marker() not in ("", "None", None)]
+
+
+def test_box_plot_show_outliers_toggles_showfliers():
+    df = pd.DataFrame({"team": ["a"] * 10, "score": [1, 2, 3, 4, 5, 6, 7, 8, 9, 100]})
+    with_fliers = BoxPlot(
+        params=BoxPlotParams(category_column="team", value_column="score")
+    ).run(df=df)["figure"].axes[0]
+    without_fliers = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", show_outliers=False
+        )
+    ).run(df=df)["figure"].axes[0]
+    assert len(_flier_lines(with_fliers)) == 1  # the 100 outlier
+    assert len(_flier_lines(without_fliers)) == 0
+
+
+def test_box_plot_std_dev_draws_a_custom_mean_pm_std_box():
+    ax = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", box_stat="std_dev", std_k=1.0
+        )
+    ).run(df=_cat_df())["figure"].axes[0]
+    a_scores = [1.0, 3.0, 5.0, 7.0]  # team "a" rows in _cat_df
+    import numpy as np
+
+    mean, std = np.mean(a_scores), np.std(a_scores, ddof=1)
+    heights = sorted(round(p.get_height(), 4) for p in ax.patches)
+    assert round(2 * std, 4) in heights
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["a", "b"]
+
+
+def test_box_plot_ci_box_matches_the_t_based_confidence_interval():
+    import numpy as np
+    from scipy import stats as spstats
+
+    ax = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", box_stat="ci",
+            confidence_level=0.95,
+        )
+    ).run(df=_cat_df())["figure"].axes[0]
+    a_scores = np.array([1.0, 3.0, 5.0, 7.0])  # team "a" rows in _cat_df
+    sem = np.std(a_scores, ddof=1) / np.sqrt(a_scores.size)
+    t = spstats.t.ppf(0.975, df=a_scores.size - 1)
+    expected_height = 2 * t * sem
+    heights = [round(p.get_height(), 3) for p in ax.patches]
+    assert round(expected_height, 3) in heights
+
+    # a higher std_k widens a std_dev box proportionally
+    ax_k1 = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", box_stat="std_dev", std_k=1.0
+        )
+    ).run(df=_cat_df())["figure"].axes[0]
+    ax_k2 = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", box_stat="std_dev", std_k=2.0
+        )
+    ).run(df=_cat_df())["figure"].axes[0]
+    h_k1 = min(p.get_height() for p in ax_k1.patches)
+    h_k2 = min(p.get_height() for p in ax_k2.patches)
+    assert round(h_k2 / h_k1, 3) == 2.0
+
+
+def test_box_plot_std_dev_with_hue_dodges_and_draws_a_legend():
+    ax = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", box_stat="std_dev",
+            color_by="region",
+        )
+    ).run(df=_cat_df())["figure"].axes[0]
+    assert ax.get_legend() is not None
+    assert len(ax.patches) == 4  # 2 teams x 2 regions
+
+
+def test_box_plot_box_stat_only_applies_to_the_box_kind():
+    # violin/boxen/swarm ignore box_stat -- still render via seaborn
+    fig = BoxPlot(
+        params=BoxPlotParams(
+            category_column="team", value_column="score", kind="violin", box_stat="std_dev"
+        )
+    ).run(df=_cat_df())["figure"]
+    assert isinstance(fig, Figure)
+    assert len(fig.axes[0].collections) > 0  # seaborn violin path, not the custom box
+
+
 # -- histogram ------------------------------------------------------
 
 
@@ -902,3 +999,276 @@ def test_density_2d_needs_at_least_three_rows():
 def test_density_2d_unknown_column_raises():
     with pytest.raises(ValueError, match="not in the input data"):
         Density2D(params=Density2DParams(x="a", y="nope")).run(df=_xy_df())
+
+
+# -- PCA-specific plots: pca_scree_plot, pca_corr_circle -----------------
+
+from ruyso_app.nodes.statistics import PCA, PCAParams  # noqa: E402
+from ruyso_app.nodes.viz import (  # noqa: E402
+    PCACorrCirclePlot,
+    PCACorrCirclePlotParams,
+    PCAScreePlot,
+    PCAScreePlotParams,
+)
+
+
+def _pca_outputs():
+    rng = np.random.default_rng(0)
+    n = 150
+    a = rng.normal(size=n)
+    b = a * 0.8 + rng.normal(scale=0.3, size=n)
+    c = rng.normal(size=n)
+    df = pd.DataFrame({"a": a, "b": b, "c": c})
+    return PCA(params=PCAParams()).run(df=df)
+
+
+def test_pca_scree_plot_bars_match_variance_ratio():
+    pca_out = _pca_outputs()
+    ax = PCAScreePlot(params=PCAScreePlotParams()).run(variance=pca_out["variance"])[
+        "figure"
+    ].axes[0]
+    heights = sorted(round(p.get_height(), 3) for p in ax.patches)
+    expected = sorted(round(v * 100, 3) for v in pca_out["variance"]["explained_variance_ratio"])
+    assert heights == expected
+    assert [t.get_text() for t in ax.get_xticklabels()] == list(pca_out["variance"]["component"])
+
+
+def test_pca_scree_plot_cumulative_line_is_a_second_axis():
+    pca_out = _pca_outputs()
+    fig = PCAScreePlot(params=PCAScreePlotParams(show_cumulative=True)).run(
+        variance=pca_out["variance"]
+    )["figure"]
+    assert len(fig.axes) == 2  # bars + twinx cumulative line
+
+
+def test_pca_scree_plot_requires_the_pca_variance_shape():
+    with pytest.raises(ValueError, match="variance"):
+        PCAScreePlot(params=PCAScreePlotParams()).run(variance=pd.DataFrame({"x": [1]}))
+
+
+def test_pca_corr_circle_vectors_are_bounded_in_the_unit_circle():
+    pca_out = _pca_outputs()
+    ax = PCACorrCirclePlot(params=PCACorrCirclePlotParams(x_component="PC1", y_component="PC2")).run(
+        loadings=pca_out["loadings"], variance=pca_out["variance"]
+    )["figure"].axes[0]
+    # 3 variables -> 3 arrow annotations
+    from matplotlib.text import Annotation
+
+    arrows = [a for a in ax.texts if isinstance(a, Annotation)]
+    assert len(arrows) == 3
+    for arrow in arrows:
+        vx, vy = arrow.xy
+        # bounded by the unit circle, up to normal floating-point /
+        # finite-sample estimation slop (ddof, SVD rounding).
+        assert vx**2 + vy**2 <= 1.01
+
+
+def test_pca_corr_circle_correlated_variables_point_along_the_same_axis():
+    # "a" and "b" are highly correlated by construction (see _pca_outputs) --
+    # both should load heavily onto PC1 (x-axis), near the circle boundary.
+    pca_out = _pca_outputs()
+    loadings = pca_out["loadings"].set_index("variable")
+    variance = dict(zip(pca_out["variance"]["component"], pca_out["variance"]["explained_variance"]))
+    scale = variance["PC1"] ** 0.5
+    corr_a = loadings.loc["a", "PC1"] * scale
+    corr_b = loadings.loc["b", "PC1"] * scale
+    assert abs(corr_a) > 0.9 and abs(corr_b) > 0.9
+
+
+def test_pca_corr_circle_requires_matching_component_names():
+    pca_out = _pca_outputs()
+    with pytest.raises(ValueError, match="not in the loadings table"):
+        PCACorrCirclePlot(params=PCACorrCirclePlotParams(x_component="PC1", y_component="PC99")).run(
+            loadings=pca_out["loadings"], variance=pca_out["variance"]
+        )
+
+
+def test_pca_corr_circle_requires_the_pca_output_shapes():
+    with pytest.raises(ValueError, match="loadings"):
+        PCACorrCirclePlot(params=PCACorrCirclePlotParams()).run(
+            loadings=pd.DataFrame({"x": [1]}), variance=pd.DataFrame({"component": ["PC1"], "explained_variance": [1.0]})
+        )
+
+
+# --------------------------------------------------------------------------
+# Time-series plots + VAR / VECM diagnostics
+# --------------------------------------------------------------------------
+
+import matplotlib.pyplot as _plt  # noqa: E402
+import numpy as np  # noqa: E402
+
+from ruyso_app.nodes.statistics import Var, VarParams  # noqa: E402
+from ruyso_app.nodes.viz import (  # noqa: E402
+    IrfPlot,
+    IrfPlotParams,
+    MultivariateTimeSeriesPlot,
+    MultivariateTimeSeriesPlotParams,
+    TimeSeriesPlot,
+    TimeSeriesPlotParams,
+    VarAcorrPlot,
+    VarAcorrPlotParams,
+    VarForecastPlot,
+    VarForecastPlotParams,
+)
+
+
+def _ts_frame(n=140, seed=3):
+    rng = np.random.default_rng(seed)
+    e = rng.normal(size=(n, 3))
+    y = np.zeros((n, 3))
+    for t in range(1, n):
+        y[t, 0] = 0.4 * y[t - 1, 0] + 0.2 * y[t - 1, 1] + e[t, 0]
+        y[t, 1] = -0.3 * y[t - 1, 0] + 0.35 * y[t - 1, 1] + e[t, 1]
+        y[t, 2] = 0.25 * y[t - 1, 1] + 0.45 * y[t - 1, 2] + e[t, 2]
+    return pd.DataFrame(
+        {
+            "gdp": y[:, 0], "cpi": y[:, 1], "rate": y[:, 2],
+            "t": pd.date_range("2005-01-01", periods=n, freq="MS"),
+            "region": np.where(np.arange(n) % 2 == 0, "north", "south"),
+        }
+    )
+
+
+def _assert_oo_figure(fig):
+    assert isinstance(fig, Figure)
+    assert fig not in [_plt.figure(k) for k in _plt.get_fignums()] if _plt.get_fignums() else True
+
+
+@pytest.mark.parametrize("mark", ["line", "line+markers", "markers", "bars"])
+def test_time_series_plot_mark_styles(mark):
+    fig = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(x_column="t", y_column="gdp", mark=mark, x_tick_freq="year")
+    ).run(df=_ts_frame())["figure"]
+    _assert_oo_figure(fig)
+
+
+@pytest.mark.parametrize("multiple", ["layer", "stack", "dodge"])
+def test_time_series_plot_grouped_bars(multiple):
+    fig = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="t", y_column="gdp", mark="bars", color_by="region", multiple=multiple
+        )
+    ).run(df=_ts_frame())["figure"]
+    assert fig.axes[0].get_legend() is not None
+
+
+def test_time_series_plot_datetime_x_axis_is_used():
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(x_column="t", y_column="cpi", x_tick_freq="quarter")
+    ).run(df=_ts_frame())["figure"].axes[0]
+    import matplotlib.dates as mdates
+
+    assert isinstance(ax.xaxis.get_major_locator(), mdates.MonthLocator)
+
+
+def test_time_series_plot_fixed_marker_shape_and_line_style():
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="t", y_column="gdp", mark="markers", marker_shape="diamond"
+        )
+    ).run(df=_ts_frame())["figure"].axes[0]
+    assert ax.lines[0].get_marker() == "D"
+
+    ax2 = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="t", y_column="gdp", mark="line", line_style="dashed"
+        )
+    ).run(df=_ts_frame())["figure"].axes[0]
+    assert ax2.lines[0].get_linestyle() == "--"
+
+
+def test_time_series_plot_style_by_alone_varies_shape_not_colour():
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="t", y_column="gdp", mark="line+markers",
+            style_by="region", shape_map="geometric",
+        )
+    ).run(df=_ts_frame())["figure"].axes[0]
+    markers = {ln.get_marker() for ln in ax.lines}
+    colours = {str(ln.get_color()) for ln in ax.lines}
+    assert len(markers) == 2  # region has two levels -> two shapes
+    assert len(colours) == 1  # ... but a single colour
+
+
+def test_time_series_plot_color_by_and_style_by_same_column():
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="t", y_column="gdp", mark="markers",
+            color_by="region", style_by="region",
+        )
+    ).run(df=_ts_frame())["figure"].axes[0]
+    assert len({ln.get_marker() for ln in ax.lines}) == 2
+    assert len({str(ln.get_color()) for ln in ax.lines}) == 2
+
+
+def test_time_series_plot_rejects_different_color_and_style_columns():
+    df = _ts_frame()
+    df["grp2"] = np.where(np.arange(len(df)) % 3 == 0, "p", "q")
+    with pytest.raises(ValueError, match="same"):
+        TimeSeriesPlot(
+            params=TimeSeriesPlotParams(
+                x_column="t", y_column="gdp", color_by="region", style_by="grp2"
+            )
+        ).run(df=df)
+
+
+@pytest.mark.parametrize("layout", ["overlay", "grid"])
+def test_multivariate_timeseries_plot_layouts(layout):
+    fig = MultivariateTimeSeriesPlot(
+        params=MultivariateTimeSeriesPlotParams(
+            datetime_column="t", variables=["gdp", "cpi", "rate"], layout=layout
+        )
+    ).run(df=_ts_frame())["figure"]
+    _assert_oo_figure(fig)
+    assert len(fig.axes) == (3 if layout == "grid" else 1)
+
+
+@pytest.mark.parametrize("method", ["var", "vecm"])
+def test_var_forecast_acorr_and_irf_plots(method):
+    df = _ts_frame()
+    model = Var(
+        params=VarParams(
+            method=method, datetime_column="t",
+            variables=["gdp", "cpi", "rate"], lags=2, forecast_periods=8,
+        )
+    ).run(df=df)["model"]
+
+    fc = VarForecastPlot(
+        params=VarForecastPlotParams(variables=["gdp", "rate"])
+    ).run(model=model)["figure"]
+    _assert_oo_figure(fc)
+    assert len(fc.axes) == 2  # one panel per chosen variable
+    # forecast horizon comes from the VAR node, not a plot param
+    assert len(fc.axes[0].lines[1].get_xdata()) == 8
+
+    ac = VarAcorrPlot(params=VarAcorrPlotParams(max_lag=6)).run(model=model)["figure"]
+    assert len(ac.axes) == 9  # 3x3 residual (cross-)correlation grid
+
+    irf = IrfPlot(
+        params=IrfPlotParams(periods=6, orthogonalized=True, shocks=["cpi"])
+    ).run(model=model)["figure"]
+    assert len(irf.axes) == 3  # one shock column, three responses
+
+
+@pytest.mark.parametrize("ci_style", ["band", "lines", "errorbar", "none"])
+def test_var_forecast_and_irf_ci_styles_and_colours(ci_style):
+    df = _ts_frame()
+    model = Var(
+        params=VarParams(variables=["gdp", "cpi", "rate"], lags=2)
+    ).run(df=df)["model"]
+
+    VarForecastPlot(
+        params=VarForecastPlotParams(
+            ci_style=ci_style, history_color="teal", forecast_color="crimson"
+        )
+    ).run(model=model)["figure"]
+    IrfPlot(
+        params=IrfPlotParams(
+            periods=6, ci_style=ci_style, line_color="purple", responses=["gdp"]
+        )
+    ).run(model=model)["figure"]
+
+
+def test_var_plots_reject_a_non_var_model():
+    with pytest.raises(ValueError, match="var"):
+        IrfPlot(params=IrfPlotParams()).run(model=object())
