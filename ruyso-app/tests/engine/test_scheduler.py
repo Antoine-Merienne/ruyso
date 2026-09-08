@@ -79,8 +79,9 @@ def test_scheduler_runs_full_pipeline_and_wires_outputs_correctly(
 ):
     graph = _regression_graph(sample_csv)
 
-    outputs = no_cache_scheduler.run(graph)
+    outputs, errors = no_cache_scheduler.run(graph)
 
+    assert errors == {}
     assert set(outputs.keys()) == {"load", "clean", "split", "fit"}
     model = outputs["fit"]["model"]
     # target = 2*x + 1 exactly -> coefficient ~2, intercept ~1.
@@ -137,6 +138,44 @@ def test_progress_callback_reports_each_node(sample_csv, no_cache_scheduler):
     no_cache_scheduler.run(graph, progress_callback=lambda d, t: seen.append((d, t)))
 
     assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
+def test_run_node_callback_streams_running_then_ok(sample_csv, no_cache_scheduler):
+    graph = _regression_graph(sample_csv)
+    phases: list[tuple[str, str]] = []
+
+    no_cache_scheduler.run(graph, node_callback=lambda n, p: phases.append((n, p)))
+
+    for node_id in ("load", "clean", "split", "fit"):
+        assert (node_id, "running") in phases
+        assert (node_id, "ok") in phases
+
+
+def test_run_collects_a_runtime_error_and_blocks_downstream(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": "/no/such/file.csv"})
+    )
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
+    graph.add_connection(
+        Connection(source_node="load", source_port="df", target_node="clean", target_port="df")
+    )
+
+    phases: list[tuple[str, str]] = []
+    outputs, errors = no_cache_scheduler.run(
+        graph, node_callback=lambda n, p: phases.append((n, p))
+    )
+
+    assert "load" in errors and outputs == {}
+    assert ("load", "running") in phases and ("load", "error") in phases
+    assert ("clean", "blocked") in phases  # downstream of the failure, never run
+
+
+def test_run_still_raises_for_a_structurally_invalid_graph(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))  # required "df" unwired
+    with pytest.raises(Exception):
+        no_cache_scheduler.run(graph)
 
 
 def test_run_available_runs_a_lone_loader(sample_csv, no_cache_scheduler):

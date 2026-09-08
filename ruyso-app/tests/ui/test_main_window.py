@@ -104,6 +104,34 @@ def test_delete_selected_nodes_removes_them(window):
     assert window._canvas.graph.all_nodes() == []
 
 
+def test_copy_paste_selected_node_preserves_params(window):
+    graph = window._canvas.graph
+    window._on_pick_macro_type("loading")
+    original = graph.all_nodes()[0]
+    original.set_property("filepath", "/tmp/data.csv")
+    window._select_only(original)
+
+    window._on_copy_nodes()
+    window._on_paste_nodes()
+
+    nodes = graph.all_nodes()
+    assert len(nodes) == 2
+    pasted = next(n for n in nodes if n is not original)
+    assert pasted.get_property("filepath") == "/tmp/data.csv"
+    # the fresh copy is the one now shown in the Options panel
+    assert window._options.current_node() is pasted
+
+
+def test_duplicate_selected_node_adds_a_copy(window):
+    graph = window._canvas.graph
+    window._on_pick_macro_type("loading")
+    window._select_only(graph.all_nodes()[0])
+
+    window._on_duplicate_nodes()
+
+    assert len(graph.all_nodes()) == 2
+
+
 def test_pipeline_menu_is_always_enabled_and_run_has_f5(window):
     pipeline_menu = next(
         a.menu() for a in window.menuBar().actions() if a.text() == "Pipeline"
@@ -174,6 +202,102 @@ def test_tab_band_run_button_runs_the_pipeline_and_drives_progress(window, tmp_p
     assert window._tab_bar.progress.property("state") == "success"
     assert window._tab_bar.progress.percent_text() == "100%"
     assert window._tab_bar.run_button.isEnabled()  # re-enabled after
+
+
+def test_run_progress_bar_is_visible_before_any_run(window):
+    assert not window._tab_bar.progress.isHidden()
+    assert window._tab_bar.progress.property("state") == "idle"
+
+
+def test_auto_pill_tracks_auto_run_state(window):
+    pill = window._tab_bar.auto_pill
+    assert pill.state() == "idle"  # nothing has auto-run yet
+
+    window._auto_run.started.emit()
+    assert pill.state() == "running"
+
+    window._on_auto_run_finished({}, {})
+    assert pill.state() == "ok"
+
+    window._on_auto_run_finished({}, {"some_node": "boom"})
+    assert pill.state() == "error"
+
+    # a manual run greys it out, then it returns to the last auto state
+    window._tab_bar.run_button.setEnabled(False)
+    window._refresh_auto_pill()
+    assert pill.state() == "idle"
+    window._tab_bar.run_button.setEnabled(True)
+    window._on_run_finished()
+    assert pill.state() == "error"
+
+
+def test_view_menu_auto_run_toggle_gates_scheduling(window):
+    action = window._auto_run_action
+    assert action.isCheckable() and action.isChecked()
+
+    action.setChecked(False)  # emits toggled(False)
+    assert not window._auto_run.is_user_enabled()
+    assert window._tab_bar.auto_pill.state() == "idle"
+
+    action.setChecked(True)
+    assert window._auto_run.is_user_enabled()
+
+
+def test_colormaps_menu_has_designer_and_manager(window):
+    menu = next(m.menu() for m in window.menuBar().actions() if m.text() == "Colormaps")
+    labels = {a.text() for a in menu.actions()}
+    assert labels == {"Colormap Designer...", "Colormap Manager..."}
+
+
+def test_colormaps_changed_refreshes_open_colormap_dropdowns(window):
+    from ruyso_app.engine import colormaps as cm
+
+    window._on_pick_macro_type("grapher")
+    node = window._graph.all_nodes()[0]
+    from ruyso_app.ui.node_editing import change_node_micro_type
+
+    change_node_micro_type(window._graph, node, "confusion_matrix_plot")
+    window._select_only(window._graph.all_nodes()[0])
+    combo = window._options._field_widgets["colormap"]
+    assert "Ocean" not in [combo.itemText(i) for i in range(combo.count())]
+
+    cm.upsert("Ocean", {"kind": "continuous", "stops": [[0.0, "#012"], [1.0, "#9ef"]]})
+    try:
+        window._on_colormaps_changed()
+        assert "Ocean" in [combo.itemText(i) for i in range(combo.count())]
+    finally:
+        cm.save_store({"custom": {}, "lists": {}})
+        cm._last_signature = None
+
+
+def test_new_node_starts_with_a_pending_status_dot(window):
+    window._on_pick_macro_type("loading")
+    node = window._graph.all_nodes()[0]
+    assert window._node_status.status_of(node.name()) == "pending"
+
+
+def test_streamed_node_status_updates_the_controller(window):
+    window._on_pick_macro_type("loading")
+    name = window._graph.all_nodes()[0].name()
+
+    window._auto_run.node_status.emit(name, "running")
+    assert window._node_status.status_of(name) == "running"
+    window._auto_run.node_status.emit(name, "error")
+    assert window._node_status.status_of(name) == "error"
+
+
+def test_clicking_auto_pill_toggles_auto_run_and_stays_in_sync_with_the_menu(window):
+    pill = window._tab_bar.auto_pill
+    action = window._auto_run_action
+    assert window._auto_run.is_user_enabled() and action.isChecked()
+
+    pill.clicked.emit()  # pause
+    assert not window._auto_run.is_user_enabled()
+    assert not action.isChecked()
+
+    pill.clicked.emit()  # resume
+    assert window._auto_run.is_user_enabled()
+    assert action.isChecked()
 
 
 def test_new_node_actions_have_cmd_p_chord_shortcuts(window):

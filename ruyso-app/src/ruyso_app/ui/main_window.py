@@ -52,6 +52,7 @@ from ruyso_app.ui.node_factory import (
 )
 from ruyso_app.ui.node_menu import install_new_node_menu
 from ruyso_app.ui.node_preview import NodePreviewOverlay, resolve_source_node
+from ruyso_app.ui.node_status import NodeStatusController
 from ruyso_app.ui.pipeline_page import PipelinePage
 from ruyso_app.ui.run_snapshot import modified_since_run, pipeline_signatures
 from ruyso_app.ui.tab_bar import TabBar
@@ -85,11 +86,15 @@ class MainWindow(QMainWindow):
 
         self._canvas = PipelineCanvas()
         self._graph = self._canvas.graph
+        self._node_status = NodeStatusController(self._graph)
         self._worker: PipelineExecutionWorker | None = None
         self._last_outputs: dict[str, dict] = {}
         # Node ids that raised in the most recent (auto-)run; drives the
         # Dashboard tab's "· modified" flag on figures that failed.
         self._last_run_errors: dict[str, str] = {}
+        # Whether a background auto-run has completed at least once
+        # (until then the "auto" pill stays grey, like the run bar).
+        self._auto_run_ran = False
         # Signatures of the pipeline as it was when last run successfully
         # (see ui.run_snapshot); drives the Table tab's "· modified" tags.
         self._run_snapshot: dict[str, str] = {}
@@ -138,6 +143,10 @@ class MainWindow(QMainWindow):
         # whenever the canvas changes, so results appear without Run.
         self._auto_run = AutoRunController(lambda: canvas_to_pipeline(self._graph), self)
         self._auto_run.finished.connect(self._on_auto_run_finished)
+        self._auto_run.started.connect(lambda: self._refresh_auto_pill(running=True))
+        # Per-node status dots: streamed from the auto-run worker.
+        self._auto_run.node_status.connect(self._node_status.set_status)
+        self._graph.node_created.connect(self._node_status.mark_new)
         for signal in (
             self._graph.node_created,
             self._graph.nodes_deleted,
@@ -154,6 +163,7 @@ class MainWindow(QMainWindow):
         )
 
         self._build_menus()
+        self._refresh_auto_pill()  # initial state + tooltip
         self._on_tab_changed(self._tab_bar.current_key())
 
         # Follow the OS light/dark setting live while mode is "system".
@@ -202,6 +212,20 @@ class MainWindow(QMainWindow):
         )
         self._delete_action.triggered.connect(self._on_delete_selected_nodes)
 
+        selected_menu.addSeparator()
+        copy_action = selected_menu.addAction("Copy")
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(self._on_copy_nodes)
+        cut_action = selected_menu.addAction("Cut")
+        cut_action.setShortcut(QKeySequence.Cut)
+        cut_action.triggered.connect(self._on_cut_nodes)
+        paste_action = selected_menu.addAction("Paste")
+        paste_action.setShortcut(QKeySequence.Paste)
+        paste_action.triggered.connect(self._on_paste_nodes)
+        duplicate_action = selected_menu.addAction("Duplicate")
+        duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
+        duplicate_action.triggered.connect(self._on_duplicate_nodes)
+
         # -- Dashboard menu (Dashboard tab only) ---------------------
         self._dashboard_menu = menu_bar.addMenu("Dashboard")
         self._dashboard_menu.addAction(
@@ -212,6 +236,11 @@ class MainWindow(QMainWindow):
         )
         self._dashboard_menu.addSeparator()
         self._dashboard_menu.addAction("Exporter...", self._on_export_dashboard)
+
+        # -- Colormaps menu (always) -------------------------------
+        colormaps_menu = menu_bar.addMenu("Colormaps")
+        colormaps_menu.addAction("Colormap Designer...", self._on_open_colormap_designer)
+        colormaps_menu.addAction("Colormap Manager...", self._on_open_colormap_manager)
 
         # -- View menu (always) --------------------------------------
         view_menu = menu_bar.addMenu("View")
@@ -227,12 +256,77 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, m=mode: self._set_theme_mode(m)
             )
 
+        view_menu.addSeparator()
+        self._auto_run_action = view_menu.addAction("Auto-run")
+        self._auto_run_action.setCheckable(True)
+        self._auto_run_action.setChecked(True)
+        self._auto_run_action.toggled.connect(self._on_toggle_auto_run)
+        # Clicking the tab-band "auto" chip is the same switch.
+        self._tab_bar.auto_pill.clicked.connect(self._auto_run_action.toggle)
+
     # -- tab / menu state ------------------------------------------------
 
     def _on_property_changed(self, *_args: object) -> None:
         """Schedule an auto-run for a param edit, unless it's a batched tick."""
         if not self._options.autorun_suppressed():
             self._auto_run.schedule()
+
+    # -- auto-run status ("auto" pill in the tab band) -----------------
+
+    def _on_toggle_auto_run(self, enabled: bool) -> None:
+        """View > Auto-run / the "auto" chip: persist the choice. Turning
+        it off interrupts any in-flight auto-run; turning it back on
+        re-runs to catch up on changes missed while it was off."""
+        self._auto_run.set_user_enabled(enabled)
+        if enabled:
+            self._auto_run.schedule()
+        else:
+            self._auto_run.interrupt()
+        self._refresh_auto_pill()
+
+    def _refresh_auto_pill(self, running: bool = False) -> None:
+        """Set the tab band's 'auto' dot from the current auto-run state."""
+        pill = self._tab_bar.auto_pill
+        pill.setToolTip(
+            "Auto-run is on — click to pause"
+            if self._auto_run.is_user_enabled()
+            else "Auto-run is paused — click to resume"
+        )
+        manual_run_in_progress = not self._tab_bar.run_button.isEnabled()
+        if not self._auto_run.is_user_enabled() or manual_run_in_progress:
+            pill.set_state("idle")
+        elif running:
+            pill.set_state("running")
+        elif not self._auto_run_ran:
+            pill.set_state("idle")
+        else:
+            pill.set_state("error" if self._last_run_errors else "ok")
+
+    # -- Colormaps menu ------------------------------------------------
+
+    def _on_open_colormap_designer(self) -> None:
+        from ruyso_app.ui.colormap_designer import ColormapDesigner
+
+        dialog = ColormapDesigner(self)
+        dialog.changed.connect(self._on_colormaps_changed)
+        dialog.exec()
+
+    def _on_open_colormap_manager(self) -> None:
+        from ruyso_app.ui.colormap_manager import ColormapManager
+
+        dialog = ColormapManager(self)
+        dialog.changed.connect(self._on_colormaps_changed)
+        dialog.exec()
+
+    def _on_colormaps_changed(self) -> None:
+        """A custom colormap / the dropdown selection changed -- repaint
+        swatches and repopulate every open colormap dropdown."""
+        from ruyso_app.ui import swatches
+
+        swatches.clear_cache()
+        self._options.refresh_colormap_choices()
+        self._dashboard_page.options_panel.refresh_colormap_choices()
+        self._auto_run.schedule()  # re-render figures that use the changed map
 
     def _on_tab_changed(self, key: str) -> None:
         self._options.flush_recompute()  # commit any pending tickbox edits
@@ -330,6 +424,55 @@ class MainWindow(QMainWindow):
         self._graph.delete_nodes([node])
         self._options.clear()
 
+    # -- copy / cut / paste / duplicate (Pipeline tab) -----------------
+
+    def _own_nodes(self, nodes: list[BaseNode]) -> list[BaseNode]:
+        """Keep only nodes built by ``node_factory`` (drop NodeGraphQt built-ins)."""
+        return [n for n in nodes if hasattr(type(n), "CORE_NODE_TYPE")]
+
+    def _on_copy_nodes(self) -> None:
+        selected = self._own_nodes(self._graph.selected_nodes())
+        if not selected:
+            self.statusBar().showMessage("No node selected to copy.", 4000)
+            return
+        self._graph.copy_nodes(selected)
+        self.statusBar().showMessage(f"Copied {len(selected)} node(s).", 4000)
+
+    def _on_cut_nodes(self) -> None:
+        selected = self._own_nodes(self._graph.selected_nodes())
+        if not selected:
+            self.statusBar().showMessage("No node selected to cut.", 4000)
+            return
+        self._graph.cut_nodes(selected)
+        self._options.clear()
+        self._auto_run.schedule()
+        self.statusBar().showMessage(f"Cut {len(selected)} node(s).", 4000)
+
+    def _on_paste_nodes(self) -> None:
+        pasted = self._own_nodes(list(self._graph.paste_nodes() or []))
+        if not pasted:
+            self.statusBar().showMessage("Nothing on the clipboard to paste.", 4000)
+            return
+        if len(pasted) == 1:
+            self._select_only(pasted[0])
+        else:
+            self._on_selection_changed()
+        self._auto_run.schedule()
+        self.statusBar().showMessage(f"Pasted {len(pasted)} node(s).", 4000)
+
+    def _on_duplicate_nodes(self) -> None:
+        selected = self._own_nodes(self._graph.selected_nodes())
+        if not selected:
+            self.statusBar().showMessage("No node selected to duplicate.", 4000)
+            return
+        duplicated = self._own_nodes(list(self._graph.duplicate_nodes(selected) or []))
+        if len(duplicated) == 1:
+            self._select_only(duplicated[0])
+        elif not duplicated:
+            return
+        self._auto_run.schedule()
+        self.statusBar().showMessage(f"Duplicated {len(duplicated)} node(s).", 4000)
+
     def _on_ctx_add_to_dashboard(self, _graph: object, node: BaseNode) -> None:
         """Drop an ``export_to_dashboard`` node wired to this node's figure."""
         outputs = node.outputs()
@@ -414,6 +557,7 @@ class MainWindow(QMainWindow):
         self._pipeline_page.apply_theme()
         self._table_page.apply_theme()
         self._dashboard_page.apply_theme()
+        self._node_status.refresh_theme()
 
     # -- Pipeline menu actions -----------------------------------------
 
@@ -471,15 +615,18 @@ class MainWindow(QMainWindow):
         self._run_action.setEnabled(False)
         self._tab_bar.run_button.setEnabled(False)
         self._auto_run.set_enabled(False)  # don't compete with the real run
+        self._refresh_auto_pill()  # -> grey while the manual run is on
         self.statusBar().showMessage("Running pipeline...")
         self._pipeline_page.clear_log()
         self._tab_bar.progress.start(len(pipeline.nodes))
         # Remember exactly what is being run; promoted to _run_snapshot
         # only if this run succeeds.
         self._pending_snapshot = pipeline_signatures(pipeline)
+        self._node_status.reset("pending")  # clear stale dots before streaming
 
         self._worker = PipelineExecutionWorker(pipeline)
         self._worker.progress.connect(self._tab_bar.progress.set_progress)
+        self._worker.node_status.connect(self._node_status.set_status)
         self._worker.succeeded.connect(self._on_run_succeeded)
         self._worker.failed.connect(self._on_run_failed)
         self._worker.finished.connect(self._on_run_finished)
@@ -489,25 +636,47 @@ class MainWindow(QMainWindow):
         self._run_action.setEnabled(True)
         self._tab_bar.run_button.setEnabled(True)
         self._auto_run.set_enabled(True)
+        self._refresh_auto_pill()  # back to the last auto-run's state
 
     # -- execution callbacks (GUI thread, via Qt signals) ---------------
 
-    def _on_run_succeeded(self, outputs: dict[str, dict]) -> None:
-        self.statusBar().showMessage("Pipeline finished.", 5000)
-        self._tab_bar.progress.finish_success()
+    def _on_run_succeeded(
+        self, outputs: dict[str, dict], errors: dict[str, str] | None = None
+    ) -> None:
+        """A manual run finished. ``errors`` is the per-node failure map
+        (empty on a fully clean run); the nodes that ran are in
+        ``outputs`` regardless, so their tables / figures still show."""
+        errors = dict(errors or {})
         for node_id, node_outputs in outputs.items():
             for port_name, value in node_outputs.items():
                 self._pipeline_page.append_log(f"[{node_id}] {port_name} = {value!r}")
+        for node_id, message in errors.items():
+            self._pipeline_page.append_log(f"ERROR [{node_id}]: {message}")
+            # dot is already red from the streamed phase; enrich the tooltip
+            self._node_status.set_status(node_id, "error", message)
+
         self._last_outputs = outputs
-        self._last_run_errors = {}
-        self._run_snapshot = self._pending_snapshot
+        self._last_run_errors = errors
         self._preview_overlay.set_run_outputs(outputs)
         self._dashboard_page.sync_figures(
-            self._graph, outputs, self._table_modified_set(), set()
+            self._graph, outputs, self._table_modified_set(), set(errors)
         )
         self._table_page.refresh(self._graph, outputs, self._table_modified_set())
 
+        if errors:
+            self.statusBar().showMessage("Pipeline finished with errors.", 5000)
+            self._tab_bar.progress.finish_error()
+            self._show_error(
+                "Pipeline finished with errors",
+                "\n".join(f"{node_id}: {msg}" for node_id, msg in errors.items()),
+            )
+        else:
+            self.statusBar().showMessage("Pipeline finished.", 5000)
+            self._tab_bar.progress.finish_success()
+            self._run_snapshot = self._pending_snapshot
+
     def _on_run_failed(self, message: str) -> None:
+        """The run could not start (structural validation failed)."""
         self.statusBar().showMessage("Pipeline failed.", 5000)
         self._tab_bar.progress.finish_error()
         self._pipeline_page.append_log(f"ERROR: {message}")
@@ -516,6 +685,11 @@ class MainWindow(QMainWindow):
     def _on_auto_run_finished(self, outputs: dict[str, dict], errors: dict) -> None:
         """Merge a background auto-run's results without any dialog/log noise."""
         self._last_run_errors = dict(errors or {})
+        self._auto_run_ran = True
+        self._refresh_auto_pill()  # -> green (clean) or red (raised)
+        # the dot is already red from the streamed phase; add the message
+        for node_id, message in self._last_run_errors.items():
+            self._node_status.set_status(node_id, "error", message)
         if not outputs:
             # Nothing new computed, but the error set may have changed --
             # refresh the dashboard's "· modified" flags and bail.

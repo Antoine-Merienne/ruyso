@@ -1152,7 +1152,50 @@ def _fit_sarimax(
         return SARIMAX(
             x, order=order, seasonal_order=seasonal_order, trend=trend,
             enforce_stationarity=False, enforce_invertibility=False,
+            concentrate_scale=True,  # ~25% faster, statistically equivalent
         ).fit(disp=False)
+
+
+def _residuals_table(res: Any) -> pd.DataFrame:
+    """One-step-ahead residuals of a fitted (SAR)IMA model."""
+    resid = np.asarray(res.resid, dtype="float64")
+    fitted = np.asarray(res.fittedvalues, dtype="float64")
+    sd = float(np.nanstd(resid)) or 1.0
+    return pd.DataFrame(
+        {
+            "step": np.arange(1, len(resid) + 1),
+            "fitted": fitted[: len(resid)],
+            "residual": resid,
+            "standardized_residual": resid / sd,
+        }
+    )
+
+
+class ArimaForecast:
+    """Lightweight, picklable bundle put on an ``arima`` / ``auto_arima``
+    ``model`` output port: enough for ``forecast_plot`` to draw the
+    history + forecast without carrying the (non-cacheable) statsmodels
+    results object. Mirrors the ``ruyso_*`` interface the ``var`` node's
+    model uses, so the shared plot helper reads it the same way."""
+
+    def __init__(
+        self, res: Any, x: np.ndarray, column: str,
+        forecast_periods: int, confidence_level: float,
+        order: tuple, seasonal_order: tuple,
+    ) -> None:
+        alpha = 1.0 - float(confidence_level)
+        fc = res.get_forecast(steps=max(int(forecast_periods), 1))
+        mean = np.asarray(fc.predicted_mean, dtype="float64")
+        ci = np.asarray(fc.conf_int(alpha=alpha), dtype="float64")
+        self.ruyso_method = "arima"
+        self.ruyso_names = [column]
+        self.ruyso_endog = pd.DataFrame({column: np.asarray(x, dtype="float64")})
+        self.ruyso_forecast_periods = int(max(int(forecast_periods), 1))
+        self.ruyso_forecast = pd.DataFrame(
+            {"mid": mean, "low": ci[:, 0], "high": ci[:, 1]}
+        )
+        self.ruyso_order = str(order)
+        self.ruyso_seasonal_order = str(seasonal_order)
 
 
 def _forecast_table(res: Any, forecast_periods: int, confidence_level: float) -> pd.DataFrame:
@@ -1237,6 +1280,8 @@ class Arima(Node):
     outputs = [
         Port(name="fit", dtype="dataframe"),
         Port(name="forecast", dtype="dataframe"),
+        Port(name="residuals", dtype="dataframe"),
+        Port(name="model", dtype="model"),
     ]
     params_schema = ArimaParams
 
@@ -1256,6 +1301,11 @@ class Arima(Node):
         return {
             "fit": _fit_summary_table(res, order, seasonal_order),
             "forecast": _forecast_table(res, p.forecast_periods, p.confidence_level),
+            "residuals": _residuals_table(res),
+            "model": ArimaForecast(
+                res, x, p.column, p.forecast_periods, p.confidence_level,
+                order, seasonal_order,
+            ),
         }
 
 
@@ -1307,6 +1357,12 @@ def _stepwise_search(
     def ic_of(res: Any) -> float:
         return float(res.aic if ic == "aic" else res.bic)
 
+    #: Hard cap on model fits. A seasonal SARIMAX fit costs ~1s, so an
+    #: unbounded hill-climb over (p, q, P, Q) can run for minutes; past
+    #: this many fits the search stops and returns the best found so far.
+    budget = 24 if seasonal else 200
+    n_fits = 0
+
     def fit(p: int, q: int, P: int, Q: int) -> Any:
         s_order = (P, D, Q, seasonal_periods) if seasonal else (0, 0, 0, 0)
         with warnings.catch_warnings():
@@ -1314,13 +1370,16 @@ def _stepwise_search(
             return SARIMAX(
                 x, order=(p, d, q), seasonal_order=s_order, trend=trend,
                 enforce_stationarity=False, enforce_invertibility=False,
+                concentrate_scale=True,
             ).fit(disp=False)
 
-    seeds = [(min(2, max_p), min(2, max_q)), (0, 0), (1, 0), (0, 1)]
-    seeds = [
-        (p, q, min(1, max_P), min(1, max_Q)) if seasonal else (p, q, 0, 0)
-        for p, q in seeds
-    ]
+    # Lighter seeds when seasonal (each fit is ~1s): start small.
+    if seasonal:
+        seeds = [(1, 1, 1, 1), (0, 0, 1, 0), (0, 0, 0, 1), (1, 0, 0, 0)]
+    else:
+        seeds = [
+            (min(2, max_p), min(2, max_q), 0, 0), (0, 0, 0, 0), (1, 0, 0, 0), (0, 1, 0, 0),
+        ]
 
     best: tuple[int, int, int, int] | None = None
     best_ic = float("inf")
@@ -1328,13 +1387,14 @@ def _stepwise_search(
     tried: set[tuple[int, int, int, int]] = set()
 
     def try_point(p: int, q: int, P: int, Q: int) -> None:
-        nonlocal best, best_ic, best_res
+        nonlocal best, best_ic, best_res, n_fits
         key = (p, q, P, Q)
-        if key in tried or not (0 <= p <= max_p and 0 <= q <= max_q):
+        if n_fits >= budget or key in tried or not (0 <= p <= max_p and 0 <= q <= max_q):
             return
         if seasonal and not (0 <= P <= max_P and 0 <= Q <= max_Q):
             return
         tried.add(key)
+        n_fits += 1
         if p == q == P == Q == 0 and d == 0 and D == 0:
             return  # a null model is not a meaningful fit
         try:
@@ -1423,6 +1483,8 @@ class AutoArima(Node):
     outputs = [
         Port(name="fit", dtype="dataframe"),
         Port(name="forecast", dtype="dataframe"),
+        Port(name="residuals", dtype="dataframe"),
+        Port(name="model", dtype="model"),
     ]
     params_schema = AutoArimaParams
 
@@ -1447,6 +1509,127 @@ class AutoArima(Node):
         return {
             "fit": _fit_summary_table(res, order, seasonal_order),
             "forecast": _forecast_table(res, p.forecast_periods, p.confidence_level),
+            "residuals": _residuals_table(res),
+            "model": ArimaForecast(
+                res, x, p.column, p.forecast_periods, p.confidence_level,
+                order, seasonal_order,
+            ),
+        }
+
+
+# --------------------------------------------------------------------------
+# Seasonal decomposition: split a series into trend + seasonal +
+# remainder (STL, or the classical moving-average method).
+# --------------------------------------------------------------------------
+
+
+class SeasonalDecomposeParams(NodeParams):
+    """
+    Attributes:
+        column: Numeric time-series column, already ordered by time
+            (see the ``sort`` transform).
+        method: ``stl`` (LOESS-based, handles a changing seasonal
+            shape, always additive) or ``classical`` (a centred
+            moving-average decomposition; supports a multiplicative
+            model).
+        period: Season length -- e.g. 12 for monthly data with a
+            yearly cycle, 7 for daily with a weekly one.
+        model: Additive vs multiplicative (classical only).
+        two_sided: Use a centred moving average (classical only);
+            off = a trailing one.
+        extrapolate_trend: Fill this many trend points at each end by
+            linear extrapolation instead of leaving them missing
+            (classical only; 0 = leave as NaN).
+        stl_seasonal: Length of the seasonal LOESS smoother -- an odd
+            number >= 7 (STL only). Larger = a smoother, more slowly
+            changing seasonal component.
+        stl_trend: Length of the trend LOESS smoother -- an odd number
+            larger than ``period`` (STL only; 0 = statsmodels' default).
+        robust: Down-weight outliers in the STL fit (STL only).
+    """
+
+    column: str = column_field(dtypes=("numeric",))
+    method: Literal["stl", "classical"] = "stl"
+    period: int = 12
+    model: Literal["additive", "multiplicative"] = visible_field(
+        "additive", visible_when=("method", "classical")
+    )
+    two_sided: bool = visible_field(True, visible_when=("method", "classical"))
+    extrapolate_trend: int = visible_field(0, visible_when=("method", "classical"))
+    stl_seasonal: int = visible_field(7, visible_when=("method", "stl"))
+    stl_trend: int = visible_field(0, visible_when=("method", "stl"))
+    robust: bool = visible_field(False, visible_when=("method", "stl"))
+
+
+@register_node
+class SeasonalDecompose(Node):
+    """
+    Split a time series into **trend**, **seasonal** and **remainder**
+    components (plus the seasonally-adjusted series), by STL or the
+    classical moving-average method. One row per observation.
+    """
+
+    node_type = "seasonal_decompose"
+    category = "statistics"
+    inputs = list(_STATS_INPUTS)
+    outputs = [Port(name="components", dtype="dataframe")]
+    params_schema = SeasonalDecomposeParams
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        self.validate_inputs(inputs)
+        p = self.params
+        s = _num(inputs["df"], p.column, "seasonal_decompose").dropna().reset_index(drop=True)
+        period = max(int(p.period), 2)
+        if s.size < 2 * period:
+            raise ValueError(
+                f"seasonal_decompose: need at least {2 * period} non-missing values "
+                f"for period {period}."
+            )
+
+        if p.method == "stl":
+            from statsmodels.tsa.seasonal import STL
+
+            seasonal = int(p.stl_seasonal)
+            if seasonal < 7 or seasonal % 2 == 0:
+                seasonal = max(7, seasonal + (1 - seasonal % 2))
+            kw: dict[str, Any] = {"period": period, "seasonal": seasonal, "robust": bool(p.robust)}
+            if int(p.stl_trend) > 0:
+                trend = int(p.stl_trend)
+                kw["trend"] = trend + (1 - trend % 2)  # force odd
+            res = STL(s.to_numpy("float64"), **kw).fit()
+            observed = s.to_numpy("float64")
+            trend_c = np.asarray(res.trend, dtype="float64")
+            seasonal_c = np.asarray(res.seasonal, dtype="float64")
+            resid_c = np.asarray(res.resid, dtype="float64")
+            adjusted = observed - seasonal_c
+        else:
+            from statsmodels.tsa.seasonal import seasonal_decompose
+
+            res = seasonal_decompose(
+                s.to_numpy("float64"), model=p.model, period=period,
+                two_sided=bool(p.two_sided),
+                extrapolate_trend=int(p.extrapolate_trend),
+            )
+            observed = np.asarray(res.observed, dtype="float64")
+            trend_c = np.asarray(res.trend, dtype="float64")
+            seasonal_c = np.asarray(res.seasonal, dtype="float64")
+            resid_c = np.asarray(res.resid, dtype="float64")
+            adjusted = (
+                observed / seasonal_c if p.model == "multiplicative"
+                else observed - seasonal_c
+            )
+
+        return {
+            "components": pd.DataFrame(
+                {
+                    "step": np.arange(1, len(observed) + 1),
+                    "observed": observed,
+                    "trend": trend_c,
+                    "seasonal": seasonal_c,
+                    "resid": resid_c,
+                    "seasonally_adjusted": adjusted,
+                }
+            )
         }
 
 

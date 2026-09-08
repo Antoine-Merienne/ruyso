@@ -32,15 +32,21 @@ class PipelineExecutionWorker(QThread):
     a running window.
     """
 
-    #: Emitted on success, with the same {node_id: {port: value}}
-    #: mapping that PipelineScheduler.run() returns.
-    succeeded = Signal(dict)
+    #: Emitted when the run completes, with ``(outputs, errors)`` --
+    #: ``outputs`` is {node_id: {port: value}} for the nodes that ran,
+    #: ``errors`` is {node_id: message} (empty on a fully clean run).
+    succeeded = Signal(dict, dict)
 
-    #: Emitted on failure, with a human-readable error message.
+    #: Emitted only if the run could not start at all (e.g. the graph
+    #: failed structural validation), with a human-readable message.
     failed = Signal(str)
 
     #: Emitted as nodes finish, with ``(done, total)`` counts.
     progress = Signal(int, int)
+
+    #: Emitted as each node is reached: ``(node_id, phase)`` where phase
+    #: is "running" / "ok" / "error" / "blocked".
+    node_status = Signal(str, str)
 
     def __init__(
         self,
@@ -63,11 +69,12 @@ class PipelineExecutionWorker(QThread):
     def run(self) -> None:
         """Entry point invoked by Qt on the background thread (do not call directly)."""
         try:
-            outputs = self._scheduler.run(
+            outputs, errors = self._scheduler.run(
                 self._pipeline,
                 progress_callback=lambda done, total: self.progress.emit(done, total),
+                node_callback=lambda node_id, phase: self.node_status.emit(node_id, phase),
             )
         except Exception as exc:  # noqa: BLE001 - reported to the UI, never swallowed
             self.failed.emit(str(exc))
         else:
-            self.succeeded.emit(outputs)
+            self.succeeded.emit(outputs, errors)

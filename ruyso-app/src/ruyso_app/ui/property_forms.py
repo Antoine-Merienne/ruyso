@@ -49,6 +49,7 @@ from ruyso_app.core.params import (
     unit_interval_spec,
     checkbox_list_spec,
     color_field_values,
+    colormap_field_kind,
     column_ref_allow_none,
     column_ref_dtypes,
     field_suggestions,
@@ -132,6 +133,9 @@ class FieldSpec:
     #: Common colour names for a colour field (rendered with a picker
     #: button), or None if this is not a colour field.
     color_choices: list[str] | None = None
+    #: ``"continuous"`` / ``"qualitative"`` for a fixed-kind colormap
+    #: dropdown (``core.params.colormap_field``), or None.
+    colormap_kind: str | None = None
     #: ``{"options": <generator>, "depends_on": <field>}`` for a dropdown
     #: whose choices are recomputed from another field, or None.
     reactive_choice: dict | None = None
@@ -183,6 +187,7 @@ def iter_field_specs(params_schema: type[NodeParams]) -> Iterator[FieldSpec]:
             column_allow_none=column_ref_allow_none(field_info),
             suggestions=field_suggestions(field_info),
             color_choices=color_field_values(field_info),
+            colormap_kind=colormap_field_kind(field_info),
             reactive_choice=reactive_choice_spec(field_info),
             checkbox_list=checkbox_list_spec(field_info),
             category_map=category_map_spec(field_info),

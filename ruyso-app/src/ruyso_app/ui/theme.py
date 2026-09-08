@@ -20,9 +20,23 @@ Which palette is active is decided by :data:`_mode`:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+
+#: Small themed QSS assets (dropdown / spin-box chevrons). Referenced by
+#: absolute POSIX path from ``stylesheet_for`` -- Qt resolves ``url()``
+#: in an application stylesheet relative to the working directory, which
+#: is not reliable, so an absolute path is used.
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 # --- Fonts -------------------------------------------------------------
-UI_FONT_FAMILY = "Helvetica, Arial, sans-serif"
+# Prefer each OS's native UI font (crisper than Helvetica on macOS,
+# matches the platform on Windows/Linux). Qt silently skips families it
+# cannot resolve, so the unknown-to-Qt CSS keywords are harmless padding
+# and the concrete names after them are the real fallback chain.
+UI_FONT_FAMILY = (
+    "-apple-system, '.AppleSystemUIFont', 'SF Pro Text', 'Segoe UI', "
+    "'system-ui', 'Helvetica Neue', Arial, sans-serif"
+)
 MONOSPACE_FONT_FAMILY = "Consolas, Menlo, 'Courier New', monospace"
 
 # --- Macro types ---------------------------------------------------------
@@ -66,30 +80,35 @@ _MACRO_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
 
 DARK_THEME = Theme(
     name="dark",
-    canvas_background=(38, 41, 48),
+    # Deep, near-neutral charcoal (no blue cast) -- Material-dark's
+    # #121212 surface family, with the panel a step lighter so inputs
+    # recess against it.
+    canvas_background=(22, 22, 22),
     category_colors=dict(_MACRO_TYPE_COLORS),
-    default_category_color=(90, 90, 90),
-    window_background="#22252b",
-    panel_background="#2c2f36",
-    input_background="#1c1e23",
-    text_color="#e6e6e6",
-    border_color="#4a4f5b",
-    accent_color="#3a3f4b",
-    highlight_color="#3d6fb0",
+    default_category_color=(96, 96, 96),
+    window_background="#1a1a1a",
+    panel_background="#242424",
+    input_background="#121212",
+    text_color="#ededed",
+    border_color="#3d3d3d",
+    accent_color="#2a2a2a",
+    highlight_color="#1e88e5",  # Material Blue 600 -- reads on deep dark
 )
 
 LIGHT_THEME = Theme(
     name="light",
-    canvas_background=(224, 226, 230),
+    # Warm near-white (a hint of cream, R>=G>=B) instead of the old
+    # blue-grey, so the light theme reads clean rather than dull.
+    canvas_background=(237, 235, 231),
     category_colors=dict(_MACRO_TYPE_COLORS),
-    default_category_color=(180, 180, 180),
-    window_background="#f4f5f7",
-    panel_background="#e6e8eb",
+    default_category_color=(178, 176, 172),
+    window_background="#faf9f7",
+    panel_background="#f1efeb",
     input_background="#ffffff",
-    text_color="#202226",
-    border_color="#c6c9ce",
-    accent_color="#f0f1f3",
-    highlight_color="#3d7fd0",
+    text_color="#1c1c1e",
+    border_color="#dcd8d1",
+    accent_color="#efece7",
+    highlight_color="#1976d2",  # Material Blue 700
 )
 
 THEMES: dict[str, Theme] = {"dark": DARK_THEME, "light": LIGHT_THEME}
@@ -281,16 +300,59 @@ def apply_to_app(app, force: bool = False) -> None:
     _applied_theme_name = _current_theme_name
 
 
+#: Run-status colours, shared by the run-progress bar chunk, the "auto"
+#: pill dot and the per-node status dots (see ui/node_status.py).
+STATUS_COLORS: dict[str, str] = {
+    "running": "#4a90d9",  # blue
+    "ok": "#3fae5a",       # green
+    "error": "#d9534f",    # red
+    "idle": "#8a8a8a",     # grey -- also "blocked" / "pending" on nodes
+}
+
+
+def _rgb_css(rgb: tuple[int, int, int]) -> str:
+    return f"rgb({rgb[0]}, {rgb[1]}, {rgb[2]})"
+
+
 def stylesheet_for(theme: Theme | None = None) -> str:
     """
     The QSS layered on top of the Fusion style + palette.
 
-    The palette already colours every standard widget; this only sets
-    fonts and the handful of custom, object-name-targeted widgets that
-    the palette cannot express (the tab band, run controls, the
+    The palette colours every standard widget's *fill*; this adds the
+    shape language the palette cannot express -- rounded (8px) inputs,
+    buttons and menus, pill tabs, a Material-indigo primary button and
+    focus ring, slim scrollbars -- plus the fonts and the handful of
+    object-name-targeted custom widgets (tab band, run controls,
     empty-canvas hint).
+
+    Nothing here touches the NodeGraphQt canvas or the node bodies:
+    those are painted by the library from ``node.set_color`` and stay
+    on their own colour scheme.
     """
     theme = theme if theme is not None else current_theme()
+
+    _white = (255, 255, 255)
+    _black = (0, 0, 0)
+
+    primary = theme.highlight_color
+    primary_rgb = _hex_to_rgb(primary)
+    on_primary = "#ffffff"
+    # Hover/pressed shades of the indigo primary, and a faint indigo
+    # tint of the panel colour for secondary ("tonal") buttons.
+    primary_hover = _rgb_css(_blend(primary_rgb, _white, 0.16))
+    primary_pressed = _rgb_css(_blend(primary_rgb, _black, 0.18))
+    panel_rgb = _hex_to_rgb(theme.panel_background)
+    tonal = _rgb_css(_blend(panel_rgb, primary_rgb, 0.14))
+    tonal_hover = _rgb_css(_blend(panel_rgb, primary_rgb, 0.26))
+    disabled_text = _rgb_css(_blend(_hex_to_rgb(theme.text_color), panel_rgb, 0.6))
+    scroll_track = "transparent"
+    field_bg = theme.input_background
+    border = theme.border_color
+    surface = theme.panel_background
+    text = theme.text_color
+    chevron_down = (_ASSETS_DIR / "chevron-down.svg").as_posix()
+    chevron_up = (_ASSETS_DIR / "chevron-up.svg").as_posix()
+
     return f"""
 QWidget {{
     font-family: {UI_FONT_FAMILY};
@@ -302,9 +364,238 @@ QTableView, QHeaderView::section, QTableWidget {{
     font-family: {MONOSPACE_FONT_FAMILY};
 }}
 QToolTip {{
-    background-color: {theme.panel_background};
-    color: {theme.text_color};
-    border: 1px solid {theme.border_color};
+    background-color: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 4px 6px;
+}}
+
+/* --- Text inputs & spin boxes ------------------------------------- */
+QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox {{
+    background-color: {field_bg};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 3px 8px;
+    selection-background-color: {primary};
+    selection-color: {on_primary};
+}}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QAbstractSpinBox:focus {{
+    border: 1px solid {primary};
+}}
+QLineEdit:disabled, QAbstractSpinBox:disabled, QPlainTextEdit:disabled {{
+    color: {disabled_text};
+}}
+QAbstractSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border: none;
+}}
+QAbstractSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border: none;
+}}
+QAbstractSpinBox::up-arrow {{
+    image: url("{chevron_up}");
+    width: 10px;
+    height: 10px;
+}}
+QAbstractSpinBox::down-arrow {{
+    image: url("{chevron_down}");
+    width: 10px;
+    height: 10px;
+}}
+
+/* --- Combo boxes ------------------------------------------------- */
+QComboBox {{
+    background-color: {field_bg};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 3px 8px;
+    min-height: 20px;
+}}
+QComboBox:focus, QComboBox:on {{
+    border: 1px solid {primary};
+}}
+QComboBox:disabled {{
+    color: {disabled_text};
+}}
+QComboBox QLineEdit {{
+    border: none;
+    border-radius: 0px;
+    background: transparent;
+    padding: 0px;
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 20px;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+}}
+QComboBox::down-arrow {{
+    image: url("{chevron_down}");
+    width: 12px;
+    height: 12px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {surface};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: {primary};
+    selection-color: {on_primary};
+}}
+QComboBox QAbstractItemView::item {{
+    padding: 4px 8px;
+    border-radius: 4px;
+    min-height: 20px;
+}}
+
+/* --- Buttons: tonal by default, indigo when pressed ------------- */
+QPushButton {{
+    background-color: {tonal};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 5px 14px;
+}}
+QPushButton:hover {{
+    background-color: {tonal_hover};
+}}
+QPushButton:pressed {{
+    background-color: {primary};
+    color: {on_primary};
+}}
+QPushButton:default {{
+    border: 1px solid {primary};
+}}
+QPushButton:disabled {{
+    color: {disabled_text};
+    background-color: {surface};
+}}
+
+/* --- Menu bar & menus ------------------------------------------- */
+QMenuBar {{
+    background-color: {theme.window_background};
+}}
+QMenuBar::item {{
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 6px;
+}}
+QMenuBar::item:selected {{
+    background-color: {tonal_hover};
+}}
+QMenu {{
+    background-color: {surface};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 5px 24px 5px 12px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background-color: {primary};
+    color: {on_primary};
+}}
+QMenu::item:disabled {{
+    color: {disabled_text};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {border};
+    margin: 4px 8px;
+}}
+
+/* --- Scroll areas & slim scrollbars --------------------------- */
+/* No frame: the Options-panel param scroller and the tickbox lists
+   must read as part of the panel, not as boxed-off sub-widgets. */
+QScrollArea {{
+    border: none;
+    background: transparent;
+}}
+QScrollBar:vertical {{
+    background: {scroll_track};
+    width: 10px;
+    margin: 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: {border};
+    border-radius: 4px;
+    min-height: 24px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: {primary};
+}}
+QScrollBar:horizontal {{
+    background: {scroll_track};
+    height: 10px;
+    margin: 2px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {border};
+    border-radius: 4px;
+    min-width: 24px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {primary};
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{
+    height: 0px; width: 0px;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: {scroll_track};
+}}
+
+/* --- Sliders (unit-interval param fields) --------------------- */
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {border};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {primary};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {primary};
+    width: 14px;
+    height: 14px;
+    margin: -6px 0px;
+    border-radius: 7px;
+}}
+
+/* --- Tables --------------------------------------------------- */
+QTableView {{
+    gridline-color: {border};
+    selection-background-color: {primary};
+    selection-color: {on_primary};
+}}
+QHeaderView::section {{
+    background-color: {surface};
+    border: none;
+    border-right: 1px solid {border};
+    border-bottom: 1px solid {border};
+    padding: 4px 8px;
+}}
+
+/* --- Group boxes -------------------------------------------- */
+QGroupBox {{
+    border: 1px solid {border};
+    border-radius: 8px;
+    margin-top: 8px;
+    padding-top: 6px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0px 4px;
 }}
 
 /* Empty-canvas hint drawn over the NodeGraphQt viewer. */
@@ -319,58 +610,100 @@ QLabel#ruysoDashboardHint {{
     font-size: 16px;
 }}
 
-/* Custom tab band at the top of the window (see ui/tab_bar.py). */
+/* Custom tab band at the top of the window (see ui/tab_bar.py).
+   The tabs are shaped like binder dividers: rounded-top folder tabs
+   sitting on the band's baseline, the active one raised, capped with a
+   blue edge and open at the bottom so it reads as attached to the
+   page below. */
 QWidget#ruysoTabBar {{
     background-color: {theme.window_background};
+    border-bottom: 1px solid {border};
 }}
 QPushButton#ruysoTabButton {{
-    background-color: {theme.window_background};
-    color: {theme.text_color};
-    border: none;
-    border-right: 1px solid {theme.border_color};
-    border-radius: 0px;
-    padding: 8px 22px;
+    background-color: transparent;
+    color: {disabled_text};
+    border: 1px solid transparent;
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+    margin: 7px 2px 0px 2px;
+    padding: 7px 20px;
 }}
 QPushButton#ruysoTabButton:hover {{
-    background-color: {theme.accent_color};
+    background-color: {tonal_hover};
+    color: {text};
 }}
 QPushButton#ruysoTabButton:checked {{
-    background-color: {theme.panel_background};
+    background-color: {surface};
+    color: {text};
     font-weight: bold;
+    border: 1px solid {border};
+    border-top: 2px solid {primary};
+    border-bottom-color: {surface};
+    margin-top: 3px;
 }}
 
 /* Pipeline-run controls, right-aligned in the tab band. */
 QPushButton#ruysoRunButton {{
-    background-color: {theme.accent_color};
-    color: {theme.text_color};
-    border: 1px solid {theme.border_color};
-    border-radius: 4px;
-    padding: 4px 12px;
-    font-weight: bold;
+    background-color: {primary};
+    color: {on_primary};
+    border: none;
+    border-radius: 8px;
+    padding: 6px 16px;
+    font-weight: 600;
 }}
 QPushButton#ruysoRunButton:hover {{
-    background-color: {theme.border_color};
+    background-color: {primary_hover};
+}}
+QPushButton#ruysoRunButton:pressed {{
+    background-color: {primary_pressed};
 }}
 QPushButton#ruysoRunButton:disabled {{
-    color: {theme.border_color};
+    background-color: {surface};
+    color: {disabled_text};
 }}
 QProgressBar#ruysoRunProgress {{
-    background-color: {theme.border_color};
+    background-color: {border};
     border: none;
     border-radius: 2px;
 }}
 QProgressBar#ruysoRunProgress::chunk {{
     border-radius: 2px;
-    background-color: #4a90d9;
+    background-color: {STATUS_COLORS["running"]};
 }}
 QProgressBar#ruysoRunProgress[state="success"]::chunk {{
-    background-color: #3fae5a;
+    background-color: {STATUS_COLORS["ok"]};
 }}
 QProgressBar#ruysoRunProgress[state="error"]::chunk {{
-    background-color: #d9534f;
+    background-color: {STATUS_COLORS["error"]};
 }}
 QLabel#ruysoRunPercent {{
-    color: {theme.text_color};
+    color: {text};
     font-size: 10px;
 }}
+
+/* "auto" status chip: a status dot + the word "auto"; click to toggle
+   auto-run. The dot colours match the run-progress chunk (blue running
+   / green ok / red error) plus a grey idle. */
+QWidget#ruysoAutoPill {{
+    border: 1px solid {border};
+    border-radius: 8px;
+    background: transparent;
+}}
+QWidget#ruysoAutoPill:hover {{
+    background-color: {tonal_hover};
+}}
+QLabel#ruysoAutoLabel {{
+    color: {disabled_text};
+    font-size: 10px;
+    background: transparent;
+}}
+QLabel#ruysoAutoDot {{
+    border-radius: 4px;
+    background-color: {border};
+}}
+QLabel#ruysoAutoDot[state="running"] {{ background-color: {STATUS_COLORS["running"]}; }}
+QLabel#ruysoAutoDot[state="ok"] {{ background-color: {STATUS_COLORS["ok"]}; }}
+QLabel#ruysoAutoDot[state="error"] {{ background-color: {STATUS_COLORS["error"]}; }}
 """

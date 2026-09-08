@@ -321,6 +321,40 @@ def test_arima_fit_and_forecast_shape():
     assert (out["forecast"]["forecast"] <= out["forecast"]["ci_high"]).all()
 
 
+def test_arima_outputs_residuals_and_a_forecast_model_bundle():
+    out = S.Arima(
+        params=S.ArimaParams(column="y", p=1, d=1, q=0, forecast_periods=6)
+    ).run(df=_ar_series())
+
+    assert set(out) == {"fit", "forecast", "residuals", "model"}
+    resid = out["residuals"]
+    assert list(resid.columns) == ["step", "fitted", "residual", "standardized_residual"]
+    assert len(resid) == out["fit"]["n_obs"].iloc[0]
+
+    model = out["model"]
+    assert model.ruyso_method == "arima"
+    assert model.ruyso_names == ["y"]
+    assert model.ruyso_forecast_periods == 6
+    assert list(model.ruyso_forecast.columns) == ["mid", "low", "high"]
+
+    import pickle
+
+    pickle.loads(pickle.dumps(model))  # cacheable -> must round-trip
+
+
+def test_forecast_plot_accepts_a_one_variable_arima_model():
+    from ruyso_app.nodes.viz import ForecastPlot, ForecastPlotParams
+
+    model = S.Arima(
+        params=S.ArimaParams(column="y", p=1, d=1, q=0, forecast_periods=8)
+    ).run(df=_ar_series())["model"]
+
+    fig = ForecastPlot(params=ForecastPlotParams()).run(model=model)["figure"]
+    assert len(fig.axes) == 1  # one panel for the single variable
+    # panel has a history line, a forecast line, and the CI band
+    assert len(fig.axes[0].lines) >= 2
+
+
 def test_arima_needs_enough_data():
     with pytest.raises(ValueError, match="at least 10"):
         S.Arima(params=S.ArimaParams(column="y")).run(df=pd.DataFrame({"y": [1.0, 2.0, 3.0]}))
@@ -362,6 +396,48 @@ def test_auto_arima_needs_enough_data():
         S.AutoArima(params=S.AutoArimaParams(column="y")).run(
             df=pd.DataFrame({"y": [1.0] * 5})
         )
+
+
+def _seasonal_series(n=120, period=12, seed=0):
+    t = np.arange(n)
+    x = 0.04 * t + 5 * np.sin(2 * np.pi * t / period) + np.random.default_rng(seed).normal(0, 1, n)
+    return pd.DataFrame({"y": x})
+
+
+@pytest.mark.parametrize("method", ["stl", "classical"])
+def test_seasonal_decompose_returns_the_four_components(method):
+    out = S.SeasonalDecompose(
+        params=S.SeasonalDecomposeParams(column="y", method=method, period=12)
+    ).run(df=_seasonal_series())["components"]
+
+    assert list(out.columns) == [
+        "step", "observed", "trend", "seasonal", "resid", "seasonally_adjusted"
+    ]
+    assert len(out) == 120
+    # trend + seasonal + resid reconstructs the observed series (additive)
+    recon = out["trend"] + out["seasonal"] + out["resid"]
+    ok = recon.notna() & out["observed"].notna()
+    assert np.allclose(recon[ok], out["observed"][ok], atol=1e-6)
+
+
+def test_seasonal_decompose_multiplicative_adjustment_divides_out_the_seasonal():
+    df = pd.DataFrame({"y": np.abs(_seasonal_series()["y"]) + 20})
+    out = S.SeasonalDecompose(
+        params=S.SeasonalDecomposeParams(
+            column="y", method="classical", period=12, model="multiplicative"
+        )
+    ).run(df=df)["components"]
+    ok = out["seasonal"].notna()
+    assert np.allclose(
+        out["seasonally_adjusted"][ok], out["observed"][ok] / out["seasonal"][ok], atol=1e-6
+    )
+
+
+def test_seasonal_decompose_needs_two_full_periods():
+    with pytest.raises(ValueError, match="at least"):
+        S.SeasonalDecompose(
+            params=S.SeasonalDecomposeParams(column="y", period=12)
+        ).run(df=pd.DataFrame({"y": np.arange(15.0)}))
 
 
 def test_all_statistics_nodes_are_in_the_statistics_category():

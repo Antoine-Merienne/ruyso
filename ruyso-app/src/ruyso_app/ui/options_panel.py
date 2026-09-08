@@ -59,6 +59,7 @@ from ruyso_app.ui.column_spec import (
 from ruyso_app.ui.file_filters import filter_for
 from ruyso_app.ui.micro_type_groups import grouped_micro_types
 from ruyso_app.ui.property_forms import iter_field_specs
+from ruyso_app.ui.swatch_combo import SwatchComboBox
 
 #: Minimum width; the panel lives in a splitter and can be widened.
 MIN_PANEL_WIDTH = 340
@@ -72,6 +73,17 @@ _SENTINEL_COLOR = QColor(150, 150, 150)
 
 #: "no column" row in a column-map table dropdown.
 _BLANK = "—"
+
+#: Param-field names whose plain dropdown should render a small preview
+#: of each choice (see ``ui.swatches``) rather than just its text. The
+#: ``colormap`` field (reactive and fixed-``Literal`` alike) and the
+#: editable colour-name fields are handled separately by name / kind.
+_SWATCH_FIELDS: dict[str, str] = {
+    "marker_shape": "marker",
+    "line_style": "linestyle",
+    "bar_hatch": "hatch",
+    "shape_map": "shapemap",
+}
 
 
 #: Floor / ceiling for a float spin box's decimal places.
@@ -171,6 +183,8 @@ class OptionsPanel(QWidget):
         self._visibility_controllers: dict[str, set[int]] = {}
         # reactive-choice field name -> (combo, generator key, depends-on field)
         self._reactive_choices: dict[str, tuple] = {}
+        # fixed-kind colormap field name -> (SwatchComboBox, "continuous"/"qualitative")
+        self._colormap_fields: dict[str, tuple] = {}
         # checkbox-list field name (source="columns" only) -> repopulate()
         self._checkbox_lists: dict[str, object] = {}
         # category-map field name -> (repopulate(), source-column field name)
@@ -442,6 +456,7 @@ class OptionsPanel(QWidget):
         self._row_conditions.clear()
         self._visibility_controllers.clear()
         self._reactive_choices.clear()
+        self._colormap_fields.clear()
         self._checkbox_lists.clear()
         self._category_maps.clear()
         self._column_maps.clear()
@@ -549,6 +564,31 @@ class OptionsPanel(QWidget):
     def _refresh_all_reactive_choices(self) -> None:
         for name in list(self._reactive_choices):
             self._refresh_reactive_choice(name)
+        self._refresh_colormap_fields()
+
+    def _refresh_colormap_fields(self) -> None:
+        """Repopulate the fixed-kind colormap dropdowns from the current
+        continuous / qualitative lists (they change when the Colormap
+        Manager / Designer is used)."""
+        from ruyso_app.ui.column_ops import colormap_choices
+
+        for name, (combo, kind) in self._colormap_fields.items():
+            options = colormap_choices(kind)
+            stored = str(self._node.get_property(name)) if self._node is not None else ""
+            kept = combo.currentText() or stored
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(options)
+            if kept in options:
+                combo.setCurrentText(kept)
+            elif options:
+                combo.setCurrentText(options[0])
+            combo.blockSignals(False)
+
+    def refresh_colormap_choices(self) -> None:
+        """Public entry point (MainWindow calls this after the Colormap
+        Designer / Manager changes the available maps)."""
+        self._refresh_all_reactive_choices()
 
     def _refresh_reactive_choice(self, name: str) -> None:
         from ruyso_app.ui.column_ops import options_for
@@ -578,6 +618,24 @@ class OptionsPanel(QWidget):
                 self._node.set_property(name, options[0])
         combo.blockSignals(False)
 
+        # colormap combos are SwatchComboBox -- the delegate renders the
+        # gradient from the item text, no per-item icons needed.
+
+    @staticmethod
+    def _decorate_combo(combo: QComboBox, kind: str) -> None:
+        """Give each row of ``combo`` a rendered preview of its value.
+
+        ``kind`` is a :mod:`ui.swatches` swatch kind ("colormap" /
+        "marker" / "linestyle" / "hatch" / "shapemap" / "color"). The
+        icon shows on the row *and* on the collapsed combo. Safe to
+        re-run after the combo is repopulated.
+        """
+        from ruyso_app.ui import swatches
+
+        combo.setIconSize(swatches.icon_size(kind))
+        for i in range(combo.count()):
+            combo.setItemIcon(i, swatches.icon_for(kind, combo.itemText(i)))
+
     # -- per-field widgets ----------------------------------------------
 
     def _build_field_widget(self, node: BaseNode, spec) -> QWidget:
@@ -598,6 +656,9 @@ class OptionsPanel(QWidget):
         if spec.reactive_choice is not None:
             return self._build_reactive_choice_widget(node, spec)
 
+        if spec.colormap_kind is not None:
+            return self._build_colormap_field_widget(node, spec)
+
         if spec.column_dtypes is not None:
             return self._build_column_widget(node, spec, current)
 
@@ -617,11 +678,15 @@ class OptionsPanel(QWidget):
             return self._build_optimize_bounds_widget(node, spec)
 
         if spec.widget == enum.QCOMBO_BOX:
-            combo = QComboBox()
+            is_colormap = name == "colormap"
+            combo = SwatchComboBox() if is_colormap else QComboBox()
             combo.addItems(spec.choices or [])
             if current is not None:
                 combo.setCurrentText(str(current))
             combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+            swatch_kind = _SWATCH_FIELDS.get(name)
+            if swatch_kind:
+                self._decorate_combo(combo, swatch_kind)
             return combo
 
         if spec.widget == enum.QCHECK_BOX:
@@ -728,9 +793,13 @@ class OptionsPanel(QWidget):
 
         row = QWidget()
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(slider, 1)
-        layout.addWidget(readout, 0)
+        # A little vertical room: the styled handle overhangs the groove
+        # (QSS ``margin: -6px``) and QSlider.sizeHint() doesn't account
+        # for it, so without this the handle's top is clipped in the form.
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.addWidget(slider, 1, Qt.AlignVCenter)
+        layout.addWidget(readout, 0, Qt.AlignVCenter)
+        row.setMinimumHeight(28)
         row._slider = slider  # noqa: SLF001 - for controller wiring / tests
         return row
 
@@ -800,6 +869,21 @@ class OptionsPanel(QWidget):
         combo.addItems(spec.color_choices or [])
         combo.setCurrentText("" if current in (None, "") else str(current))
         combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+        self._decorate_combo(combo, "color")  # swatch on each suggested colour
+
+        # A live swatch of the current colour (updates as the user types
+        # or picks); an unparseable value shows nothing.
+        from ruyso_app.ui import swatches
+
+        preview = QLabel()
+        preview.setFixedWidth(18)
+        preview.setAlignment(Qt.AlignCenter)
+
+        def _refresh_preview(text: str) -> None:
+            preview.setPixmap(swatches.color_pixmap(text))
+
+        _refresh_preview(combo.currentText())
+        combo.currentTextChanged.connect(_refresh_preview)
 
         button = QPushButton("Choose...")
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -817,6 +901,7 @@ class OptionsPanel(QWidget):
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(preview, 0)
         row_layout.addWidget(combo, 1)
         row_layout.addWidget(button, 0)
         row._combo = combo  # for _connect_controller
@@ -947,14 +1032,36 @@ class OptionsPanel(QWidget):
         ``_refresh_reactive_choice`` once registered.
         """
         name = spec.name
-        combo = QComboBox()
+        options = spec.reactive_choice["options"]
+        combo = SwatchComboBox() if options == "colormaps" else QComboBox()
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
         self._reactive_choices[name] = (
             combo,
-            spec.reactive_choice["options"],
+            options,
             spec.reactive_choice["depends_on"],
         )
+        return combo
+
+    def _build_colormap_field_widget(self, node: BaseNode, spec) -> QWidget:
+        """A fixed-kind colormap dropdown (``core.params.colormap_field``)
+        -- a full-width gradient ``SwatchComboBox`` populated from the
+        user's continuous / qualitative list."""
+        from ruyso_app.ui.column_ops import colormap_choices
+
+        name = spec.name
+        kind = spec.colormap_kind
+        combo = SwatchComboBox()
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        options = colormap_choices(kind)
+        combo.addItems(options)
+        current = node.get_property(name)
+        if current is not None and str(current) in options:
+            combo.setCurrentText(str(current))
+        elif options:
+            combo.setCurrentText(options[0])
+        combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
+        self._colormap_fields[name] = (combo, kind)
         return combo
 
     def _build_checkbox_list_widget(self, node: BaseNode, spec) -> QWidget:
@@ -1207,22 +1314,21 @@ class OptionsPanel(QWidget):
             and field_name != "random_state"
         ]
 
+        # No inner QScrollArea here (unlike the tickbox / category-map
+        # tables): the row count is bounded by the node's own numeric
+        # params (a handful), so the table is shown in full and the user
+        # scrolls the outer Options panel rather than a nested box.
         inner = QWidget()
         form = QFormLayout(inner)
         form.setContentsMargins(4, 6, 4, 6)
         form.setSpacing(6)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(inner)
-        scroll.setMaximumHeight(220)
-        scroll.setMinimumHeight(48)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         if not param_names:
             empty = QLabel("no numeric parameters to optimize")
             empty.setStyleSheet("color: gray; font-size: 11px;")
             form.addRow(empty)
-            return scroll
+            return inner
 
         def stored_map() -> dict[str, list]:
             try:
@@ -1287,7 +1393,7 @@ class OptionsPanel(QWidget):
             rows[pname] = (box, lo, hi)
             form.addRow(pname, row)
 
-        return scroll
+        return inner
 
     def _revalidate(self, field_name: str) -> None:
         entry = self._column_fields.get(field_name)

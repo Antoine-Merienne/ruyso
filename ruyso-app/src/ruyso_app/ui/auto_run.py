@@ -32,6 +32,7 @@ class _AutoRunWorker(QThread):
     """Runs ``PipelineScheduler.run_available`` off the GUI thread."""
 
     done = Signal(dict, dict)  # outputs, errors
+    node_status = Signal(str, str)  # node_id, phase
 
     def __init__(self, pipeline: PipelineGraph, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -39,7 +40,12 @@ class _AutoRunWorker(QThread):
 
     def run(self) -> None:
         try:
-            outputs, errors = PipelineScheduler().run_available(self._pipeline)
+            outputs, errors = PipelineScheduler().run_available(
+                self._pipeline,
+                node_callback=lambda node_id, phase: self.node_status.emit(
+                    node_id, phase
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - auto-run must never surface
             outputs, errors = {}, {"__auto_run__": str(exc)}
         self.done.emit(outputs, errors)
@@ -50,6 +56,12 @@ class AutoRunController(QObject):
 
     #: Emitted on the GUI thread with ``(outputs, errors)`` from a run.
     finished = Signal(dict, dict)
+    #: Emitted on the GUI thread the moment a background auto-run starts
+    #: (drives the tab band's "auto" pill to its blue "loading" state).
+    started = Signal()
+    #: Re-emitted from the worker: ``(node_id, phase)`` for the per-node
+    #: canvas status dots.
+    node_status = Signal(str, str)
 
     def __init__(self, build_pipeline, parent: QObject | None = None) -> None:
         """
@@ -63,7 +75,12 @@ class AutoRunController(QObject):
         self._build_pipeline = build_pipeline
         self._worker: _AutoRunWorker | None = None
         self._rerun_pending = False
+        #: Transient gate -- lowered by MainWindow only while a manual
+        #: "Run Pipeline" is in progress.
         self._enabled = True
+        #: Persistent user preference (View > Auto-run); survives manual
+        #: runs. Auto-run happens only when *both* are true.
+        self._user_enabled = True
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -71,18 +88,43 @@ class AutoRunController(QObject):
         self._timer.timeout.connect(self._fire)
 
     def set_enabled(self, enabled: bool) -> None:
-        """Disable while a manual run is in progress, then re-enable."""
+        """Transient gate: lowered while a manual run is in progress."""
         self._enabled = enabled
+
+    def set_user_enabled(self, enabled: bool) -> None:
+        """The persistent View > Auto-run toggle (independent of manual runs)."""
+        self._user_enabled = enabled
+
+    def is_user_enabled(self) -> bool:
+        return self._user_enabled
+
+    def interrupt(self) -> None:
+        """Hard-stop auto-run now: cancel the pending timer and, if an
+        auto-run is mid-flight on the worker thread, terminate it. Its
+        partial results are discarded. Used when the user switches
+        auto-run off (View > Auto-run, or the tab-band "auto" chip)."""
+        self._rerun_pending = False
+        self._timer.stop()
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(2000)
+            worker.deleteLater()
+
+    def _active(self) -> bool:
+        return self._enabled and self._user_enabled
 
     def schedule(self, *_args: object) -> None:
         """Request an auto-run soon (safe to call from any graph signal)."""
-        if self._enabled:
+        if self._active():
             self._timer.start()
 
     # -- internals ------------------------------------------------------
 
     def _fire(self) -> None:
-        if not self._enabled:
+        if not self._active():
             return
         if self._worker is not None and self._worker.isRunning():
             self._rerun_pending = True
@@ -94,7 +136,9 @@ class AutoRunController(QObject):
 
         self._worker = _AutoRunWorker(pipeline, self)
         self._worker.done.connect(self._on_worker_done)
+        self._worker.node_status.connect(self.node_status)  # re-emit to MainWindow
         self._worker.start()
+        self.started.emit()
 
     def _on_worker_done(self, outputs: dict, errors: dict) -> None:
         self.finished.emit(outputs, errors)

@@ -8,7 +8,7 @@ Grapher nodes that render a GeoDataFrame as a map.
   map analogue of the ``density_2d`` grapher.
 
 Both output a plain matplotlib ``figure`` port, so they flow into the
-on-canvas preview, ``export_to_dashboard`` and ``figure_export`` like
+on-canvas preview, ``export_to_dashboard`` and ``export_figure`` like
 every other grapher. Figures are built with the object-oriented
 ``Figure`` API (``viz._new_figure``) so nothing leaks into pyplot's
 global figure manager.

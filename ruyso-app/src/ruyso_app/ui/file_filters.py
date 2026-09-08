@@ -22,7 +22,9 @@ FILE_FILTERS: dict[str, str] = {
     "geopackage_loader": "GeoPackage (*.gpkg);;All files (*)",
     "geoparquet_loader": "GeoParquet (*.parquet *.pq);;All files (*)",
     "geofeather_loader": "GeoFeather / GeoArrow (*.feather *.arrow);;All files (*)",
-    "figure_export": "Images (*.png *.pdf *.svg *.jpg *.jpeg);;All files (*)",
+    "export_figure": "Images (*.png *.jpg *.jpeg *.pdf *.svg *.tiff *.webp *.eps);;All files (*)",
+    "export_table": "Data (*.csv *.tsv *.xlsx *.parquet *.feather *.json);;All files (*)",
+    "export_geodata": "Geodata (*.geojson *.gpkg *.parquet *.feather *.shp);;All files (*)",
 }
 
 DEFAULT_FILTER = "All files (*)"

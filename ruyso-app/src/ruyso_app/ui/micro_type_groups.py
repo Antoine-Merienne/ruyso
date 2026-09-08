@@ -115,7 +115,7 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
         # non-tests -- model-fitting / data-transforming tools
         ["regression", "pca", "ica", "tsne", "multiple_testing"],
         # time-series models
-        ["arima", "auto_arima", "var"],
+        ["arima", "auto_arima", "var", "seasonal_decompose"],
         # everything else (every *_test node, incl. var_test) is a
         # trailing, alphabetical "tests" group -- new tests join it
         # automatically, with nothing to update here.
@@ -138,7 +138,7 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
         [
             "time_series_plot",
             "multivariate_timeseries_plot",
-            "var_forecast_plot",
+            "forecast_plot",
             "var_acorr_plot",
             "irf_plot",
         ],

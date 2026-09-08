@@ -83,6 +83,21 @@ def test_stylesheet_differs_between_dark_and_light():
     assert theme.LIGHT_THEME.window_background in light_css
 
 
+def test_stylesheet_is_rounded_and_uses_the_accent_colour():
+    css = theme.stylesheet_for(theme.DARK_THEME)
+    assert "border-radius: 8px" in css  # the Material-ish rounded controls
+    # the primary (Run) button is filled with the theme's accent highlight
+    assert theme.DARK_THEME.highlight_color in css
+
+
+def test_stylesheet_chevron_urls_point_at_bundled_assets():
+    css = theme.stylesheet_for(theme.DARK_THEME)
+    for name in ("chevron-down.svg", "chevron-up.svg"):
+        asset = theme._ASSETS_DIR / name
+        assert asset.is_file(), f"missing bundled QSS asset {asset}"
+        assert asset.as_posix() in css
+
+
 def test_lightened_transparent_color_moves_toward_white_and_adds_alpha():
     r, g, b, a = theme.lightened_transparent_color((0, 0, 0), amount=0.5, alpha=200)
     assert (r, g, b) == (128, 128, 128)

@@ -32,5 +32,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # Pre-seeded seaborn example-dataset cache (see nodes/example_data.py) so
-# "seaborn/..." example datasets load without any network access.
-ruyso_app = ["nodes/data/seaborn/*.csv"]
+# "seaborn/..." example datasets load without any network access, plus
+# the small themed QSS chevron assets used by ui/theme.py.
+ruyso_app = ["nodes/data/seaborn/*.csv", "ui/assets/*.svg"]

@@ -48,6 +48,7 @@ from pydantic.fields import FieldInfo
 COLUMN_REF_KEY = "ruyso_column_ref"
 SUGGESTIONS_KEY = "ruyso_suggestions"
 COLOR_FIELD_KEY = "ruyso_color_field"
+COLORMAP_FIELD_KEY = "ruyso_colormap_field"
 REACTIVE_CHOICE_KEY = "ruyso_reactive_choice"
 CHECKBOX_LIST_KEY = "ruyso_checkbox_list"
 CATEGORY_MAP_KEY = "ruyso_category_map"
@@ -168,6 +169,28 @@ def color_field(
     accepted as the value.
     """
     extra = _merge({COLOR_FIELD_KEY: {"values": list(suggestions)}}, _pop_visible(field_kwargs))
+    return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
+
+
+COLORMAP_FIELD_KINDS = ("continuous", "qualitative")
+
+
+def colormap_field(
+    *,
+    kind: str,
+    default: Any = ...,
+    description: str | None = None,
+    **field_kwargs: Any,
+) -> Any:
+    """Declare a colormap parameter with a *fixed* kind (not driven by a
+    column). Rendered as the same gradient dropdown as the reactive
+    colormap fields, populated from the user's continuous / qualitative
+    list (built-ins + custom maps -- see ``engine.colormaps``). The
+    stored value is a plain colormap name string.
+    """
+    if kind not in COLORMAP_FIELD_KINDS:
+        raise ValueError(f"colormap_field kind must be one of {COLORMAP_FIELD_KINDS}")
+    extra = _merge({COLORMAP_FIELD_KEY: {"kind": kind}}, _pop_visible(field_kwargs))
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
 
@@ -363,6 +386,11 @@ def field_suggestions(field_info: FieldInfo) -> list[str] | None:
 def color_field_values(field_info: FieldInfo) -> list[str] | None:
     marker = _marker(field_info, COLOR_FIELD_KEY)
     return list(marker.get("values", [])) if marker is not None else None
+
+
+def colormap_field_kind(field_info: FieldInfo) -> str | None:
+    marker = _marker(field_info, COLORMAP_FIELD_KEY)
+    return marker.get("kind") if marker is not None else None
 
 
 def reactive_choice_spec(field_info: FieldInfo) -> dict | None:

@@ -7,7 +7,7 @@ from ruyso_app.ui.file_filters import DEFAULT_FILTER, filter_for
 
 def test_known_node_types_have_specific_filters():
     assert "*.csv" in filter_for("csv_loader")
-    assert "*.png" in filter_for("figure_export")
+    assert "*.png" in filter_for("export_figure")
     assert "*.xlsx" in filter_for("excel_loader")
     assert "*.parquet" in filter_for("parquet_loader")
     assert "*.geojson" in filter_for("geojson_loader")

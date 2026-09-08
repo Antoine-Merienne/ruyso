@@ -92,9 +92,10 @@ def _input_dataframes(node: BaseNode, outputs: dict[str, dict]) -> list:
 def _model_input_series(node: BaseNode, outputs: dict[str, dict]) -> list[str]:
     """
     Series names carried by a ``model`` input port's value, if it exposes
-    them (``ruyso_names`` -- set by the ``var`` node on its fitted
-    result). Lets a model-only plot node (``var_forecast_plot`` /
-    ``irf_plot``) offer tickboxes of the model's variables.
+    them (``ruyso_names`` -- set by the ``var`` node on its fitted result
+    and by ``arima`` / ``auto_arima`` on their forecast bundle). Lets a
+    model-only plot node (``forecast_plot`` / ``irf_plot``) offer
+    tickboxes of the model's variables.
     """
     core_cls = getattr(type(node), "CORE_NODE_CLASS", None)
     if core_cls is None:

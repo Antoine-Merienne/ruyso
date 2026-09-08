@@ -94,14 +94,14 @@ def test_generated_script_only_imports_used_node_classes(sample_csv):
     assert "from ruyso_app.nodes.models import LinearRegressionFit" in script
     # Not part of this graph -> must not be imported.
     assert "MatplotlibPlot" not in script
-    assert "FigureExport" not in script
+    assert "ExportFigure" not in script
 
 
 def test_running_generated_script_reproduces_scheduler_output(tmp_path, sample_csv):
     graph = _regression_graph(sample_csv)
 
     scheduler = PipelineScheduler(memory=joblib.Memory(location=None))
-    expected = scheduler.run(graph)
+    expected, _ = scheduler.run(graph)
     expected_coef = float(expected["fit"]["model"].coef_[0])
 
     script_path = tmp_path / "exported_pipeline.py"

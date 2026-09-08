@@ -21,6 +21,7 @@ from typing import Any, Callable
 import joblib
 
 from ruyso_app.core.registry import NodeRegistry
+from ruyso_app.engine import colormaps as _colormaps
 from ruyso_app.engine.cache import get_memory
 from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
 
@@ -74,7 +75,7 @@ class PipelineScheduler:
         Run a node, going through the joblib cache only if its class
         opts into caching (``Node.cacheable``). Nodes with side
         effects or non-hashable inputs/outputs (e.g. MatplotlibPlot,
-        FigureExport) declare ``cacheable = False`` and are always
+        ExportFigure) declare ``cacheable = False`` and are always
         re-executed directly.
         """
         node_cls = NodeRegistry.get(node_type)
@@ -86,37 +87,72 @@ class PipelineScheduler:
         self,
         graph: PipelineGraph,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> dict[str, dict[str, Any]]:
+        node_callback: Callable[[str, str], None] | None = None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
         """
-        Execute every node in ``graph``, in dependency order.
+        Execute ``graph`` in dependency order, attempting *every* node.
+
+        The graph is structurally validated first — an invalid graph
+        (bad node type, unsatisfied required port, cycle) raises
+        ``GraphValidationError`` before any node runs. Past that, a node
+        that raises at runtime is recorded rather than aborting the run,
+        and its descendants are reported *blocked* (never executed).
 
         Args:
-            graph: The pipeline to run. Validated internally before
-                execution — an invalid graph raises before any node
-                runs.
+            graph: The pipeline to run.
             progress_callback: If given, called ``(done, total)`` after
-                each node finishes, where ``total`` is the node count.
+                each node is dealt with (run, failed, or blocked).
+            node_callback: If given, called ``(node_id, phase)`` as each
+                node is reached, with ``phase`` one of
+                ``"running"`` / ``"ok"`` / ``"error"`` / ``"blocked"``.
 
         Returns:
-            Mapping of node id -> its output dict (port name -> value),
-            for every node in the graph.
+            ``(outputs, errors)`` — ``outputs`` maps node id -> output
+            dict for the nodes that ran cleanly; ``errors`` maps node id
+            -> message for the nodes that raised.
         """
+        _colormaps.register_all(force=False)  # custom colormaps -> matplotlib
         graph.validate()
 
         order = graph.topological_order()
         total = len(order)
         outputs: dict[str, dict[str, Any]] = {}
+        errors: dict[str, str] = {}
+        blocked: set[str] = set()
+
+        def emit(node_id: str, phase: str) -> None:
+            if node_callback is not None:
+                node_callback(node_id, phase)
+
         for index, node_id in enumerate(order, start=1):
             spec = graph.get_node(node_id)
-            inputs = self._collect_inputs(graph, node_id, outputs)
-            outputs[node_id] = self._execute(spec.node_type, spec.params, inputs)
+            if any(
+                conn.source_node in errors or conn.source_node in blocked
+                for conn in graph.incoming_connections(node_id)
+            ):
+                blocked.add(node_id)
+                emit(node_id, "blocked")
+            else:
+                emit(node_id, "running")
+                inputs = self._collect_inputs(graph, node_id, outputs)
+                try:
+                    outputs[node_id] = self._execute(
+                        spec.node_type, spec.params, inputs
+                    )
+                except Exception as exc:  # noqa: BLE001 - collected, not raised
+                    errors[node_id] = str(exc)
+                    emit(node_id, "error")
+                else:
+                    emit(node_id, "ok")
             if progress_callback is not None:
                 progress_callback(index, total)
 
-        return outputs
+        return outputs, errors
 
     def run_available(
-        self, graph: PipelineGraph
+        self,
+        graph: PipelineGraph,
+        node_callback: Callable[[str, str], None] | None = None,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
         """
         Best-effort partial execution: run every node whose inputs are
@@ -128,11 +164,23 @@ class PipelineScheduler:
         data file, wiring up a node) so results appear without an
         explicit Run, even while the rest of the pipeline is unfinished.
 
+        Args:
+            node_callback: If given, called ``(node_id, phase)`` as each
+                node is reached -- ``"running"`` / ``"ok"`` /
+                ``"error"`` / ``"blocked"`` (unwired or downstream of a
+                skip/failure).
+
         Returns:
             ``(outputs, errors)`` -- ``outputs`` maps node id -> output
             dict for the nodes that ran; ``errors`` maps node id ->
             message for nodes that were reached but raised.
         """
+
+        def emit(node_id: str, phase: str) -> None:
+            if node_callback is not None:
+                node_callback(node_id, phase)
+
+        _colormaps.register_all(force=False)  # custom colormaps -> matplotlib
         try:
             order = graph.topological_order()
         except GraphValidationError:
@@ -155,16 +203,22 @@ class PipelineScheduler:
                     break
                 inputs[conn.target_port] = upstream[conn.source_port]
             if missing_upstream:
+                emit(node_id, "blocked")
                 continue
 
             required = {p.name for p in node_cls.inputs if p.required}
             if not required.issubset(inputs):
+                emit(node_id, "blocked")
                 continue
 
+            emit(node_id, "running")
             try:
                 outputs[node_id] = self._execute(spec.node_type, spec.params, inputs)
             except Exception as exc:  # noqa: BLE001 - collected, not raised
                 errors[node_id] = str(exc)
+                emit(node_id, "error")
+            else:
+                emit(node_id, "ok")
 
         return outputs, errors
 

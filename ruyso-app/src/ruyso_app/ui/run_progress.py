@@ -4,11 +4,11 @@ The pipeline-run progress indicator shown on the right of the tab band.
 A slim bar that fills as nodes complete during a manual **Run
 Pipeline**, with the completion percentage written just to its right.
 On finish it settles into a solid **green** bar on success or **red**
-on failure and stays there until the next run starts. It is hidden
-before the first run.
+on failure and stays there until the next run starts. It is always
+visible -- a flat **grey** track before the first manual run.
 
 Colour comes from a Qt dynamic property (``state`` =
-``running`` / ``success`` / ``error``) styled in
+``idle`` / ``running`` / ``success`` / ``error``) styled in
 ``theme.stylesheet_for``; this widget only sets values and toggles
 that property.
 """
@@ -47,7 +47,6 @@ class RunProgressBar(QWidget):
         layout.addWidget(self._percent, 0, Qt.AlignVCenter)
 
         self._set_state("idle")
-        self.setVisible(False)
 
     # -- driven by MainWindow's run callbacks -----------------------------
 

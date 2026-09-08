@@ -20,6 +20,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QSizePolicy, QWidget
 from PySide6.QtCore import Qt, Signal
 
+from ruyso_app.ui.auto_status import AutoStatusPill
 from ruyso_app.ui.run_progress import RunProgressBar
 
 
@@ -39,6 +40,9 @@ class TabBar(QWidget):
         """
         super().__init__(parent)
         self.setObjectName("ruysoTabBar")
+        # Needed for the QSS border-bottom (the divider baseline the
+        # active folder tab sits on) to actually paint on a bare QWidget.
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
@@ -69,6 +73,11 @@ class TabBar(QWidget):
 
         self.progress = RunProgressBar(self)
         layout.addWidget(self.progress, 0, Qt.AlignVCenter)
+        layout.addSpacing(10)
+
+        #: Background auto-run status ("· auto"), driven by MainWindow.
+        self.auto_pill = AutoStatusPill(self)
+        layout.addWidget(self.auto_pill, 0, Qt.AlignVCenter)
         layout.addSpacing(14)
 
         if tabs:

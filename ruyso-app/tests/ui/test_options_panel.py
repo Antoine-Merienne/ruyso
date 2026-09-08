@@ -399,7 +399,7 @@ def test_statistics_micro_type_dropdown_separates_tests_from_non_tests(qapp):
     assert len(groups) == 3  # tools, time-series models, then every *_test node
     assert sorted(t for g in groups for t in g) == BY_CAT["statistics"]
     assert groups[0] == ["regression", "pca", "ica", "tsne", "multiple_testing"]
-    assert groups[1] == ["arima", "auto_arima", "var"]
+    assert groups[1] == ["arima", "auto_arima", "var", "seasonal_decompose"]
     assert groups[2] == sorted(groups[2])
     assert all(t.endswith("_test") for t in groups[2])
 
@@ -463,6 +463,20 @@ def test_visible_when_in_shows_the_row_for_any_listed_value(qapp):
     assert _rows(panel)["show outliers"] is False
     panel._field_widgets["kind"].setCurrentText("swarm")
     assert _rows(panel)["show outliers"] is False
+
+
+def test_axis_limit_spin_boxes_are_hidden_until_the_toggle_is_ticked(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    rows = _rows(panel)
+    assert rows["x min"] is False and rows["x max"] is False
+    panel._field_widgets["x_limits"].setChecked(True)
+    rows = _rows(panel)
+    assert rows["x min"] is True and rows["x max"] is True
+    assert rows["y min"] is False  # y toggle still off
 
 
 def test_custom_operation_code_field_is_a_multiline_editor_with_a_column_hint(qapp):
@@ -1062,7 +1076,7 @@ def test_optimize_bounds_table_lists_the_nodes_own_numeric_hyperparameters(qapp)
     # fields -- random_state (and the optimize_* fields themselves) must
     # never appear as a row to bound.
     assert len(boxes) == 3  # alpha, max_iter, tol
-    form = table.widget().layout()
+    form = table.layout()
     row_names = {
         form.itemAt(i, form.ItemRole.LabelRole).widget().text()
         for i in range(form.rowCount())
@@ -1081,7 +1095,7 @@ def test_optimize_bounds_table_round_trips_a_checked_row(qapp):
     panel.show_node(node, BY_CAT)
 
     table = panel._field_widgets["optimize_bounds"]
-    form = table.widget().layout()
+    form = table.layout()
     alpha_row = next(
         i for i in range(form.rowCount())
         if form.itemAt(i, form.ItemRole.LabelRole).widget().text() == "alpha"
@@ -1098,3 +1112,68 @@ def test_optimize_bounds_table_round_trips_a_checked_row(qapp):
 
     panel.flush_recompute()  # these edits are batched -- commit them
     assert json.loads(node.get_property("optimize_bounds")) == {"alpha": [0.5, 5.0]}
+
+
+# -- visual dropdown swatches (see ui/swatches.py) --------------------
+
+
+def _combo_in(widget):
+    return widget if isinstance(widget, QComboBox) else widget.findChild(QComboBox)
+
+
+def test_marker_and_style_dropdowns_carry_swatch_icons(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    for field in ("marker_shape", "line_style", "bar_hatch", "shape_map"):
+        combo = _combo_in(panel._field_widgets[field])
+        assert combo is not None and combo.count() > 0
+        assert all(not combo.itemIcon(i).isNull() for i in range(combo.count()))
+
+
+def test_reactive_colormap_dropdown_is_a_swatch_combo(qapp):
+    from ruyso_app.ui.swatch_combo import ColormapItemDelegate, SwatchComboBox
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    node.set_property("color_by", "grp")
+    panel = OptionsPanel()
+    panel.show_node(
+        node, BY_CAT, input_columns={"grp": "categorical", "a": "numeric", "b": "numeric"}
+    )
+
+    combo = panel._field_widgets["colormap"]
+    assert isinstance(combo, SwatchComboBox)
+    assert combo.count() > 0
+    assert isinstance(combo.view().itemDelegate(), ColormapItemDelegate)
+
+
+def test_fixed_literal_colormap_dropdown_is_also_a_swatch_combo(qapp):
+    from ruyso_app.ui.swatch_combo import SwatchComboBox
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("confusion_matrix_plot"), name="cm")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT)
+
+    combo = panel._field_widgets["colormap"]
+    assert isinstance(combo, SwatchComboBox)
+    assert combo.count() > 0
+
+
+def test_colour_name_dropdown_gets_swatches_and_a_live_preview(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    row = panel._field_widgets["mark_color"]
+    combo = _combo_in(row)
+    assert all(not combo.itemIcon(i).isNull() for i in range(combo.count()))
+    # the row's leading QLabel shows a live swatch of the current colour
+    preview = next(
+        lbl for lbl in row.findChildren(QLabel) if lbl.pixmap() is not None and not lbl.pixmap().isNull()
+    )
+    assert preview is not None

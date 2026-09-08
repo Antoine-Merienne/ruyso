@@ -19,6 +19,62 @@ def _run(**params):
     return node.run(df=df)["figure"]
 
 
+# -- manual axis limits (x_limits / y_limits) ------------------------
+
+
+def test_matplotlib_plot_manual_xy_limits_are_applied():
+    ax = _run(
+        x="x", y="y", kind="scatter",
+        x_limits=True, x_min=1.5, x_max=3.5,
+        y_limits=True, y_min=5.0, y_max=25.0,
+    ).axes[0]
+    assert ax.get_xlim() == (1.5, 3.5)
+    assert ax.get_ylim() == (5.0, 25.0)
+
+
+def test_axis_limits_off_leaves_autoscale():
+    ax = _run(x="x", y="y", kind="scatter", x_min=99.0, x_max=100.0).axes[0]  # ignored
+    lo, hi = ax.get_xlim()
+    assert lo < 1 and hi > 4  # still autoscaled to the data
+
+
+def test_time_series_plot_accepts_date_string_x_limits():
+    import matplotlib.dates as mdates
+    import numpy as np
+
+    from ruyso_app.nodes.viz import TimeSeriesPlot, TimeSeriesPlotParams
+
+    ts = pd.DataFrame(
+        {"d": pd.date_range("2021-01-01", periods=200), "v": np.arange(200.0)}
+    )
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="d", y_column="v",
+            x_limits=True, x_min="2021-03-01", x_max="2021-05-01",
+        )
+    ).run(df=ts)["figure"].axes[0]
+    lo, hi = (mdates.num2date(v).date().isoformat() for v in ax.get_xlim())
+    assert lo == "2021-03-01" and hi == "2021-05-01"
+
+
+def test_time_series_plot_blank_x_limit_edge_stays_auto():
+    import numpy as np
+
+    from ruyso_app.nodes.viz import TimeSeriesPlot, TimeSeriesPlotParams
+
+    ts = pd.DataFrame(
+        {"d": pd.date_range("2021-01-01", periods=100), "v": np.arange(100.0)}
+    )
+    ax = TimeSeriesPlot(
+        params=TimeSeriesPlotParams(
+            x_column="d", y_column="v", x_limits=True, x_min="2021-02-01", x_max="",
+        )
+    ).run(df=ts)["figure"].axes[0]
+    import matplotlib.dates as mdates
+
+    assert mdates.num2date(ax.get_xlim()[0]).date().isoformat() == "2021-02-01"
+
+
 def test_matplotlib_plot_returns_a_figure_with_correct_labels():
     df = pd.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
     node = MatplotlibPlot(params=MatplotlibPlotParams(x="x", y="y", title="Test plot"))
@@ -920,6 +976,32 @@ def test_heatmap_1d_single_row_by_default():
     assert ax.images[0].get_array().shape == (1, 6)
 
 
+def test_heatmap_1d_vertical_orientation_transposes_the_strip_and_colorbar():
+    import numpy as np
+
+    df = pd.DataFrame({"v": np.arange(6, dtype="float64")})
+    fig = Heatmap1D(
+        params=Heatmap1DParams(column="v", orientation="vertical")
+    ).run(df=df)["figure"]
+    assert fig.axes[0].images[0].get_array().shape == (6, 1)  # a column, not a row
+    # the colorbar axes are taller than wide (vertical bar)
+    cbar = fig.axes[1]
+    bb = cbar.get_position()
+    assert bb.height > bb.width
+
+
+def test_heatmap_1d_label_column_names_the_cell_ticks():
+    import numpy as np
+
+    df = pd.DataFrame(
+        {"v": np.arange(4.0), "name": ["Jan", "Feb", "Mar", "Apr"]}
+    )
+    ax = Heatmap1D(
+        params=Heatmap1DParams(column="v", label_column="name")
+    ).run(df=df)["figure"].axes[0]
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["Jan", "Feb", "Mar", "Apr"]
+
+
 def test_heatmap_1d_unknown_column_raises():
     with pytest.raises(ValueError, match="not in the input data"):
         Heatmap1D(params=Heatmap1DParams(column="nope")).run(df=pd.DataFrame({"v": [1]}))
@@ -999,6 +1081,67 @@ def test_density_2d_needs_at_least_three_rows():
 def test_density_2d_unknown_column_raises():
     with pytest.raises(ValueError, match="not in the input data"):
         Density2D(params=Density2DParams(x="a", y="nope")).run(df=_xy_df())
+
+
+def _grouped_xy_df(n=120, seed=0):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame(
+        {
+            "a": rng.normal(size=n),
+            "b": rng.normal(size=n),
+            "grp": rng.choice(["p", "q", "r"], size=n),
+            "cont": rng.normal(size=n),
+        }
+    )
+
+
+def test_density_2d_discrete_color_by_draws_one_kde_per_level_with_a_legend():
+    fig = Density2D(
+        params=Density2DParams(x="a", y="b", color_by="grp", colormap="tab10")
+    ).run(df=_grouped_xy_df())["figure"]
+    ax = fig.axes[0]
+    legend = ax.get_legend()
+    assert legend is not None
+    assert {t.get_text() for t in legend.get_texts()} == {"p", "q", "r"}
+    # the per-level ramps are distinct colours (not one repeated shade)
+    from matplotlib.collections import PathCollection  # noqa: F401
+
+    assert len(ax.collections) > 0
+
+
+def test_density_2d_continuous_color_by_is_rejected():
+    with pytest.raises(ValueError, match="continuous"):
+        Density2D(params=Density2DParams(x="a", y="b", color_by="cont")).run(
+            df=_grouped_xy_df()
+        )
+
+
+def test_density_2d_marginals_add_top_and_right_axes():
+    fig = Density2D(
+        params=Density2DParams(x="a", y="b", show_marginals=True, marginal_kind="kde")
+    ).run(df=_xy_df())["figure"]
+    assert len(fig.axes) == 3  # main + top + right
+
+
+def test_matplotlib_plot_scatter_marginals_add_axes_and_follow_color_by():
+    fig = _run(
+        df=_grouped_xy_df(),
+        x="a",
+        y="b",
+        kind="scatter",
+        color_by="grp",
+        colormap="tab10",
+        show_marginals=True,
+        marginal_kind="histogram",
+    )
+    assert len(fig.axes) == 3
+
+
+def test_matplotlib_plot_marginals_ignored_for_non_scatter_kinds():
+    fig = _run(x="x", y="y", kind="line", show_marginals=True)
+    assert len(fig.axes) == 1
 
 
 # -- PCA-specific plots: pca_scree_plot, pca_corr_circle -----------------
@@ -1107,8 +1250,8 @@ from ruyso_app.nodes.viz import (  # noqa: E402
     TimeSeriesPlotParams,
     VarAcorrPlot,
     VarAcorrPlotParams,
-    VarForecastPlot,
-    VarForecastPlotParams,
+    ForecastPlot,
+    ForecastPlotParams,
 )
 
 
@@ -1233,8 +1376,8 @@ def test_var_forecast_acorr_and_irf_plots(method):
         )
     ).run(df=df)["model"]
 
-    fc = VarForecastPlot(
-        params=VarForecastPlotParams(variables=["gdp", "rate"])
+    fc = ForecastPlot(
+        params=ForecastPlotParams(variables=["gdp", "rate"])
     ).run(model=model)["figure"]
     _assert_oo_figure(fc)
     assert len(fc.axes) == 2  # one panel per chosen variable
@@ -1257,8 +1400,8 @@ def test_var_forecast_and_irf_ci_styles_and_colours(ci_style):
         params=VarParams(variables=["gdp", "cpi", "rate"], lags=2)
     ).run(df=df)["model"]
 
-    VarForecastPlot(
-        params=VarForecastPlotParams(
+    ForecastPlot(
+        params=ForecastPlotParams(
             ci_style=ci_style, history_color="teal", forecast_color="crimson"
         )
     ).run(model=model)["figure"]

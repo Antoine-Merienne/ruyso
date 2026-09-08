@@ -2,9 +2,18 @@
 Session-wide pytest fixtures.
 """
 
+import os
 import sys
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_ruyso_config(tmp_path_factory):
+    """Point ``engine.colormaps`` at a throwaway config dir so tests never
+    touch (or depend on) the real ~/.config/ruyso/colormaps.json."""
+    os.environ["RUYSO_CONFIG_DIR"] = str(tmp_path_factory.mktemp("ruyso-config"))
+    yield
 
 
 @pytest.fixture(autouse=True)

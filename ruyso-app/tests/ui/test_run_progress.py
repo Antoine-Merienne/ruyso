@@ -5,9 +5,16 @@ Tests for ``ui.run_progress.RunProgressBar`` state handling.
 from ruyso_app.ui.run_progress import RunProgressBar
 
 
-def test_hidden_until_a_run_starts(qapp):
-    bar = RunProgressBar()
-    assert not bar.isVisibleTo(None) or bar.isHidden()
+def test_idle_and_shown_before_any_run(qapp):
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    # always in the tab band now -- a flat grey track before the first
+    # run, so __init__ must not hide it.
+    host = QWidget()
+    QVBoxLayout(host).addWidget(RunProgressBar(host))
+    host.show()
+    bar = host.findChild(RunProgressBar)
+    assert bar.isVisible()
     assert bar.property("state") == "idle"
 
 

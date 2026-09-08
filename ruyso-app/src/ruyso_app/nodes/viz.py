@@ -13,6 +13,7 @@ from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
     checkbox_list_field,
     color_field,
+    colormap_field,
     column_field,
     reactive_choice_field,
     unit_interval_field,
@@ -265,6 +266,44 @@ def _place_legends(ax: Any, p: Any, legends: list[tuple[str, list]]) -> None:
         )
 
 
+def _limit_value(raw: Any) -> Any:
+    """Parse one manual axis-limit value: a number, an ISO date string,
+    or ``None`` for "leave this edge on autoscale"."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            import pandas as pd
+
+            try:
+                return pd.to_datetime(text)
+            except (ValueError, TypeError):
+                return None
+    return float(raw)
+
+
+def _apply_axis_limits(axes: Any, p: Any) -> None:
+    """Apply the ``x_limits`` / ``y_limits`` manual ranges from ``p`` to
+    one Axes or a list of them. A no-op when the params don't carry the
+    fields or the ``*_limits`` toggle is off."""
+    ax_list = list(axes) if isinstance(axes, (list, tuple)) else [axes]
+    if getattr(p, "x_limits", False):
+        lo, hi = _limit_value(getattr(p, "x_min", None)), _limit_value(getattr(p, "x_max", None))
+        if lo is not None or hi is not None:
+            for ax in ax_list:
+                ax.set_xlim(left=lo, right=hi)
+    if getattr(p, "y_limits", False):
+        lo, hi = _limit_value(getattr(p, "y_min", None)), _limit_value(getattr(p, "y_max", None))
+        if lo is not None or hi is not None:
+            for ax in ax_list:
+                ax.set_ylim(bottom=lo, top=hi)
+
+
 def _finalize_plot(
     fig: Any,
     ax: Any,
@@ -286,6 +325,7 @@ def _finalize_plot(
             ax.set_xscale("log")
         if getattr(p, "log_y", False):
             ax.set_yscale("log")
+    _apply_axis_limits(ax, p)
     if p.title:
         ax.set_title(
             p.title,
@@ -293,7 +333,11 @@ def _finalize_plot(
             fontweight="bold" if p.title_bold else "normal",
             fontstyle="italic" if p.title_italic else "normal",
         )
-    fig.tight_layout()
+    # A figure built by _new_joint_figure already carries a
+    # (constrained) layout engine that understands the marginal axes;
+    # tight_layout would fight it and warn.
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
 
 
 def _categorical_hue(df: Any, color_by: str | None) -> str | None:
@@ -322,6 +366,89 @@ def _categorical_hue(df: Any, color_by: str | None) -> str | None:
             f"categorical column only -- bin it first with the Bin node."
         )
     return col
+
+
+# --------------------------------------------------------------------------
+# Marginal distributions (shared by matplotlib_plot scatter + density_2d):
+# a strip summarising x along the top axis and y along the right axis.
+# --------------------------------------------------------------------------
+
+_MARGINAL_KINDS = Literal["histogram", "kde", "histogram+kde", "rug"]
+
+
+def _new_joint_figure(p: Any):
+    """A main ``Axes`` plus top (x) and right (y) marginal axes.
+
+    The marginals share the main axis they summarise, carry no ticks,
+    spines or grid and take ~1/6 of the figure. Returns
+    ``(fig, ax_main, ax_top, ax_right)``. Use in place of
+    :func:`_new_figure` when ``show_marginals`` is on.
+    """
+    from matplotlib.figure import Figure
+
+    # constrained layout (not tight_layout) understands the marginal
+    # grid; _finalize_plot skips its tight_layout when an engine is set.
+    fig = Figure(figsize=_fig_size(p), layout="constrained")
+    fig.get_layout_engine().set(w_pad=0.02, h_pad=0.02, wspace=0.02, hspace=0.02)
+    gs = fig.add_gridspec(2, 2, width_ratios=(5, 1), height_ratios=(1, 5))
+    ax_main = fig.add_subplot(gs[1, 0])
+    ax_top = fig.add_subplot(gs[0, 0], sharex=ax_main)
+    ax_right = fig.add_subplot(gs[1, 1], sharey=ax_main)
+    for m in (ax_top, ax_right):
+        for spine in m.spines.values():
+            spine.set_visible(False)
+        m.grid(False)
+    ax_top.tick_params(axis="x", labelbottom=False, length=0)
+    ax_top.tick_params(axis="y", labelleft=False, left=False, length=0)
+    ax_right.tick_params(axis="y", labelleft=False, length=0)
+    ax_right.tick_params(axis="x", labelbottom=False, bottom=False, length=0)
+    return fig, ax_main, ax_top, ax_right
+
+
+def _draw_marginals(
+    ax_top: Any, ax_right: Any, xvals: Any, yvals: Any, *, kind: str, color: Any
+) -> None:
+    """Draw one group's x marginal on ``ax_top`` and y marginal on ``ax_right``.
+
+    ``kind`` is one of :data:`_MARGINAL_KINDS`. Call once per colour
+    group (passing that group's colour) so the marginals follow a
+    discrete ``color_by``.
+    """
+    import numpy as np
+
+    def _one(ax: Any, values: Any, vertical: bool) -> None:
+        arr = np.asarray(values, dtype="float64")
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return
+        orient = "vertical" if vertical else "horizontal"
+        if kind in ("histogram", "histogram+kde"):
+            ax.hist(
+                arr, bins="auto", orientation=orient, color=color,
+                alpha=0.5 if kind == "histogram+kde" else 0.8,
+                density=kind == "histogram+kde",
+            )
+        if kind in ("kde", "histogram+kde") and arr.size > 2 and np.ptp(arr) > 0:
+            from scipy.stats import gaussian_kde
+
+            grid = np.linspace(arr.min(), arr.max(), 200)
+            dens = gaussian_kde(arr)(grid)
+            if vertical:
+                ax.plot(grid, dens, color=color, linewidth=1.0)
+                ax.fill_between(grid, dens, color=color, alpha=0.25)
+            else:
+                ax.plot(dens, grid, color=color, linewidth=1.0)
+                ax.fill_betweenx(grid, dens, color=color, alpha=0.25)
+        if kind == "rug":
+            if vertical:
+                ax.plot(arr, np.zeros_like(arr), "|", color=color, alpha=0.6, markersize=10)
+                ax.set_ylim(-0.5, 1.0)
+            else:
+                ax.plot(np.zeros_like(arr), arr, "_", color=color, alpha=0.6, markersize=10)
+                ax.set_xlim(-0.5, 1.0)
+
+    _one(ax_top, xvals, vertical=True)
+    _one(ax_right, yvals, vertical=False)
 
 
 class MatplotlibPlotParams(NodeParams):
@@ -505,9 +632,37 @@ class MatplotlibPlotParams(NodeParams):
         description="Opacity for the largest / last alpha-by level.",
     )
 
+    # -- marginals (scatter only) ---------------------------------------
+    show_marginals: bool = visible_field(
+        False,
+        visible_when=("kind", "scatter"),
+        description="Add a distribution of x along the top and of y along "
+        "the right. Follows a discrete colour-by column (one marginal per "
+        "group, same palette).",
+    )
+    marginal_kind: _MARGINAL_KINDS = visible_field(
+        "histogram",
+        visible_when=("show_marginals", "True"),
+        description="Style of the top / right marginal distributions.",
+    )
+
     # -- axes ---------------------------------------------------------
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -630,6 +785,11 @@ class MatplotlibPlot(Node):
         if color_kind == "continuous":
             color_norm = plt.Normalize(np.nanmin(ci["num"]), np.nanmax(ci["num"]))
         elif color_kind == "discrete":
+            # A per-level palette needs a qualitative map: sampling a
+            # continuous one (256-entry LUT) at 0, 1, 2 ... gives nearly
+            # identical colours, so fall back to tab10.
+            if getattr(color_cmap, "N", 256) > 32:
+                color_cmap = plt.get_cmap("tab10")
             color_palette = [
                 color_cmap(i % color_cmap.N) for i in range(max(len(ci["cats"]), 1))
             ]
@@ -682,8 +842,13 @@ class MatplotlibPlot(Node):
         )
         legend_label = p.legend_title or (p.color_by or "").strip()
 
+        marginals_on = bool(p.show_marginals) and p.kind == "scatter"
+
         with plt.style.context(_BASE_STYLE):
-            fig, ax = _new_figure(p)
+            if marginals_on:
+                fig, ax, ax_top, ax_right = _new_joint_figure(p)
+            else:
+                fig, ax = _new_figure(p)
 
             # -- scatter --------------------------------------------
             if p.kind == "scatter":
@@ -968,6 +1133,22 @@ class MatplotlibPlot(Node):
                     ha="right", va="bottom",
                     fontsize=max(p.legend_font_size - 2, 6), style="italic", color="0.4",
                 )
+
+            if marginals_on:
+                if color_kind == "discrete":
+                    for cgi in range(len(ci["cats"])):
+                        gmask = ci["codes"] == cgi
+                        _draw_marginals(
+                            ax_top, ax_right,
+                            np.asarray(x)[gmask], np.asarray(y)[gmask],
+                            kind=p.marginal_kind, color=color_palette[cgi],
+                        )
+                else:
+                    _draw_marginals(
+                        ax_top, ax_right, np.asarray(x), np.asarray(y),
+                        kind=p.marginal_kind,
+                        color=_grey if color_kind == "continuous" else single_color,
+                    )
 
             _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
 
@@ -1359,6 +1540,20 @@ class BoxPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -1540,6 +1735,20 @@ class HistogramPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -1661,9 +1870,7 @@ class HeatmapPlotParams(NodeParams):
         visible_when=("statistic", "aggregate"),
         description="Reduction applied to the value column per cell.",
     )
-    colormap: Literal[
-        "viridis", "plasma", "cividis", "magma", "coolwarm", "Spectral", "Blues", "Greens"
-    ] = "viridis"
+    colormap: str = colormap_field(kind="continuous", default="viridis")
     annotate: bool = True
 
     x_label: str = ""
@@ -1774,13 +1981,6 @@ class HeatmapPlot(Node):
 # Model-visualization plots (consume a fitted model + a held-out X / y)
 # ==========================================================================
 
-#: Sequential colormaps offered by the confusion-matrix node.
-_MODEL_SEQUENTIAL = Literal[
-    "Blues", "viridis", "plasma", "cividis", "magma", "Greens", "Purples", "Greys"
-]
-#: Qualitative colormaps for the per-class curves (multiclass ROC / PR / DET).
-_MODEL_QUALITATIVE = Literal["tab10", "Set1", "Set2", "Dark2", "Paired"]
-
 _MODEL_PLOT_INPUTS = [
     Port(name="model", dtype="model"),
     Port(name="X", dtype="dataframe"),
@@ -1851,7 +2051,7 @@ class ConfusionMatrixPlotParams(NodeParams):
     """
 
     normalize: Literal["none", "true", "pred", "all"] = "none"
-    colormap: _MODEL_SEQUENTIAL = "Blues"
+    colormap: str = colormap_field(kind="continuous", default="Blues")
     annotate: bool = True
     colorbar: bool = True
 
@@ -1924,11 +2124,25 @@ class _CurvePlotParams(NodeParams):
         default=_DEFAULT_COLOR,
         description="Curve colour for a binary target.",
     )
-    colormap: _MODEL_QUALITATIVE = "tab10"  # per-class colours, multiclass
+    colormap: str = colormap_field(kind="qualitative", default="tab10")  # per-class, multiclass
     line_width: float = 1.6
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2093,6 +2307,20 @@ class CalibrationCurvePlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2182,6 +2410,20 @@ class LearningCurvePlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2271,6 +2513,20 @@ class QQPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2492,6 +2748,12 @@ class Heatmap1DParams(NodeParams):
     """
 
     column: str = column_field(dtypes=("numeric",))
+    label_column: str = column_field(
+        dtypes=("any",), default="", allow_none=True,
+        description="Optional column whose values label the cells along the "
+        "strip (used only when the strip is not wrapped).",
+    )
+    orientation: Literal["horizontal", "vertical"] = "horizontal"
     columns_per_row: int = 0
     colormap: str = reactive_choice_field(
         options="colormaps", depends_on="column", default="viridis",
@@ -2538,17 +2800,41 @@ class Heatmap1D(Node):
         if values.size == 0:
             raise ValueError("heatmap_1d: no values to plot.")
 
-        cols = int(p.columns_per_row) or values.size
-        rows = int(np.ceil(values.size / cols))
-        padded = np.full(rows * cols, np.nan)
+        vertical = p.orientation == "vertical"
+        wrapped = int(p.columns_per_row) > 0
+        per = int(p.columns_per_row) or values.size
+        n_blocks = int(np.ceil(values.size / per))
+        padded = np.full(n_blocks * per, np.nan)
         padded[: values.size] = values
-        grid = padded.reshape(rows, cols)
+        # horizontal: rows = wrap blocks, cols = cells along the strip;
+        # vertical: the same laid out as columns (cells run top -> bottom).
+        grid = padded.reshape(n_blocks, per)
+        if vertical:
+            grid = grid.T
+        rows, cols = grid.shape
+
+        # the "strip" (cell) axis and how many cells it has
+        cell_axis = "y" if vertical else "x"
+        n_cells = rows if vertical else cols
+
+        label_col = (p.label_column or "").strip()
+        labels: list[str] | None = None
+        if label_col and label_col in df.columns and not wrapped:
+            labels = [str(v) for v in df[label_col].tolist()[: n_cells]]
 
         with plt.style.context(_BASE_STYLE):
             fig, ax = _new_figure(p)
             im = ax.imshow(grid, aspect="auto", cmap=p.colormap or "viridis")
-            ax.set_yticks([])
             ax.set_xticks([])
+            ax.set_yticks([])
+            if labels is not None:
+                step = max(1, len(labels) // 30)  # keep the axis readable
+                ticks = list(range(0, len(labels), step))
+                getattr(ax, f"set_{cell_axis}ticks")(ticks)
+                getattr(ax, f"set_{cell_axis}ticklabels")(
+                    [labels[i] for i in ticks],
+                    rotation=0 if vertical else 90, fontsize=7,
+                )
             if p.show_values:
                 for r in range(rows):
                     for c in range(cols):
@@ -2559,7 +2845,11 @@ class Heatmap1D(Node):
                                 ha="center", va="center", fontsize=7, color="white",
                             )
             if p.show_colorbar:
-                fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.15, pad=0.15)
+                fig.colorbar(
+                    im, ax=ax,
+                    orientation="vertical" if vertical else "horizontal",
+                    fraction=0.15, pad=0.15,
+                )
             if p.title:
                 ax.set_title(
                     p.title, fontsize=p.title_font_size,
@@ -2680,26 +2970,68 @@ class Density2DParams(NodeParams):
         x / y: Numeric columns.
         kind: "contour" (a bivariate KDE, contour lines or filled) or
             "hexbin" (binned counts -- scales better to a lot of data).
+        color_by: (contour only) a categorical column -- draw one KDE
+            per level, each in a single-hue colormap derived from
+            ``colormap`` (colour i of the qualitative map -> a
+            white->colour ramp). None = a single density.
         fill: Fill the KDE contours (contour only).
         levels: Number of contour levels (contour only).
         gridsize: Hexagon grid resolution (hexbin only).
-        colormap: Continuous colormap.
+        colormap: Continuous colormap (no ``color_by``) or the
+            qualitative map the per-level ramps are derived from.
         show_points: Overlay the raw (x, y) points, lightly.
+        show_marginals / marginal_kind: Add a distribution of x along
+            the top and of y along the right; follows ``color_by``.
+        show_legend / legend_location / legend_font_size: the
+            per-level legend, shown only when ``color_by`` is set.
         the remaining fields: axes + figure size + title styling.
     """
 
     x: str = column_field(dtypes=("numeric",))
     y: str = column_field(dtypes=("numeric",))
     kind: Literal["contour", "hexbin"] = "contour"
+    color_by: str = column_field(
+        dtypes=("any",),
+        default="",
+        allow_none=True,
+        visible_when=("kind", "contour"),
+        description="Categorical column: one KDE per level, each a single-hue "
+        "ramp from 'colormap'. None = one density in 'colormap'.",
+    )
     fill: bool = visible_field(True, visible_when=("kind", "contour"))
     levels: int = visible_field(10, visible_when=("kind", "contour"))
     gridsize: int = visible_field(30, visible_when=("kind", "hexbin"))
     colormap: str = reactive_choice_field(
-        options="colormaps", depends_on="x", default="viridis",
+        options="colormaps", depends_on="color_by", default="viridis",
     )
     show_points: bool = False
+    show_marginals: bool = False
+    marginal_kind: _MARGINAL_KINDS = visible_field(
+        "histogram",
+        visible_when=("show_marginals", "True"),
+        description="Style of the top / right marginal distributions.",
+    )
+    show_legend: bool = visible_field(True, visible_when_set="color_by")
+    legend_location: _LEGEND_LOCATIONS = visible_field(
+        "best", visible_when_set="color_by"
+    )
+    legend_font_size: int = visible_field(9, visible_when_set="color_by")
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2735,27 +3067,91 @@ class Density2D(Node):
         for col in (p.x, p.y):
             if col not in df.columns:
                 raise ValueError(f"density_2d: column {col!r} is not in the input data.")
-        data = df[[p.x, p.y]].apply(pd.to_numeric, errors="coerce").dropna()
+
+        hue_col = (p.color_by or "").strip()
+        use_hue = bool(hue_col) and hue_col in df.columns and p.kind == "contour"
+        keep = [p.x, p.y] + ([hue_col] if use_hue else [])
+        data = df[keep].copy()
+        data[p.x] = pd.to_numeric(data[p.x], errors="coerce")
+        data[p.y] = pd.to_numeric(data[p.y], errors="coerce")
+        data = data.dropna(subset=[p.x, p.y])
         if len(data) < 3:
             raise ValueError("density_2d: need at least 3 complete (x, y) rows.")
+        if use_hue:
+            _categorical_hue(data, hue_col)  # raises on a continuous hue column
+
+        marginals_on = bool(p.show_marginals)
+
+        def _neutral_marginal_color() -> Any:
+            return plt.get_cmap(p.colormap or "viridis")(0.6)
 
         with plt.style.context(_BASE_STYLE):
-            fig, ax = _new_figure(p)
-            if p.kind == "contour":
+            if marginals_on:
+                fig, ax, ax_top, ax_right = _new_joint_figure(p)
+            else:
+                fig, ax = _new_figure(p)
+
+            if p.kind == "contour" and use_hue:
+                import seaborn as sns
+
+                cats = list(pd.Categorical(data[hue_col]).categories)
+                base_cmap = plt.get_cmap(p.colormap or "tab10")
+                # A per-level palette needs a *qualitative* map; if a
+                # continuous one is still selected (its lookup table has
+                # 256 entries), fall back so levels 0 and 1 aren't the
+                # same colour.
+                if getattr(base_cmap, "N", 256) > 32:
+                    base_cmap = plt.get_cmap("tab10")
+                cat_colors = [base_cmap(i % base_cmap.N) for i in range(len(cats))]
+                for i, cat in enumerate(cats):
+                    sub = data[data[hue_col] == cat]
+                    if len(sub) < 3:
+                        continue
+                    sns.kdeplot(
+                        data=sub, x=p.x, y=p.y, fill=bool(p.fill),
+                        levels=max(int(p.levels), 2),
+                        cmap=sns.light_palette(cat_colors[i], as_cmap=True), ax=ax,
+                    )
+                    if p.show_points:
+                        ax.scatter(sub[p.x], sub[p.y], s=6, color=cat_colors[i], alpha=0.3)
+                    if marginals_on:
+                        _draw_marginals(
+                            ax_top, ax_right, sub[p.x], sub[p.y],
+                            kind=p.marginal_kind, color=cat_colors[i],
+                        )
+                if p.show_legend and cats:
+                    handles = _encoding_handles(
+                        "scatter", cats, colors=cat_colors, shape_seq=None
+                    )
+                    _place_legends(ax, p, [(hue_col, handles)])
+            elif p.kind == "contour":
                 import seaborn as sns
 
                 sns.kdeplot(
                     data=data, x=p.x, y=p.y, fill=bool(p.fill),
                     levels=max(int(p.levels), 2), cmap=p.colormap or "viridis", ax=ax,
                 )
+                if p.show_points:
+                    ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
+                if marginals_on:
+                    _draw_marginals(
+                        ax_top, ax_right, data[p.x], data[p.y],
+                        kind=p.marginal_kind, color=_neutral_marginal_color(),
+                    )
             else:
                 hb = ax.hexbin(
                     data[p.x], data[p.y], gridsize=max(int(p.gridsize), 4),
                     cmap=p.colormap or "viridis",
                 )
                 fig.colorbar(hb, ax=ax, label="count")
-            if p.show_points:
-                ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
+                if p.show_points:
+                    ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
+                if marginals_on:
+                    _draw_marginals(
+                        ax_top, ax_right, data[p.x], data[p.y],
+                        kind=p.marginal_kind, color=_neutral_marginal_color(),
+                    )
+
             _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
         return {"figure": fig}
 
@@ -2787,6 +3183,20 @@ class PCAScreePlotParams(NodeParams):
     )
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: float = visible_field(
+        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
+    )
+    x_max: float = visible_field(
+        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3035,15 +3445,22 @@ def _draw_ci(ax: Any, x: Any, mid: Any, low: Any, high: Any, color: Any, style: 
     # "none" -> nothing
 
 
-def _var_history(model: Any, ctx: str):
-    """(endog DataFrame, variable names, 'var'|'vecm') for a fitted VAR/VECM model."""
+def _var_history(model: Any, ctx: str, *, require_irf: bool = True):
+    """(endog DataFrame, variable names, 'var'|'vecm'|'arima') for a
+    fitted model on a ``model`` input port. ``require_irf`` is relaxed
+    for ``forecast_plot``, which also accepts a one-variable ARIMA
+    bundle (see ``nodes.statistics.ArimaForecast``)."""
     endog = getattr(model, "ruyso_endog", None)
     names = list(getattr(model, "ruyso_names", []) or [])
     method = getattr(model, "ruyso_method", "")
-    if endog is None or not names or not hasattr(model, "irf"):
-        raise ValueError(
-            f"{ctx}: connect the 'model' output of a 'var' node (VAR or VECM)."
+    ok = endog is not None and names and (
+        hasattr(model, "irf") or (not require_irf and method == "arima")
+    )
+    if not ok:
+        want = "a 'var' node (VAR or VECM)" if require_irf else (
+            "an 'arima' / 'auto_arima' or 'var' node"
         )
+        raise ValueError(f"{ctx}: connect the 'model' output of {want}.")
     return endog, names, method
 
 
@@ -3126,6 +3543,22 @@ class TimeSeriesPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: str = visible_field(
+        "", visible_when=("x_limits", "True"),
+        description="Start of the x-axis, e.g. 2020-01-01 (blank = data start).",
+    )
+    x_max: str = visible_field(
+        "", visible_when=("x_limits", "True"),
+        description="End of the x-axis, e.g. 2021-12-31 (blank = data end).",
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3321,6 +3754,22 @@ class MultivariateTimeSeriesPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
+    x_limits: bool = False
+    x_min: str = visible_field(
+        "", visible_when=("x_limits", "True"),
+        description="Start of the x-axis, e.g. 2020-01-01 (blank = data start).",
+    )
+    x_max: str = visible_field(
+        "", visible_when=("x_limits", "True"),
+        description="End of the x-axis, e.g. 2021-12-31 (blank = data end).",
+    )
+    y_limits: bool = False
+    y_min: float = visible_field(
+        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
+    )
+    y_max: float = visible_field(
+        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
+    )
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3408,6 +3857,8 @@ class MultivariateTimeSeriesPlot(Node):
                 )
             else:
                 last.set_xlabel(p.x_label or p.datetime_column, fontsize=p.axis_font_size)
+                for a in axes:  # grid: _finalize_plot isn't called per panel
+                    _apply_axis_limits(a, p)
                 if p.title:
                     fig.suptitle(
                         p.title, fontsize=p.title_font_size,
@@ -3418,13 +3869,15 @@ class MultivariateTimeSeriesPlot(Node):
         return {"figure": fig}
 
 
-class VarForecastPlotParams(NodeParams):
+class ForecastPlotParams(NodeParams):
     """
-    Parameters for VarForecastPlot.
+    Parameters for ForecastPlot.
 
     Attributes:
         variables: Which of the model's variables to draw (tickboxes;
-            blank = all). Populated from the connected ``var`` model.
+            blank = all). Populated from the connected model -- one entry
+            for an ``arima`` / ``auto_arima`` model, several for a
+            ``var`` / ``vecm``.
         confidence_level: Level for the forecast interval.
         history_window: Trailing history points to show (0 = all).
         history_color / forecast_color: Line colours for the observed
@@ -3455,14 +3908,14 @@ class VarForecastPlotParams(NodeParams):
 
 
 @register_node
-class VarForecastPlot(Node):
-    """History + multi-step forecast (with interval) for chosen variables of a VAR / VECM."""
+class ForecastPlot(Node):
+    """History + multi-step forecast (with interval): a one-variable ARIMA, or chosen variables of a VAR / VECM."""
 
-    node_type = "var_forecast_plot"
+    node_type = "forecast_plot"
     category = "grapher"
     inputs = [Port(name="model", dtype="model")]
     outputs = [Port(name="figure", dtype="figure")]
-    params_schema = VarForecastPlotParams
+    params_schema = ForecastPlotParams
     cacheable = False
 
     def run(self, **inputs: Any) -> dict[str, Any]:
@@ -3476,11 +3929,17 @@ class VarForecastPlot(Node):
 
         p = self.params
         model = inputs["model"]
-        endog, names, method = _var_history(model, "var_forecast_plot")
+        endog, names, method = _var_history(model, "forecast_plot", require_irf=False)
         steps = max(int(getattr(model, "ruyso_forecast_periods", 10)), 1)
         alpha = 1.0 - float(p.confidence_level)
 
-        if method == "vecm":
+        if method == "arima":
+            fc = model.ruyso_forecast
+            mid = fc["mid"].to_numpy("float64")[:, None]
+            low = fc["low"].to_numpy("float64")[:, None]
+            high = fc["high"].to_numpy("float64")[:, None]
+            steps = len(mid)
+        elif method == "vecm":
             mid, low, high = model.predict(steps=steps, alpha=alpha)
         else:
             mid, low, high = model.forecast_interval(

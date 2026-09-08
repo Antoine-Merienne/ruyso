@@ -76,7 +76,7 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
         add_properties_to_node(self, node_cls.params_schema)
 
         # Figure-bearing nodes (grapher, and figure
-        # sinks like figure_export) get an on-canvas preview, but it is
+        # sinks like export_figure) get an on-canvas preview, but it is
         # a floating thumbnail managed by ui.node_preview.NodePreviewOverlay
         # -- not a widget embedded in the node here.
         self.is_figure_node = is_figure_core_class(node_cls)

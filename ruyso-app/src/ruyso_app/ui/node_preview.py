@@ -1,7 +1,7 @@
 """
 On-canvas figure previews for nodes that produce or consume a figure
 (grapher nodes, and figure sinks such as
-``figure_export``).
+``export_figure``).
 
 Design decision (spec section 8 -- "a window appears behind / attached
 to the node"): the earlier version embedded a widget *inside* the node
@@ -63,7 +63,7 @@ def is_figure_core_class(core_cls: type | None) -> bool:
     if core_cls is None:
         return False
     if core_cls.category == "export":
-        # Export / sink nodes (figure_export, export_to_dashboard) carry
+        # Export / sink nodes (export_figure, export_to_dashboard) carry
         # a figure-typed *input* but are not previewed on the canvas --
         # the figure is shown by the sink they feed (a file, the
         # Dashboard tab), not next to the export node.
@@ -94,7 +94,7 @@ def resolve_figure(node: BaseNode, outputs: dict[str, dict]) -> Figure | None:
     Find the matplotlib figure associated with ``node`` in a run's outputs.
 
     * A node with a figure *output* port -> that output value.
-    * A node with only a figure *input* port (e.g. ``figure_export``)
+    * A node with only a figure *input* port (e.g. ``export_figure``)
       -> the value on the upstream output port feeding it.
     * Otherwise -> ``None``.
     """

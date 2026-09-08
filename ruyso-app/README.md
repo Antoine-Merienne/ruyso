@@ -62,8 +62,20 @@ toolbar; every action is in a menu:
     figure previews.
 - **Node** menu (Pipeline tab): **New Node ▸ _macro type_** (chord
   shortcuts `Cmd/Ctrl+P` then `L`/`T`/`M`/`S`/`G`/`E`), and
-  **Selected Node ▸ Delete Node** (`Ctrl/Cmd+Backspace`).
+  **Selected Node ▸** **Delete Node** (`Ctrl/Cmd+Backspace`), **Copy** /
+  **Cut** / **Paste** (`Cmd/Ctrl+C`/`X`/`V`) and **Duplicate**
+  (`Cmd/Ctrl+D`).
 - **Dashboard** menu (Dashboard tab): **Exporter…**.
+- **Colormaps** menu (always): **Colormap Designer…** builds custom
+  colormaps — a *continuous* one from draggable gradient stops or a
+  *qualitative* one from an ordered swatch list, seedable from any
+  built-in map and reversible; **Colormap Manager…** picks which maps
+  (built-in + custom) appear in the colormap dropdowns, and in what
+  order, per kind. Both persist to `~/.config/ruyso/colormaps.json`
+  (`engine/colormaps.py`), which the scheduler re-registers with
+  matplotlib at the top of every run. (Exported scripts do not yet
+  inline a custom colormap's definition — a name-only reference will
+  not resolve on a machine without the same config.)
 - **View ▸ Theme**: **System** (default — follows the OS light/dark
   setting, live), **Dark**, or **Light**. The whole app is forced onto
   Qt's *Fusion* style driven by a palette from `theme.py`, so every
@@ -425,17 +437,28 @@ phases. Decisions taken so far (spec section 8):
   (`seasonal` toggle + `seasonal_periods`) — this is how a seasonal
   pattern is taken out of the series, via seasonal differencing; a
   `trend` term, `forecast_periods` steps ahead with a confidence
-  interval; two outputs, `fit` (order, AIC/BIC, log-likelihood) and
-  `forecast` (step, forecast, ci_low, ci_high). **`auto_arima`** — the
-  same SARIMAX forecaster, but the order is found by an in-repo
+  interval; four outputs — `fit` (order, AIC/BIC, log-likelihood),
+  `forecast` (step, forecast, ci_low, ci_high), `residuals` (one-step
+  residuals + fitted + standardized), and `model` (a small picklable
+  forecast bundle for `forecast_plot`). **`auto_arima`** — the same
+  SARIMAX forecaster and outputs, but the order is found by an in-repo
   Hyndman-Khandakar-style *stepwise* search (`nodes/statistics.py`
   `_stepwise_search`): `d` from an ADF-based rule (`_select_d`), a
   hill-climb over `(p, q)` (and `(P, Q)` when `seasonal` is on) from a
   few seed models, minimizing `information_criterion` (AIC/BIC) until
   no neighbouring order improves it — a handful of fits, not a full
-  grid; the seasonal differencing order `D` is fixed at 1 when
+  grid (`concentrate_scale`, lighter seasonal seeds and a 24-fit cap
+  keep a *seasonal* search to ~15 s rather than minutes); the seasonal
+  differencing order `D` is fixed at 1 when
   `seasonal` is on (0 otherwise), a simplification over a true
-  seasonal unit-root test. Same two outputs as `arima`. **`ica`** —
+  seasonal unit-root test. Same four outputs as `arima`.
+  **`seasonal_decompose`** — split a series into `trend` + `seasonal`
+  + `resid` (+ the seasonally-adjusted series), one row per
+  observation, by `method` = `stl` (LOESS-based
+  `statsmodels.tsa.seasonal.STL`; `stl_seasonal` / `stl_trend`
+  smoother lengths, `robust`) or `classical` (a centred moving average;
+  `model` additive / multiplicative, `two_sided`, `extrapolate_trend`).
+  `period` sets the season length. **`ica`** —
   scikit-learn `FastICA`, same shape as `pca` (`sources` = the
   independent components per row, `mixing` = each variable's weight in
   each source). **`tsne`** — scikit-learn `TSNE`; a nonlinear 2D/3D
@@ -470,10 +493,12 @@ phases. Decisions taken so far (spec section 8):
   despine. **Four independent visual channels**, each a fixed value
   *plus* an optional "... by `<column>`" picker (italic-grey **None**
   row), all following the same logic:
-  - **colour** — `mark_color` (common-colour dropdown + *Choose...*
-    dialog) / `color_by` (+ a `colormap` whose options adapt: qualitative
-    for text/category/bool, sequential/diverging for numeric/datetime,
-    the `colormaps` generator in `ui/column_ops.py`);
+  - **colour** — `mark_color` (common-colour dropdown, each row a
+    swatch, + *Choose...* dialog and a live preview) / `color_by` (+ a
+    `colormap` whose options adapt: qualitative for text/category/bool,
+    sequential/diverging for numeric/datetime; the list comes from
+    `engine/colormaps.py` via `ui/column_ops.py` and is rendered as a
+    full-width gradient with the name pinned right);
   - **shape** — `marker_shape` / `line_style` / `bar_hatch` (per `kind`)
     / `shape_by`; a *discrete* shape-by column reveals a **shape map**
     picker (`assorted` / `geometric` / `bold` / `minimal` — a named
@@ -498,8 +523,11 @@ phases. Decisions taken so far (spec section 8):
   (noted on the figure); a **`line_fill`** (area chart) and
   **`line_stack`** (stacked area — needs a discrete colour-by column,
   drawn with `ax.stackplot`) for the line kind; axis grid / frame /
-  label overrides / font size / log scales / figure size; title font
-  size + bold + italic; legend show / title / location / font size.
+  label overrides / font size / log scales / figure size; **manual
+  axis limits** (tick `x limits` / `y limits` to reveal min/max spin
+  boxes — date strings on the datetime-`x` time-series plots — else
+  matplotlib autoscales); title font size + bold + italic; legend show
+  / title / location / font size.
   Colouring by a categorical column draws a legend in a translucent
   box; by a continuous column, a colorbar; colour-by and shape-by on
   *different* columns get two legends (same column → one combined
@@ -530,7 +558,9 @@ phases. Decisions taken so far (spec section 8):
   then standing for more than one row); `top_n` groups the smallest
   categories into "other". `heatmap_1d` — a single numeric column as a
   strip of coloured cells (`columns_per_row` wraps it into a
-  calendar-style grid), with an optional colourbar and printed values.
+  calendar-style grid), `orientation` horizontal / vertical, an
+  optional `label_column` whose values tick the cell axis (unwrapped
+  only), an optional colourbar and printed values.
   `autocorrelogram` — ACF and/or PACF of a numeric (time-ordered)
   column via `statsmodels.graphics.tsaplots.plot_acf` / `plot_pacf`;
   `show_acf` / `show_pacf` can each be unticked (at least one must stay
@@ -548,9 +578,10 @@ phases. Decisions taken so far (spec section 8):
   `multivariate_timeseries_plot` — several numeric
   series on a shared datetime axis, `layout` = `overlay` (one axes,
   optional per-series `normalize`) or `grid` (one stacked panel each).
-  `var_forecast_plot` — takes a `var` `model`; the fitted history plus
-  a multi-step forecast, one panel per chosen `variable` (tickboxes
-  populated from the model). The horizon is the `var` node's
+  `forecast_plot` — takes a `model` from `arima` / `auto_arima` (one
+  panel) or `var` / `vecm` (one panel per chosen `variable`, tickboxes
+  populated from the model): the fitted history plus a multi-step
+  forecast. The horizon is the model node's
   `forecast_periods`; `history_color` / `forecast_color` set the two
   lines and `ci_style` the interval — `band` (a lighter fill in the
   forecast colour), `lines`, `errorbar`, or `none`. `var_acorr_plot` —
@@ -585,7 +616,7 @@ phases. Decisions taken so far (spec section 8):
   `density_2d`): `kind` = `hexbin` (`gridsize`) or `kde` (`bandwidth`
   / `levels` / `fill`), optional `show_points` and a `boundary`
   outline layer. Both emit a normal `figure`, so they flow into the
-  preview, `export_to_dashboard` and `figure_export`.
+  preview, `export_to_dashboard` and `export_figure`.
 - **More grapher nodes** (seaborn-backed, same styling / colour-by
   controls). `box_plot` — a numeric column across a categorical one,
   `kind` = box / violin / boxen / swarm (seaborn's catplot family);
@@ -634,6 +665,16 @@ phases. Decisions taken so far (spec section 8):
   node's `title` param persists (with the pipeline). Right-clicking a
   figure-bearing node on the Pipeline canvas offers **Add to
   Dashboard**, which drops a wired `export_to_dashboard` node for it.
+- **Export nodes** (category `export`, all file-writing sinks). Each
+  has an explicit `format` dropdown that decides the type; the
+  extension is appended to `filepath` if missing. `export_figure` —
+  a `figure` to PNG / JPEG / PDF / SVG / TIFF / WEBP / EPS (`dpi`,
+  `transparent`, `bbox_tight`). `export_table` — a `dataframe` to CSV /
+  TSV / Excel / Parquet / Feather / JSON, with an `include_index`
+  toggle (and `sheet_name` for Excel). `export_geodata` — a
+  `geodataframe` to GeoJSON / GeoPackage / GeoParquet / GeoFeather /
+  Shapefile (`layer_name` for GPKG). `export_to_dashboard` sends a
+  figure to the Dashboard tab (above).
 
 > Packaging the app into a standalone executable (PyInstaller/Nuitka)
 > is intentionally not set up yet — planned for once more features
@@ -655,7 +696,7 @@ Node execution results are cached on disk (via `joblib.Memory`, keyed
 on node type + parameters + input values), so re-running the same
 pipeline — or a pipeline that only changed a downstream node — does
 not recompute unchanged upstream steps. Nodes with side effects or
-non-hashable outputs (e.g. `matplotlib_plot`, `figure_export`) opt out
+non-hashable outputs (e.g. `matplotlib_plot`, `export_figure`) opt out
 of caching via `Node.cacheable = False` and always re-run.
 
 ## Exporting a pipeline as a standalone script
