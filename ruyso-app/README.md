@@ -55,11 +55,26 @@ toolbar; every action is in a menu:
   - **Open Pipeline (JSON)…** / **Save Pipeline (JSON)…** — read/write
     the exact same JSON format used by the headless CLI below, so a
     pipeline built visually runs from the command line and vice versa.
+    The Dashboard's layout rides along in a separate `dashboard` section
+    of the same file; the CLI ignores it, and a file that has none opens
+    with an empty dashboard.
   - **Export as Script (.py)…** — write the pipeline out as a
     standalone `.py` file (see below).
   - **Run Pipeline** (shortcut **F5**) — execute the canvas on a
     background thread; results land in the run log and the on-canvas
     figure previews.
+- **Edit** menu (always): **Undo** (`Cmd/Ctrl+Z`) and **Redo**
+  (`Cmd/Ctrl+Shift+Z`, or `Ctrl+Y`), driven by NodeGraphQt's own
+  `QUndoStack` — it already records node creation, deletion, wiring and
+  every `set_property`, so a parameter edit is as undoable as a deleted
+  node. Two details make it usable: selecting a node is pushed with
+  `push_undo=False` (`BaseNode.set_selected` would otherwise stack a
+  command per node and the first few `Ctrl+Z` presses would only undo
+  selections), and the resync that rebuilds the Options form hangs off
+  the undo/redo *actions*, not off the stack's `indexChanged` — the
+  latter fires on every ordinary edit too and would rebuild the form out
+  from under the widget being typed in. Opening a pipeline clears the
+  history, so an undo can never unbuild the file you just opened.
 - **Node** menu (Pipeline tab): **New Node ▸ _macro type_** (chord
   shortcuts `Cmd/Ctrl+P` then `L`/`T`/`M`/`S`/`G`/`E`), and
   **Selected Node ▸** **Delete Node** (`Ctrl/Cmd+Backspace`), **Copy** /
@@ -92,7 +107,9 @@ right then shows a **macro type** and a **micro type** dropdown
 new type; see `ui/node_editing.py`), plus its parameter form. Wire
 nodes together by dragging between ports. Grapher / figure nodes carry
 a small floating preview that, after a run, shows the figure; click it
-to open a resizable window sized to the figure.
+to select that plot and open (or raise) its resizable window — always
+at the figure's own size, and following any edit you then make in the
+Options panel.
 
 **Canvas navigation** (`ui/canvas_nav.py`): two-finger trackpad drag
 **pans** (both axes, following the OS scroll direction); **pinch**
@@ -130,6 +147,76 @@ To change how the app looks (colors, node macro-type colors, window
 stylesheet, fonts), edit `src/ruyso_app/ui/theme.py` — it is the only
 file that needs touching for purely visual changes.
 
+**Popups — dropdowns and menus — need one thing QSS cannot express.**
+A widget that paints an opaque window covers up its own
+`border-radius`, so a rounded rule produced square corners. A
+`QComboBox` popup is two nested widgets — a `QComboBoxPrivateContainer`
+(a plain top-level `QFrame`) wrapping the list view — and QSS reaches
+only the view, so a rounded list sat inside a square, usually wider,
+frame; a `QMenu` is one widget with the same problem.
+`theme.install_combo_popup_styler()` installs one application-wide event
+filter that makes each of them frameless and translucent the first time
+it is polished, leaving just the rounded card. It hooks `Polish`
+rather than `Show` on purpose: `setWindowFlags` hides an already-visible
+widget, so restyling on show would close the popup as it opened.
+
+The same filter **clears a menu's own stylesheet**. NodeGraphQt's
+`BaseMenu` sets a hard-coded dark one in its constructor, and a
+widget-local stylesheet beats the application's — which is why the
+canvas "New Node" menu used to look nothing like the rest of the app.
+
+A popup — a dropdown list or a menu, they are the same kind of floating
+card — is painted in `Theme.popup_background`: **white** in the light
+theme, one step brighter than the panel it opened from, and the panel
+colour in the dark theme, which has nowhere brighter to go. Rows take a
+rounded overlay on hover rather than an edge-to-edge highlight
+(`show-decoration-selected: 0`).
+
+That filter also gives each dropdown **`ui/popup_delegate.py`**. Qt
+draws combo rows with a private delegate that hands the *combo box* to
+the style as the widget being painted, so under a stylesheet every row
+resolved against the `QComboBox` rule and came out wearing the closed
+combo's own bordered box — the white rectangle that appeared over the
+list. A plain `QStyledItemDelegate` draws them as view items. It has to
+draw **separators** itself (Qt marks them in
+`AccessibleDescriptionRole` and leaves them to that combo delegate),
+with a size hint small enough that the stylesheet's item `min-height`
+cannot inflate one into a blank row. A combo that already has a
+delegate of its own — the colormap and marker swatches — keeps it.
+
+**Panes are divided by a grip, not a band.** A `QSplitter` handle paints
+nothing but three dots (`assets/grip-*.svg`, a true mid-grey that reads
+on both themes — a border-coloured line was invisible on the light one),
+so the Log/Problems strip butts straight against the canvas and the drag
+target sits on the strip's own top edge. The Table tab's description
+panel scrolls, and a splitter cannot divide something that scrolls, so
+its two variable tables get the same affordance from
+`ui/height_grip.py`. That grip is a **cap, not a height**: a table stays
+exactly as tall as its rows, and the grip only appears once there are
+more rows than fit, deciding how much of the panel that table takes
+before it scrolls inside itself (double-click resets it). Resizing
+happens only while a drag is in progress — acting on every mouse-move
+sent the table to an arbitrary height as the pointer crossed the grip,
+because a hover move carries no press to measure against. The height is
+set in one place for the same reason the first attempt broke: the panel
+setting a fixed height while `_fill_stat_table` set a maximum left
+`min > max`, and Qt's layout then stacked the sections over each other
+— which is what put the second table far below its own title. The canvas itself is frameless — NodeGraphQt
+wraps the viewer in a `QTabWidget` whose constructor paints its own
+near-black background, which showed as a black band around the canvas on
+the light theme; `PipelineCanvas.widget` clears that stylesheet on the
+way out (doing it in `__init__` builds the wrapper for canvases nobody
+shows, which reintroduces the exit-139 teardown crash in the tests).
+
+**The canvas grid** is small round dots 25 scene units apart
+(`ui/canvas_grid.py`), replacing NodeGraphQt's 5-px hard squares 50
+units apart. It is a monkey-patch of `NodeScene._draw_dots`: the scene
+is built inside NodeGraphQt's viewer with no hook to substitute a
+class, and swapping the scene afterwards would orphan the live-pipe
+items already parented to it. The dot colour is derived from the canvas
+background, so the grid stays a hint in both themes rather than the
+fixed near-black NodeGraphQt ships.
+
 ### UI restructure — status and decisions
 
 The UI is being reworked to match the `ruyso_ui_principles` mockups in
@@ -149,6 +236,23 @@ phases. Decisions taken so far (spec section 8):
 - **Options panel background.** A lightened, ~92%-opaque tint of the
   selected node's macro-type color (`theme.options_panel_background`),
   falling back to an opaque panel color when nothing is selected.
+- **How a node is drawn** (`ui/node_item.py`, a `NodeItem` subclass
+  handed to every generated class as its `qgraphics_item`). NodeGraphQt
+  fills the whole node with its colour; here the body is the **theme's
+  panel colour** in both themes, so a node is a card like every other
+  surface, and the **macro-type colour is a thick contour** (2.0 units,
+  3.2 selected) plus the **name bar, which fills with it only while the
+  node is selected**. That fill is the text item's own box, so it stops
+  right below the name rather than at the port row NodeGraphQt measures
+  to. Unselected, the name bar is just the top of the card — no divider,
+  no tint — so the fill is unmistakable. Corners are 12, a little
+  rounder than the 8 the QSS uses, which a node at this size carries
+  well. The name and the port labels take the theme's text
+  colour; the name flips to whatever reads on the macro colour while
+  selected (`node_item.readable_on` — white on the blue loader,
+  near-black on the orange transform), which is why
+  `_set_text_color` is overridden rather than called once: NodeGraphQt
+  re-applies its own white-on-dark default from `draw_node`.
 - **Fonts.** `Helvetica, Arial, sans-serif` everywhere except the run
   console and any library/class name, which use
   `Consolas, Menlo, 'Courier New', monospace`.
@@ -163,9 +267,26 @@ phases. Decisions taken so far (spec section 8):
 - **On-canvas figure preview** is a floating thumbnail parented to the
   viewport and re-synced to its node on a light timer (Qt paints child
   widgets over the `QGraphicsScene`, so a true "behind the node" is not
-  possible — it sits attached just beneath). Click → resizable
-  `FigureWindow` sized to the figure's aspect ratio. See
-  `ui/node_preview.py`. The old bottom "Figure Preview" pane is gone.
+  possible — it sits attached just beneath). See `ui/node_preview.py`.
+  The old bottom "Figure Preview" pane is gone. Clicking a thumbnail:
+  - **selects its plot node**, so the Options panel shows that figure's
+    parameters while you look at it. The click is *accepted*: letting it
+    fall through (`QWidget.mousePressEvent` ignores the event) reached
+    the NodeGraphQt viewport, which read it as a click on empty canvas
+    and cleared the selection — opening a figure used to blank its own
+    options.
+  - **raises one `FigureWindow` per node**, hidden on close and reused,
+    rather than stacking a new window per click.
+  - opens it at a **stable size**: the figure's own `fig_width` ×
+    `fig_height` at a fixed 100 dpi, memoised on the figure and clamped
+    to 90 % of the screen. It must not read `figure.get_dpi()`: attaching
+    a `FigureCanvasQTAgg` rewrites the figure's dpi to
+    `devicePixelRatio × dpi`, and the ratio is only 2.0 once the widget
+    is on a Retina screen — so the same plot opened at 650×450, then at
+    1300×900 ever after. (Not reproducible offscreen, where the ratio is
+    always 1.0; the test applies the mutation by hand.)
+  - an already-open window **follows re-renders**, so editing the plot's
+    params updates the big figure live.
 - **Panels are resizable** via splitter handles: canvas ↔ run log,
   canvas ↔ Options panel (Pipeline and Dashboard tabs), navigator ↔
   data grid (Table tab).
@@ -190,6 +311,38 @@ phases. Decisions taken so far (spec section 8):
   in the navigator, so a stale table is never mistaken for the current
   result. Detection lives in `ui/run_snapshot.py`; the snapshot is
   reset when a pipeline file is opened.
+- **Manual axis limits.** Every grapher carries four always-visible
+  edges — `x_min` / `x_max` / `y_min` / `y_max` — and no toggle. Each is
+  a string, and each is independent: **blank means "fit this edge to the
+  data"**, so you can pin a y-axis floor of 0 and leave the other three
+  autoscaling. A number or an ISO date (`2021-03-01`, on a time axis) is
+  accepted, parsed by `nodes/viz.py::_limit_value`. After a run the
+  Options panel fills each empty box with the limit the plot actually
+  used (`ui/node_preview.py::figure_axis_limits`), so the fields read as
+  "here is your axis, adjust it" rather than starting at a meaningless
+  `0.0`. That prefill is display-only — the parameter stays blank until
+  someone types in the box, which is what keeps an untouched axis
+  following the data; clearing a box returns that edge to autoscale.
+- **Datetime display formats.** A datetime column is *always* a real
+  `datetime64` column, never a formatted string — that is what keeps
+  `sort` chronological, `resample_datetime` / `diff` able to do
+  arithmetic, and the time-series graphers able to place points on a
+  date axis. Formatting is therefore a **rendering** concern, applied at
+  the edge and never to the data. `core/dtformat.py` owns the
+  convention: a node that knows how its column should read (such as
+  `combine_datetime` with only year + month mapped) records a
+  `strftime` pattern in `DataFrame.attrs`, which pandas carries through
+  copies, filters, sorts, merges and resamples, so the format survives
+  the pipeline with no node forwarding it by hand. Where nothing was set
+  explicitly the format is **inferred**: the coarsest ISO pattern that
+  loses nothing, so a column of whole days renders `2020-02-01` rather
+  than dragging a meaningless `2020-02-01 00:00:00` across every row.
+  Two places honour it — the Table tab's cell renderer
+  (`ui/dataframe_model.py`) and a time-series plot's x-axis ticks
+  (`nodes/viz.py::_apply_time_ticks`). The axis takes only an
+  *explicitly set* format, since an inferred one would override
+  matplotlib's `ConciseDateFormatter`, which reads better on an
+  automatic axis.
 - **Data-loader family.** The `loading` macro type has one micro type
   per file format: `csv_loader`, `fixed_width_loader`, `excel_loader`,
   `json_loader`, `parquet_loader`, `feather_loader`, `stata_loader`
@@ -198,9 +351,23 @@ phases. Decisions taken so far (spec section 8):
   (-> `geodataframe`; the geo Parquet / Feather loaders use
   `geopandas.read_parquet` / `read_feather`, which decode the WKB
   geometry column and the file's CRS metadata — the plain
-  `parquet_loader` / `feather_loader` cannot). Loaders only read the file —
-  they do not coerce dtypes; parse a column as datetime downstream with
-  the `change_type` transform (target `datetime`, with an optional
+  `parquet_loader` / `feather_loader` cannot). `csv_loader` also carries
+  `encoding` and `decimal`, seeded from Preferences ▸ Data — a European
+  CSV is `;`-separated with `,` as the decimal point, and setting that
+  once beats setting it per node. Loaders otherwise leave
+  dtypes alone, with one opt-in exception: the four text formats
+  (`csv_loader`, `fixed_width_loader`, `excel_loader`, `json_loader`)
+  offer **`parse_dates`** (default off) plus `datetime_columns`
+  (comma-separated; blank = auto-detect) and a `datetime_format`. It
+  exists because a date left as text sorts *lexically* for the rest of
+  the pipeline — `01/02/2020` before `15/07/2019` — and converting at
+  the source is the cheapest place to prevent that. Auto-detection is
+  deliberately conservative: a column is only converted when every
+  sampled value carries a date separator and a 4-digit year *and* ≥95 %
+  of them parse, so version strings (`1.2.3`) and padded IDs are left
+  alone. The binary formats already carry real dtypes and have no such
+  option. You can still convert downstream instead with the
+  `change_type` transform (target `datetime`, with an optional
   `strptime` format) or build one from parts with `combine_datetime`.
   A `geodataframe` output may be wired into any node that expects a
   plain `dataframe` (a GeoDataFrame is one); the reverse is rejected by
@@ -261,8 +428,13 @@ phases. Decisions taken so far (spec section 8):
   column from separate component columns — a **mapping table**, one row
   per time part (year … microsecond) with a column dropdown each,
   `core.params.column_map_field`; quarter → month, year+dayofyear and
-  year+ISO-week are handled; a lone text column is parsed with a
-  `datetime_format`; `output_column` name + a `replace` toggle to drop
+  year+ISO-week are handled; a lone text column is parsed with
+  `datetime_format`; a **`display_format`** sets how the result is
+  *shown* (see “Datetime display formats” below); **`last_of_period`**
+  lands on the last unit of each period instead of the first — with
+  year+month mapped, February 2020 becomes `2020-02-29` rather than
+  `2020-02-01`, at midnight, and it is a no-op once a day-level
+  component is mapped; `output_column` name + a `replace` toggle to drop
   the sources), `split_datetime` (the reverse — `mode` = `components`
   (tickbox parts → `<col>_<part>` Int64 columns) or `string`
   (`strftime` → `<col>_str`), with `replace`), and `resample_datetime`
@@ -270,7 +442,11 @@ phases. Decisions taken so far (spec section 8):
   aggregator — mean/sum/…/count/ohlc — for the numeric columns, and an
   upsample `fill` — ffill / bfill / interpolate-linear / -time /
   nearest; non-numeric columns take the first value; the key comes back
-  as a column); `diff` (row-order difference of tickbox-selected columns — a
+  as a column; **`last_of_period`** relabels each bin with the last unit
+  of its period — with `MS`, `2020-02-29` rather than `2020-02-01` —
+  moving only the label, never which rows fall in which bin, and a no-op
+  for rules whose bin already is one unit like `D` / `h` / `15min`);
+  `diff` (row-order difference of tickbox-selected columns — a
   comma-separated `lags` list, e.g. `1, 7, 30`, each producing one
   `<column>_diff_<lag>` via `Series.diff(periods=lag)`; `first_value`
   decides what goes in the rows a diff cannot fill — `nan` (default),
@@ -494,7 +670,12 @@ phases. Decisions taken so far (spec section 8):
   *plus* an optional "... by `<column>`" picker (italic-grey **None**
   row), all following the same logic:
   - **colour** — `mark_color` (common-colour dropdown, each row a
-    swatch, + *Choose...* dialog and a live preview) / `color_by` (+ a
+    swatch drawn by `ui/swatch_combo.SwatchItemDelegate`, + a
+    *Choose...* dialog; the closed box carries exactly **one** swatch,
+    on the line edit, so it tracks a typed `#rrggbb` as well as a
+    picked name — item *icons* are deliberately not set, since an
+    editable combo would repeat them in its own box) /
+    `color_by` (+ a
     `colormap` whose options adapt: qualitative for text/category/bool,
     sequential/diverging for numeric/datetime; the list comes from
     `engine/colormaps.py` via `ui/column_ops.py` and is rendered as a
@@ -524,9 +705,7 @@ phases. Decisions taken so far (spec section 8):
   **`line_stack`** (stacked area — needs a discrete colour-by column,
   drawn with `ax.stackplot`) for the line kind; axis grid / frame /
   label overrides / font size / log scales / figure size; **manual
-  axis limits** (tick `x limits` / `y limits` to reveal min/max spin
-  boxes — date strings on the datetime-`x` time-series plots — else
-  matplotlib autoscales); title font size + bold + italic; legend show
+  axis limits** (see below); title font size + bold + italic; legend show
   / title / location / font size.
   Colouring by a categorical column draws a legend in a translucent
   box; by a continuous column, a colorbar; colour-by and shape-by on
@@ -578,6 +757,11 @@ phases. Decisions taken so far (spec section 8):
   `multivariate_timeseries_plot` — several numeric
   series on a shared datetime axis, `layout` = `overlay` (one axes,
   optional per-series `normalize`) or `grid` (one stacked panel each).
+  Colouring follows `layout`, and only the field that applies is shown:
+  `overlay` puts every line on one axes, so each takes its own colour
+  from a qualitative **`colormap`** (default `tab10`); `grid` gives each
+  series its own panel, where colour carries no information, so a single
+  **`mark_color`** (default `materialblue`) is used for all of them.
   `forecast_plot` — takes a `model` from `arima` / `auto_arima` (one
   panel) or `var` / `vecm` (one panel per chosen `variable`, tickboxes
   populated from the model): the fitted history plus a multi-step
@@ -657,9 +841,17 @@ phases. Decisions taken so far (spec section 8):
   figure opens the **same Options panel** as on the Pipeline tab, bound
   to the upstream plot node — so restyling a dashboard figure is the
   same act as editing its grapher (if the plot is disconnected, a
-  canvas overlay says so). "Add Title" / "Add Text Box" (Dashboard menu
-  or canvas right-click) drop free-text items, restyled live (bold,
-  italic, size, colour, alignment, font). **Dashboard ▸ Exporter…**
+  canvas overlay says so). A **tool strip down the left edge** offers
+  the four assembly tools as icon buttons — title, text box, shape ▾,
+  arrange ▾ — the last two dropping the same menus as the canvas
+  right-click; Arrange is disabled until something is selected, since
+  every entry in it acts on a selection. "Add Title" / "Add Text Box"
+  (tool strip, Dashboard menu or canvas right-click) drop free-text
+  items, restyled live (bold, italic, size, colour, alignment, font).
+  The "add figures using the `export_to_dashboard` node" hint stays up
+  until a **figure** arrives: it is not asking for a text box, and
+  clearing it when one was added left someone who had typed a heading
+  with no idea how to get their plot across. **Dashboard ▸ Exporter…**
   renders the bounding box of all items to PDF (vectors preserved) or
   PNG, by file extension. The canvas is session state — only each
   node's `title` param persists (with the pipeline). Right-clicking a
@@ -719,12 +911,332 @@ This is useful for reproducing a result without installing the app,
 for auditing exactly what a pipeline does, or for handing a pipeline
 off as ordinary, readable Python code.
 
+## What a run reports
+
+`PipelineScheduler.run()` / `run_available()` return a **`RunReport`**
+with three parts, because a run has three outcomes and only two of them
+used to be reported:
+
+- `.outputs` — nodes that ran cleanly, mapped to their output dicts.
+- `.errors` — nodes that raised, mapped to a **`NodeError`**
+  (`engine/errors.py`).
+- `.blocked` — nodes that never ran, mapped to *the node that caused
+  it*, or `None` when the node simply is not wired up yet. These
+  previously appeared in neither dict, so a run that stopped a third of
+  the way through reported one failure and said nothing at all about
+  the steps it skipped. `.unwired` is the subset with no cause.
+
+The report unpacks as `(outputs, errors)`, so existing two-value
+callers are unaffected.
+
+A `NodeError` carries a one-line `title` (what `str()` returns), a
+longer `detail`, the `kind` (`param` / `input` / `runtime` / `blocked`),
+the `field` at fault when one can be identified — so the UI can point at
+the right row of the Options panel — and the original traceback in
+`raw`. `errors.translate()` rewrites pydantic, pandas, sklearn and OS
+exceptions as sentences about settings and columns rather than about
+Python: *"The "columns" setting expects a list of values, not the text
+'nope'."* rather than pydantic's `[type=list_type, input_value='nope'…]`
+dump. Anything it does not recognise falls through to
+`TypeName: message`, exactly what was shown before, so an unmodelled
+failure is never made worse.
+
+`run_available()` also tells **`blocked`** (something upstream failed)
+apart from **`unwired`** (a required input has nothing plugged in).
+Both draw a grey dot; only the tooltip differs. Conflating them made a
+canvas someone was still assembling look like a broken pipeline.
+
+That dot is **drawn with the node** (`ui/node_item.py`), not set as a
+pixmap on NodeGraphQt's icon slot, so it stays a circle however far you
+zoom in — the 16-px bitmap it used to be went visibly blocky. It is
+drawn rather than added as a child `QGraphicsEllipseItem`: a child item
+is destroyed with its C++ parent while the Python wrapper is still
+held, and collecting that wrapper afterwards segfaults in NodeGraphQt's
+`QUndoStack` teardown. `ui/node_status.py` keeps the pixmap path as a
+fallback for a node that is not ours.
+
+## The Dashboard canvas
+
+Beyond figures and captions, the canvas takes **shapes** — rectangle,
+rounded rectangle, ellipse, line, arrow, triangle — because boxing a
+region, circling a result and pointing at it is how a plot becomes an
+argument. `ui/dashboard_shapes.py` carries two geometry models in one
+class: an *area* is a rect resized from its bottom-right corner, a
+*line* is two endpoints with a handle each, which is the only way to
+aim one.
+
+The **Add Shape** and **Arrange** menus are built once, in
+`ui/dashboard_menus.py`, and filled into all three places that offer
+them — the Dashboard menu, the canvas right-click and the left tool
+strip — so the three cannot list different commands. The canvas menu is
+built by `DashboardPage.build_context_menu()` apart from showing it,
+because `exec` blocks until someone clicks: a menu only ever built
+inside the handler is a menu no test can look at, which is how it came
+to be raising `NameError` on every right-click.
+
+**Arranging** (`ui/dashboard_layout.py`, pure functions over items):
+z-order, align on six edges, distribute, nudge with the arrow keys
+(Shift for 10px), duplicate, lock. Alignment works on each block's
+`visual_rect`, **not** its `sceneBoundingRect` — the latter includes the
+padding an item reserves for its selection handles, 15px for a shape
+against 3px for a figure, so aligning on it would leave the two twelve
+pixels out of line while both claimed to be aligned.
+
+**Undo.** The canvas has its own `QUndoStack`, and Edit ▸ Undo routes to
+whichever tab is in front — without that, editing the dashboard and
+pressing `Cmd+Z` would quietly undo something on the Pipeline tab, which
+is worse than a shortcut that does nothing. Rather than a command class
+per operation, each one records the scene either side of itself
+(`ui/dashboard_undo.py`): a dashboard holds tens of items, so a snapshot
+is cheap, and one mechanism covering add / move / resize / restyle /
+reorder / lock / delete is far less to get wrong than seven inverses.
+Snapshots hold the item **objects**, so undoing a delete puts back the
+same figure with its rendered SVG still in it, not a blank one waiting
+for the next run.
+
+**Multi-select restyles as a group** — selecting five shapes and setting
+one colour changes all five, which is most of why the inspector exists.
+A mixed selection of kinds has nothing in common to edit, so it falls
+back to the placeholder.
+
+**Locking** makes a block untouchable: not selectable, movable,
+resizable or deletable. Since a locked block cannot be selected, it
+cannot be unlocked from its own inspector either — **Dashboard ▸ Unlock
+All** is the way back.
+
+**The layout is saved with the pipeline**, in a `dashboard` section of
+the same JSON file, so sending someone a pipeline sends the report with
+it:
+
+```json
+{
+  "nodes": [ … ],
+  "connections": [ … ],
+  "dashboard": {"version": 1, "items": [
+    {"type": "figure", "pos": [20, 80], "z": 0,
+     "state": {"export_node_id": "Board 1", "title": "Sales by region", …}},
+    {"type": "shape", "pos": [300, 40], "z": 1, "state": {"kind": "arrow", …}}
+  ]}
+}
+```
+
+- `graph_to_dict` / `graph_from_dict` stay **pure graph** and never see
+  the key, so hand-written files, `examples/*.json` and the headless CLI
+  are untouched. `save_document` / `load_document` add the sections; the
+  key is only written once the canvas has something on it, and a section
+  a future version adds is carried in and out rather than stripped.
+- **The rendered picture is not stored** — it comes back from running
+  the pipeline, and a stale image on disk would be worse than none. A
+  figure block is saved by its **export node's name**, which is what
+  re-binds it to the same block (not a duplicate) on the next run; until
+  then it wears the "· modified" tag. A block whose node is missing
+  stays put and tagged, exactly as when that node is deleted live.
+- **Dashboard edits count as unsaved work** — the title's `•` and the
+  close prompt watch both undo stacks, because an hour of layout is as
+  losable as an hour of wiring.
+- **Opening a document replaces the document**: a file with no
+  `dashboard` section clears the canvas, so blocks cannot bleed from one
+  pipeline into the next and be saved into it.
+
+A block describes itself through the same `capture_state` /
+`apply_state` pair the undo snapshots use — saving a layout and undoing
+an edit are the same question, so there is one description of a block
+rather than two that could drift apart.
+
+## When something goes wrong
+
+Failures land in a **Problems** panel beside the run log on the Pipeline
+tab, not in a modal dialog. A `QMessageBox` holding `str(exception)`
+interrupted the work, said nothing actionable, and was gone the moment
+it was dismissed; a panel stays until the problem does, reads as a
+sentence, and leads to the node it is about.
+
+```
+Problems (1)                          [tab band: ● 1 problem]
+
+● Load Data · There is no file at '/no/such/file.csv'.
+  Check the file path setting on this node.
+  Fix in Options ▸ filepath
+  ▸ Show technical details          (the traceback, with Copy)
+```
+
+- **Only nodes that actually raised get a row.** Blocked nodes are left
+  to the canvas's grey dots and their tooltips: one bad parameter can
+  block eight steps, and eight rows saying so would bury the one row
+  that matters. A graph too broken to run at all has no node to blame,
+  so it gets a single pipeline-wide row.
+- **Auto-run fills it live**, so a mistake shows up as you make it
+  rather than waiting for a Run — silently, as auto-run always has been:
+  no dialog, no log spam, just the panel and a red chip in the tab band.
+  The chip is hidden when there is nothing wrong.
+- **Clicking a row selects that node** and outlines the offending
+  setting in the Options panel. The outline clears the moment you edit
+  that field — it points at the thing to fix and must not argue with a
+  value you have already changed; whether the edit *worked* is the next
+  run's answer.
+- **Modals survive only for file actions you invoked** — Open, Save,
+  Export script, Export dashboard. You asked for a thing and it did not
+  happen, and a failed Save reported only in a panel on another tab is
+  a good way to lose work.
+
+## Preferences
+
+**Edit ▸ Preferences…** (`Cmd/Ctrl+,`; macOS files it under the
+application menu) opens nine pages — General, Appearance, Execution,
+Cache, Chart defaults, Export, Dashboard, Data, Advanced. Values live in
+`~/.config/ruyso/settings.json` (`$RUYSO_CONFIG_DIR` overrides it),
+written atomically, alongside `colormaps.json`.
+
+`engine/settings.py` holds them because several are read with no window
+open: the disk-cache budget by `engine/cache.py`, the plot style and
+font by `nodes/viz.py`. A headless run honours the same preferences the
+app does. `DEFAULTS` is the single source of truth for what exists and
+what type it is — an unknown key is refused on write, and a stored value
+of the wrong type is ignored on read, so a hand-edited or
+newer-version settings file degrades to defaults instead of breaking
+the app.
+
+### Toolboxes
+
+129 nodes is a lot to scroll past when your work is loading a CSV and
+plotting it, so **Preferences ▸ Toolbox** switches families off:
+
+| Family | Modules | Nodes |
+|---|---|---|
+| Loading | `loaders`, `example_data` | 8 — always on |
+| Transform | `transforms` | 29 — always on |
+| Charts | `viz` | 23 — always on |
+| Export | `export` | 4 |
+| Machine learning | `models`, `model_ops` | 26 |
+| Statistics & time series | `statistics` | 19 |
+| Geo / maps | `geo_loaders`, `geo_transforms`, `geo_viz` | 20 |
+
+A family is defined by its **modules**, not by node category, because
+that is the granularity an import can be skipped at — and the two do not
+line up: `models.py` holds one transform node among its model nodes, and
+geo spans three modules across three categories.
+
+Switching one off does two things. It **shortens the menus** at once:
+`node_factory.core_node_types_by_category` filters by the enabled set,
+and the New Node menu, the canvas menu and the micro-type dropdown all
+read that one function, so they narrow together. And it **skips the
+import** at the next launch, via
+`NodeRegistry.discover_package(only=…)` — measured, dropping geo takes
+node discovery from **671 ms to 451 ms** and means geopandas and pyproj
+are never imported at all. Only geo carries real weight; statistics and
+ML together add ~25 ms, because pandas and numpy arrive with
+`transforms` regardless. The page says so, since the menu change is
+immediate and the load-time change is not.
+
+Two edges are handled. A family the canvas is **using cannot be switched
+off** — the dialog names the nodes and refuses, rather than letting you
+create a pipeline you cannot reopen. And opening a pipeline whose nodes
+come from a switched-off family **offers to switch it back on**, naming
+the family; declining leaves both the preference and the canvas alone.
+
+The filter lives in `node_factory`, never in `NodeRegistry`: the
+registry is the truth about what the app *has*, and a preference about
+what to show is not its business.
+
+Four things are worth knowing:
+
+- **Changes are staged.** Editing a control writes to a pending dict;
+  OK or Apply commits, Cancel drops it. Unlike the colormap dialogs,
+  several of these (font size, accent, grid) change how the whole app
+  looks the instant they land.
+- **Chart / Export / Data defaults seed *new nodes*** — applied at
+  creation by `ui/node_defaults.py`, not by rewriting schema defaults.
+  Existing nodes keep their values, and `pipeline_to_canvas` suspends
+  seeding entirely: a file's unmentioned parameter means the node's own
+  default, the same on every machine, rather than "whatever this person
+  prefers".
+- **Blank or 0 means "leave each node's own default alone."** The
+  graphers deliberately use eight different figure sizes (one is a
+  6.0×2.2 strip), so a single figure-size preference applied to all of
+  them would flatten choices their authors made on purpose. Set one and
+  it wins everywhere; leave it at 0 and nothing is overridden.
+- **The disk-cache budget is applied at startup, on a background
+  thread.** joblib 1.5 dropped `bytes_limit` from `Memory.__init__`, so
+  it has to be an explicit `reduce_size` pass, and that walks the whole
+  directory — not something to do on the way to seeing a result. The
+  cache may drift over its budget during a long session; it is a disk
+  allowance, not a hard ceiling.
+
+The window also behaves like a document: the title names the open file
+and gains a `•` while there are unsaved edits (which is exactly "the
+undo stack has moved since the last save", straight off `QUndoStack`),
+and closing with unsaved work prompts unless that preference is off.
+
+## Why an auto-run is fast
+
+Auto-run fires after every parameter edit, and 31 nodes — every grapher,
+every export — opt out of the joblib disk cache, so each background run
+used to re-render every figure on the canvas even when the edit was
+three steps away. `engine/run_cache.py` works one level up from joblib:
+instead of "have I computed this function on these arguments", it asks
+**"has anything that feeds this node changed since I last ran it"**,
+using the transitive signatures from `engine/signatures.py`. When the
+answer is no, the node's previous outputs are handed back and it never
+runs at all.
+
+```
+cold                 ran 6: load, plot0…plot4
+untouched            ran 1: load
+edit plot2's params  ran 2: load, plot2
+delete plot4         ran 1: load        (its cache entry is pruned)
+```
+
+Design points, each load-bearing:
+
+- **One entry per node**, keyed by node id, holding its latest
+  `(signature, outputs)`. The cache is never larger than the graph and a
+  deleted node's entry is pruned on the next run — entries hold
+  DataFrames and figures, so a signature-keyed history could quietly
+  reach hundreds of megabytes.
+- **Loaders and exports always execute.** A loader because a file can
+  change on disk under an unchanged path; an export because its value
+  *is* the side effect, so skipping it means a deleted output file is
+  never rewritten.
+- **What a loader read is folded into what its dependents key on**
+  (`run_cache.content_token`). Re-running the loader is not enough on its
+  own: a signature is built from node types, parameters and wiring, none
+  of which move when a CSV is edited under the same path — so everything
+  downstream would keep serving results computed from the old file while
+  the loader happily read the new one.
+- **A hit is only served once the inputs are known to be available**, so
+  a node whose loader has just started failing is reported blocked
+  rather than showing yesterday's data under a red node.
+- **The manual Run passes no cache at all**, so pressing Run stays the
+  way to force genuine re-execution — rewriting exports, redrawing every
+  figure.
+- **The worker gets a snapshot, not the live cache.**
+  `AutoRunController.interrupt()` calls `QThread.terminate()`, which
+  kills the thread at an arbitrary instruction; the snapshot is adopted
+  as the live cache on the GUI thread only once a run reaches
+  `_on_worker_done`, so a terminated run costs one wasted pass and
+  nothing else.
+
+A reused node's outputs come back **by identity** — no node in `nodes/`
+mutates its input in place — and the UI leans on exactly that to skip
+the work of drawing a figure it has already drawn: `FigureThumbnail`
+does not re-rasterise, and the Dashboard does not re-serialise to SVG,
+when the `Figure` object is the same one as last time. Serialising a
+figure to SVG is the most expensive thing the Dashboard does, and it
+used to happen on every background run.
+
+The on-canvas thumbnails are plain widgets over the `QGraphicsView`, so
+nothing moves them when the canvas does and they have to be re-placed on
+a timer. That timer used to tick every 60 ms for the life of the app —
+16 wakeups a second to re-place widgets that had not moved. It now runs
+only while the canvas is being manipulated (an event filter wakes it;
+300 ms of quiet stops it), so an idle canvas costs nothing.
+
 ## Project layout
 
 ```
 src/ruyso_app/
 ├── core/     # Node/Port/NodeParams contracts + NodeRegistry
 ├── nodes/    # Concrete nodes (file + geo loaders, transforms, models, viz, export)
-├── engine/   # PipelineGraph, serialization, cache, scheduler, codegen
+├── engine/   # PipelineGraph, serialization, cache, scheduler, codegen, errors
 └── ui/       # NodeGraphQt canvas, property forms, main window
 ```

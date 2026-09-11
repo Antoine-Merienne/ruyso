@@ -20,23 +20,26 @@ def _graph(qapp):
     return graph
 
 
-def _icon(node):
-    view = node.view
-    return getattr(view, "icon_item", None) or getattr(view, "_icon_item", None)
+def _dot(node):
+    """The node's status colour. It is a vector ellipse on our own node
+    items -- a bitmap icon went blocky the moment you zoomed in."""
+    return node.view.status_colour()
 
 
-def test_set_status_records_and_swaps_the_node_icon(qapp):
+def test_set_status_records_and_recolours_the_dot(qapp):
+    from PySide6.QtGui import QColor
+
     graph = _graph(qapp)
     node = graph.create_node(qt_type_for("csv_loader"), name="load")
     ctrl = NodeStatusController(graph)
 
     ctrl.set_status("load", "running")
     assert ctrl.status_of("load") == "running"
-    running_px = _icon(node).pixmap().cacheKey()
+    assert _dot(node) == QColor(theme.STATUS_COLORS["running"])
 
     ctrl.set_status("load", "ok")
     assert ctrl.status_of("load") == "ok"
-    assert _icon(node).pixmap().cacheKey() != running_px  # a different dot
+    assert _dot(node) == QColor(theme.STATUS_COLORS["ok"])
 
 
 def test_blocked_and_pending_share_the_grey_dot(qapp):
@@ -45,9 +48,47 @@ def test_blocked_and_pending_share_the_grey_dot(qapp):
     ctrl = NodeStatusController(graph)
 
     ctrl.set_status("load", "blocked")
-    blocked_px = _icon(node).pixmap().cacheKey()
+    blocked = _dot(node)
     ctrl.set_status("load", "pending")
-    assert _icon(node).pixmap().cacheKey() == blocked_px
+    assert _dot(node) == blocked
+
+
+def test_a_node_without_the_vector_dot_still_gets_a_pixmap(qapp):
+    """A NodeGraphQt built-in has only the icon slot, which takes a
+    bitmap; the controller must not assume our vector item. Faked
+    rather than built from a real throwaway node class -- those collide
+    with NodeGraphQt's QUndoStack teardown (exit 139)."""
+
+    class FakeIcon:
+        pixmap_set = None
+
+        def setPixmap(self, pixmap):  # noqa: N802 - Qt spelling
+            self.pixmap_set = pixmap
+
+    class FakeView:
+        def __init__(self):
+            self._icon_item = FakeIcon()
+
+        def setToolTip(self, text):  # noqa: N802 - Qt spelling
+            self.tip = text
+
+    class FakeNode:
+        def __init__(self):
+            self.view = FakeView()
+
+        def name(self):
+            return "plain"
+
+    node = FakeNode()
+
+    class FakeGraph:
+        def all_nodes(self):
+            return [node]
+
+    NodeStatusController(FakeGraph()).set_status("plain", "error", "boom")
+
+    assert node.view._icon_item.pixmap_set is not None
+    assert node.view.tip == "Failed: boom"
 
 
 def test_reset_marks_every_node_pending(qapp):
@@ -89,3 +130,24 @@ def test_refresh_theme_repaints_without_error(qapp):
         assert ctrl.status_of("load") == "ok"
     finally:
         theme.set_theme_mode("system")
+
+
+def test_blocked_and_unwired_are_both_grey_but_read_differently(qapp):
+    """The split exists so a half-built canvas does not look broken."""
+    from ruyso_app.ui import theme
+
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("csv_loader"), name="load")
+    ctrl = NodeStatusController(graph)
+
+    ctrl.set_status("load", "blocked")
+    blocked_tip = node.view.toolTip()
+    ctrl.set_status("load", "unwired")
+    unwired_tip = node.view.toolTip()
+
+    assert blocked_tip != unwired_tip
+    assert "failed" in blocked_tip
+    assert "not connected" in unwired_tip
+    # Neither ran, so both stay on the idle colour.
+    assert ctrl._dot("idle").cacheKey() == ctrl._dot("idle").cacheKey()
+    assert theme.STATUS_COLORS["idle"]

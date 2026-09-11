@@ -14,16 +14,27 @@ makes each concern independently testable.
 Menus:
     Pipeline  -- Open/Save JSON, Export as script, Run (always enabled;
                  the pipeline is one shared document across tabs).
+    Edit      -- Undo / Redo, Preferences... (always).
     Node      -- New Node > <macro type>, Selected Node > Delete Node
                  (enabled only on the Pipeline tab).
     Dashboard -- Exporter... (enabled only on the Dashboard tab).
-    View      -- Toggle dark / light theme (always).
+    Colormaps -- Designer / Manager (always).
+    View      -- Theme, Auto-run (always).
+
+Error reporting: a run's failures go to the Problems panel
+(``ui.error_panel``) and the tab band's chip, never to a dialog. The
+``QMessageBox`` in :meth:`MainWindow._show_error` is reserved for file
+actions the person invoked -- Open, Save, Export -- where there is no
+panel row that would make the failure obvious.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from NodeGraphQt import BaseNode
-from PySide6.QtGui import QActionGroup, QKeySequence
+from PySide6.QtCore import QByteArray
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -36,22 +47,34 @@ from PySide6.QtWidgets import (
 
 from ruyso_app.engine.codegen import save_script
 from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
-from ruyso_app.engine.serialization import load_graph, save_graph
+from ruyso_app.core import toolboxes
+from ruyso_app.core.registry import NodeRegistry
+from ruyso_app.engine import settings
+from ruyso_app.engine.errors import NodeError
+from ruyso_app.engine.serialization import DASHBOARD_KEY, load_document, save_document
 from ruyso_app.ui import theme
 from ruyso_app.ui.auto_run import AutoRunController
 from ruyso_app.ui.canvas import PipelineCanvas
 from ruyso_app.ui.column_spec import input_column_values, input_dataframe_columns
+from ruyso_app.ui.dashboard_menus import fill_arrange_menu, fill_shape_menu
 from ruyso_app.ui.dashboard_page import DashboardPage
+from ruyso_app.ui.error_panel import GRAPH_PROBLEM
 from ruyso_app.ui.execution_worker import PipelineExecutionWorker
 from ruyso_app.ui.graph_bridge import canvas_to_pipeline, pipeline_to_canvas
 from ruyso_app.ui.node_editing import change_node_micro_type
 from ruyso_app.ui.node_factory import (
     core_node_types_by_category,
     qt_type_for,
+    register_all_nodes,
     register_node_context_menu_actions,
 )
-from ruyso_app.ui.node_menu import install_new_node_menu
-from ruyso_app.ui.node_preview import NodePreviewOverlay, resolve_source_node
+from ruyso_app.ui.node_menu import install_new_node_menu, refresh_new_node_menu
+from ruyso_app.ui.node_preview import (
+    NodePreviewOverlay,
+    figure_axis_limits,
+    resolve_figure,
+    resolve_source_node,
+)
 from ruyso_app.ui.node_status import NodeStatusController
 from ruyso_app.ui.pipeline_page import PipelinePage
 from ruyso_app.ui.run_snapshot import modified_since_run, pipeline_signatures
@@ -76,6 +99,28 @@ TABS: list[tuple[str, str]] = [
 ]
 
 
+def _summarise(value: object) -> str:
+    """
+    One output, short enough for a log line.
+
+    ``repr`` of a large DataFrame is both slow to build and long enough
+    to bury everything else in the log, so the default is a shape. The
+    full repr is behind Preferences > Advanced > verbose run log, for
+    when it is the thing you actually want to read.
+    """
+    columns = getattr(value, "columns", None)
+    index = getattr(value, "index", None)
+    if columns is not None and index is not None:
+        try:
+            return f"DataFrame({len(index)} rows x {len(columns)} cols)"
+        except TypeError:
+            pass
+    if hasattr(value, "savefig"):
+        return "Figure"
+    text = repr(value)
+    return text if len(text) <= 200 else f"{text[:197]}..."
+
+
 class MainWindow(QMainWindow):
     """The pipeline builder's main window."""
 
@@ -86,6 +131,11 @@ class MainWindow(QMainWindow):
 
         self._canvas = PipelineCanvas()
         self._graph = self._canvas.graph
+        #: Path of the pipeline file on screen, or None for an unsaved one.
+        #: With the undo stack's clean marker below, this is what lets the
+        #: window behave like a document: a title that says what is open,
+        #: a dot when it has unsaved edits, and a prompt before losing them.
+        self._pipeline_path: str | None = None
         self._node_status = NodeStatusController(self._graph)
         self._worker: PipelineExecutionWorker | None = None
         self._last_outputs: dict[str, dict] = {}
@@ -106,6 +156,9 @@ class MainWindow(QMainWindow):
         self._options = self._pipeline_page.options_panel
 
         self._preview_overlay = NodePreviewOverlay(self._graph)
+        # Clicking a figure preview selects its plot, so the Options
+        # panel stays on that node while its pop-out window is open.
+        self._preview_overlay.node_activated.connect(self._on_preview_clicked)
 
         self._tab_bar = TabBar(TABS)
         self._stack = QStackedWidget()
@@ -133,6 +186,10 @@ class MainWindow(QMainWindow):
         )
         self._options.node_type_change_requested.connect(self._on_node_type_change)
         self._graph.node_selection_changed.connect(self._on_selection_changed)
+        self._pipeline_page.problems.problem_activated.connect(
+            self._on_problem_activated
+        )
+        self._tab_bar.problems_chip.clicked.connect(self._on_problems_chip_clicked)
 
         install_new_node_menu(self._graph, self._on_pick_macro_type)
         register_node_context_menu_actions(
@@ -166,6 +223,16 @@ class MainWindow(QMainWindow):
         self._refresh_auto_pill()  # initial state + tooltip
         self._on_tab_changed(self._tab_bar.current_key())
 
+        # "Unsaved changes" is exactly "the undo stack has moved since
+        # the last save", which QUndoStack already tracks for free.
+        self._graph.undo_stack().cleanChanged.connect(self._refresh_title)
+        self._dashboard_page.undo_stack().cleanChanged.connect(self._refresh_title)
+        self._graph.undo_stack().setClean()
+        self._dashboard_page.undo_stack().setClean()
+        self._refresh_title()
+        self.apply_preferences()
+        self._restore_session()
+
         # Follow the OS light/dark setting live while mode is "system".
         app = QApplication.instance()
         hints = app.styleHints() if app is not None else None
@@ -188,22 +255,61 @@ class MainWindow(QMainWindow):
         self._run_action = pipeline_menu.addAction("Run Pipeline", self._on_run_pipeline)
         self._run_action.setShortcut(QKeySequence("F5"))
 
+        # -- Edit menu (always) ---------------------------------------
+        # NodeGraphQt records node creation, deletion, wiring and every
+        # ``set_property`` on its own QUndoStack, so Undo/Redo come
+        # straight off that stack rather than being reimplemented here.
+        edit_menu = menu_bar.addMenu("Edit")
+        stack = self._graph.undo_stack()
+        # Deliberately *not* stack.createUndoAction(): the resync below
+        # has to run only when history actually moves. Hanging it off
+        # ``indexChanged`` instead would fire on every ordinary edit too
+        # -- each keystroke pushes a command -- and rebuild the Options
+        # form out from under the widget being typed in.
+        self._undo_action = QAction("Undo", self)
+        self._undo_action.setShortcut(QKeySequence.Undo)
+        self._undo_action.setEnabled(stack.canUndo())
+        self._undo_action.triggered.connect(self._on_undo)
+        # Both stacks report in; which one is believed depends on the tab.
+        stack.canUndoChanged.connect(lambda _c: self._refresh_undo_actions())
+        self._dashboard_page.undo_stack().canUndoChanged.connect(
+            lambda _c: self._refresh_undo_actions()
+        )
+
+        self._redo_action = QAction("Redo", self)
+        self._redo_action.setShortcuts(
+            [QKeySequence.Redo, QKeySequence("Ctrl+Shift+Z")]
+        )
+        self._redo_action.setEnabled(stack.canRedo())
+        self._redo_action.triggered.connect(self._on_redo)
+        stack.canRedoChanged.connect(lambda _c: self._refresh_undo_actions())
+        self._dashboard_page.undo_stack().canRedoChanged.connect(
+            lambda _c: self._refresh_undo_actions()
+        )
+
+        edit_menu.addAction(self._undo_action)
+        edit_menu.addAction(self._redo_action)
+
         # -- Node menu (Pipeline tab only) ----------------------------
         self._node_menu = menu_bar.addMenu("Node")
         new_node_menu = self._node_menu.addMenu("New Node")
         available = core_node_types_by_category()
+        #: Kept so the entries can be re-enabled when a toolbox is
+        #: switched on or off (see _refresh_node_menus).
+        self._macro_actions: dict[str, QAction] = {}
         for category, label in theme.MACRO_TYPE_LABELS.items():
             action = new_node_menu.addAction(label)
             letter = _MACRO_SHORTCUT_LETTER.get(category)
             if letter:
                 # Two-key chord, e.g. Cmd/Ctrl+P then L for a data loader.
                 action.setShortcut(QKeySequence(f"Ctrl+P, {letter}"))
-            if category in available:
-                action.triggered.connect(
-                    lambda _checked=False, c=category: self._on_pick_macro_type(c, None)
-                )
-            else:
-                action.setEnabled(False)
+            # Connected regardless: a macro type with nothing behind it
+            # is disabled, and disabling is what a toolbox change flips.
+            action.triggered.connect(
+                lambda _checked=False, c=category: self._on_pick_macro_type(c, None)
+            )
+            action.setEnabled(category in available)
+            self._macro_actions[category] = action
 
         selected_menu = self._node_menu.addMenu("Selected Node")
         self._delete_action = selected_menu.addAction("Delete Node")
@@ -228,14 +334,39 @@ class MainWindow(QMainWindow):
 
         # -- Dashboard menu (Dashboard tab only) ---------------------
         self._dashboard_menu = menu_bar.addMenu("Dashboard")
+        page = self._dashboard_page
         self._dashboard_menu.addAction(
-            "Add Title", lambda: self._dashboard_page.add_text_block(is_title=True)
+            "Add Title", lambda: page.add_text_item(is_title=True)
         )
         self._dashboard_menu.addAction(
-            "Add Text Box", lambda: self._dashboard_page.add_text_block(is_title=False)
+            "Add Text Box", lambda: page.add_text_item(is_title=False)
         )
+
+        # The same two menus the canvas right-click and the Dashboard
+        # tool strip offer -- built once, in ui/dashboard_menus.py.
+        fill_shape_menu(self._dashboard_menu.addMenu("Add Shape"), page)
+        fill_arrange_menu(self._dashboard_menu.addMenu("Arrange"), page)
+
+        self._dashboard_menu.addSeparator()
+        duplicate = self._dashboard_menu.addAction(
+            "Duplicate Block", page.duplicate_selected
+        )
+        duplicate.setShortcut(QKeySequence("Ctrl+D"))
+        self._dashboard_menu.addAction("Lock Block", page.lock_selected)
+        # A locked block cannot be selected, so it cannot be unlocked
+        # from its own inspector -- this is the way back.
+        self._dashboard_menu.addAction("Unlock All", page.unlock_all)
         self._dashboard_menu.addSeparator()
         self._dashboard_menu.addAction("Exporter...", self._on_export_dashboard)
+
+        # Preferences: PreferencesRole moves it under the application
+        # menu at Cmd+, on macOS, and leaves it here everywhere else.
+        self._preferences_action = QAction("Preferences...", self)
+        self._preferences_action.setMenuRole(QAction.PreferencesRole)
+        self._preferences_action.setShortcut(QKeySequence.Preferences)
+        self._preferences_action.triggered.connect(self._on_open_preferences)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._preferences_action)
 
         # -- Colormaps menu (always) -------------------------------
         colormaps_menu = menu_bar.addMenu("Colormaps")
@@ -264,10 +395,158 @@ class MainWindow(QMainWindow):
         # Clicking the tab-band "auto" chip is the same switch.
         self._tab_bar.auto_pill.clicked.connect(self._auto_run_action.toggle)
 
+    # -- document state --------------------------------------------------
+
+    def is_modified(self) -> bool:
+        """
+        Whether the document has edits that have not been saved.
+
+        Both histories count: the dashboard's layout is saved into the
+        same file, so an hour spent arranging it is work that can be
+        lost, and the title's dot and the close prompt have to know.
+
+        Guarded against a stack being gone: ``cleanChanged`` can arrive
+        while Qt is tearing the window down, and a RuntimeError raised
+        inside a signal handler at that point is the shape of problem
+        that ends in a segfault rather than a traceback.
+        """
+        try:
+            return (
+                not self._graph.undo_stack().isClean()
+                or not self._dashboard_page.undo_stack().isClean()
+            )
+        except RuntimeError:  # a C++ stack is already deleted
+            return False
+
+    def _refresh_title(self, *_args: object) -> None:
+        """``ruyso-app — <file> •``, the dot meaning unsaved edits."""
+        name = Path(self._pipeline_path).name if self._pipeline_path else "Untitled"
+        marker = " •" if self.is_modified() else ""
+        try:
+            self.setWindowTitle(f"ruyso-app - {name}{marker}")
+        except RuntimeError:  # the window is being torn down
+            return
+
+    def _mark_saved(self, path: str) -> None:
+        self._pipeline_path = path
+        self._graph.undo_stack().setClean()
+        self._dashboard_page.undo_stack().setClean()
+        settings.set("general.last_pipeline", path)
+        self._refresh_title()
+
+    def _dialog_folder(self) -> str:
+        """Where a file dialog should open: the current file's folder,
+        else the configured default, else wherever Qt would."""
+        if self._pipeline_path:
+            return str(Path(self._pipeline_path).parent)
+        return str(settings.get("general.default_folder") or "")
+
+    def confirm_discard_changes(self) -> bool:
+        """
+        Ask before throwing away unsaved edits. ``True`` to proceed.
+
+        Silent when there is nothing to lose, or when the person turned
+        the prompt off -- a confirmation nobody wanted is just a click.
+        """
+        if not self.is_modified() or not settings.get("general.confirm_on_close"):
+            return True
+        name = Path(self._pipeline_path).name if self._pipeline_path else "this pipeline"
+        answer = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            f"Save changes to {name} before closing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if answer == QMessageBox.Cancel:
+            return False
+        if answer == QMessageBox.Save:
+            self._on_save_pipeline()
+            return not self.is_modified()  # a cancelled Save cancels the close
+        return True
+
+    def _restore_session(self) -> None:
+        """Reopen the last pipeline, if that preference is on."""
+        if not settings.get("general.restore_last_pipeline"):
+            return
+        path = str(settings.get("general.last_pipeline") or "")
+        if path and Path(path).is_file():
+            self._open_pipeline_file(path)
+
+    # -- preferences -----------------------------------------------------
+
+    def apply_preferences(self) -> None:
+        """Push every live preference into the widgets that honour it."""
+        theme.set_theme_mode(str(settings.get("appearance.theme")))
+        self._apply_theme()
+        self._pipeline_page.apply_preferences()
+        self._dashboard_page.apply_preferences()
+        self._preview_overlay.apply_preferences()
+        self._auto_run.apply_preferences()
+        self._auto_run_action.setChecked(self._auto_run.is_user_enabled())
+        self._refresh_auto_pill()
+
     # -- tab / menu state ------------------------------------------------
 
-    def _on_property_changed(self, *_args: object) -> None:
-        """Schedule an auto-run for a param edit, unless it's a batched tick."""
+    def active_undo_stack(self):
+        """
+        The history Cmd+Z acts on: the tab in front owns it.
+
+        The Dashboard is a separate scene with its own stack. Without
+        this, editing the dashboard and pressing Cmd+Z would quietly
+        undo something on the Pipeline tab instead -- a shortcut that
+        appears to do nothing while changing a tab you are not looking
+        at is worse than one that does nothing at all.
+        """
+        if self.current_tab() == "dashboard":
+            return self._dashboard_page.undo_stack()
+        return self._graph.undo_stack()
+
+    def _on_undo(self) -> None:
+        stack = self.active_undo_stack()
+        if stack is self._graph.undo_stack():
+            self._options.flush_recompute()  # fold in pending ticks first
+        stack.undo()
+        self._after_history_move()
+
+    def _on_redo(self) -> None:
+        self.active_undo_stack().redo()
+        self._after_history_move()
+
+    def _refresh_undo_actions(self) -> None:
+        """
+        Point the Edit menu at the active tab's history.
+
+        Guarded: both stacks report their availability here, and one can
+        arrive while Qt is tearing the window down. A RuntimeError
+        raised inside a signal handler at that point is the shape of
+        problem that ends in a segfault rather than a traceback.
+        """
+        try:
+            stack = self.active_undo_stack()
+            self._undo_action.setEnabled(stack.canUndo())
+            self._redo_action.setEnabled(stack.canRedo())
+        except RuntimeError:  # a C++ object is already gone
+            return
+
+    def _after_history_move(self) -> None:
+        """Undo / redo rewrote node params behind the Options panel's
+        back: rebuild the form from the node and recompute, or the panel
+        would keep showing the value that was just undone."""
+        self._on_selection_changed()
+        self._refresh_undo_actions()
+        self._auto_run.schedule()
+
+    def _on_property_changed(self, *args: object) -> None:
+        """Schedule an auto-run for a param edit, unless it's a batched tick.
+
+        Also drops the red outline on the row that was just edited: the
+        highlight points at the thing to fix, so it must not keep
+        arguing with a value the person has already changed. Whether the
+        edit *worked* is the next run's answer, not this one's.
+        """
+        if len(args) >= 2 and isinstance(args[1], str):
+            self._options.clear_field_error(args[1])
         if not self._options.autorun_suppressed():
             self._auto_run.schedule()
 
@@ -278,6 +557,7 @@ class MainWindow(QMainWindow):
         it off interrupts any in-flight auto-run; turning it back on
         re-runs to catch up on changes missed while it was off."""
         self._auto_run.set_user_enabled(enabled)
+        settings.set("execution.auto_run", enabled)
         if enabled:
             self._auto_run.schedule()
         else:
@@ -303,6 +583,39 @@ class MainWindow(QMainWindow):
             pill.set_state("error" if self._last_run_errors else "ok")
 
     # -- Colormaps menu ------------------------------------------------
+
+    def _on_open_preferences(self) -> None:
+        from ruyso_app.ui.preferences_dialog import PreferencesDialog
+
+        dialog = PreferencesDialog(self, nodes_in_use=self._nodes_in_use)
+        dialog.applied.connect(self._on_preferences_applied)
+        dialog.exec()
+
+    def _nodes_in_use(self) -> dict[str, list[str]]:
+        """``{node_type: [display name, ...]}`` for the current canvas.
+
+        The Toolbox page needs it to refuse switching off a family the
+        pipeline is built on."""
+        used: dict[str, list[str]] = {}
+        for node in self._graph.all_nodes():
+            node_type = getattr(type(node), "CORE_NODE_TYPE", None)
+            if node_type:
+                used.setdefault(node_type, []).append(node.name())
+        return used
+
+    def _on_preferences_applied(self) -> None:
+        """Preferences were committed: push them into the live widgets."""
+        self.apply_preferences()
+        self._refresh_node_menus()  # a toolbox may have come or gone
+        self._auto_run.schedule()  # figure defaults may have changed
+
+    def _refresh_node_menus(self) -> None:
+        """Re-enable / disable the macro-type entries for the toolboxes
+        that are switched on now."""
+        available = core_node_types_by_category()
+        for category, action in self._macro_actions.items():
+            action.setEnabled(category in available)
+        refresh_new_node_menu(self._graph)
 
     def _on_open_colormap_designer(self) -> None:
         from ruyso_app.ui.colormap_designer import ColormapDesigner
@@ -333,6 +646,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(self._tab_index[key])
         self._node_menu.setEnabled(key == "pipeline")
         self._dashboard_menu.setEnabled(key == "dashboard")
+        self._refresh_undo_actions()  # Cmd+Z follows the tab in front
         if key == "table":
             # Rebuild from the current canvas each time the tab is shown.
             self._table_page.refresh(
@@ -383,8 +697,14 @@ class MainWindow(QMainWindow):
 
     def _select_only(self, node: BaseNode) -> None:
         for other in self._graph.selected_nodes():
-            other.set_selected(False)
-        node.set_selected(True)
+            # push_undo=False: BaseNode.set_selected() would push a
+            # command per node, so selecting something would bury the
+            # real edits under "undo the selection" steps and the first
+            # Ctrl+Z presses would look like they did nothing. Clicking a
+            # node on the canvas already bypasses the stack (NodeGraphQt
+            # updates the item directly), so this just matches it.
+            other.set_property("selected", False, push_undo=False)
+        node.set_property("selected", True, push_undo=False)
         self._on_selection_changed([node], [])
 
     def _on_selection_changed(self, *_args: object) -> None:
@@ -398,8 +718,21 @@ class MainWindow(QMainWindow):
                 input_dataframe_columns(node, self._last_outputs),
                 input_column_values(node, self._last_outputs),
             )
+            self._options.set_axis_limits(self._axis_limits_for(node))
         else:
             self._options.clear()
+
+    def _axis_limits_for(self, node: BaseNode) -> dict[str, str]:
+        """The axis range this node's last-rendered plot used, if any."""
+        figure = resolve_figure(node, self._last_outputs)
+        return figure_axis_limits(figure)
+
+    def _on_preview_clicked(self, node_id: str) -> None:
+        """A figure thumbnail was clicked: select its node (NodeGraphQt's
+        internal id, which is what the preview overlay keys on)."""
+        node = next((n for n in self._graph.all_nodes() if n.id == node_id), None)
+        if node is not None:
+            self._select_only(node)
 
     def _on_node_type_change(self, new_type: str) -> None:
         """Macro or micro dropdown changed: recreate the node as ``new_type``."""
@@ -515,6 +848,9 @@ class MainWindow(QMainWindow):
             input_dataframe_columns(source_node, self._last_outputs),
             input_column_values(source_node, self._last_outputs),
         )
+        self._dashboard_page.options_panel.set_axis_limits(
+            self._axis_limits_for(source_node)
+        )
         self._dashboard_page.show_options_page()
 
     def _on_dashboard_node_type_change(self, new_type: str) -> None:
@@ -543,6 +879,7 @@ class MainWindow(QMainWindow):
 
     def _set_theme_mode(self, mode: str) -> None:
         theme.set_theme_mode(mode)
+        settings.set("appearance.theme", mode)  # the choice outlives the session
         self._apply_theme()
 
     def _on_system_color_scheme_changed(self, *_args: object) -> None:
@@ -562,35 +899,120 @@ class MainWindow(QMainWindow):
     # -- Pipeline menu actions -----------------------------------------
 
     def _on_load_pipeline(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open Pipeline", "", "Pipeline JSON (*.json)")
-        if not path:
+        if not self.confirm_discard_changes():
             return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Pipeline", self._dialog_folder(), "Pipeline JSON (*.json)"
+        )
+        if path:
+            self._open_pipeline_file(path)
+
+    def _missing_toolboxes(self, pipeline: PipelineGraph) -> list:
+        """
+        Families that would have to be switched on for this pipeline.
+
+        Asks whether each node's family is *enabled*, not whether the
+        node happens to be in the registry. The registry is not a stable
+        answer: working out which family owns a node type requires
+        importing every module, so anything that has already done that
+        -- opening Preferences, which imports them all to count nodes --
+        would leave every type "known" and this returning nothing, right
+        before the canvas failed to build the node anyway.
+        """
+        by_toolbox = toolboxes.node_types_by_toolbox()
+        owner = {t: key for key, types in by_toolbox.items() for t in types}
+        enabled = toolboxes.enabled_keys()
+
+        needed: list = []
+        for spec in pipeline.nodes.values():
+            key = owner.get(spec.node_type)
+            if key is None or key in enabled:
+                continue
+            toolbox = toolboxes.get(key)
+            if toolbox is not None and toolbox not in needed:
+                needed.append(toolbox)
+        return needed
+
+    def _enable_toolboxes_for(self, pipeline: PipelineGraph) -> bool:
+        """
+        Offer to switch a needed family back on. ``True`` to carry on.
+
+        Asked rather than done silently: the preference is the person's,
+        and a setting that changes itself behind your back is the sort
+        of thing that is confusing weeks later.
+        """
+        missing = self._missing_toolboxes(pipeline)
+        if not missing:
+            return True
+        names = ", ".join(toolbox.title for toolbox in missing)
+        answer = QMessageBox.question(
+            self,
+            "Toolbox needed",
+            f"This pipeline uses nodes from the {names} toolbox, which is "
+            "switched off.\n\nEnable it and open the file?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        enabled = set(settings.get(toolboxes.SETTING) or [])
+        enabled.update(toolbox.key for toolbox in missing)
+        settings.set(toolboxes.SETTING, sorted(enabled))
+        register_all_nodes(self._graph)  # the newly enabled Qt classes
+        self._refresh_node_menus()
+        return True
+
+    def _open_pipeline_file(self, path: str) -> None:
         try:
-            pipeline = load_graph(path)
+            pipeline, extras = load_document(path)
+            if not self._enable_toolboxes_for(pipeline):
+                return
             self._graph.clear_session()
             pipeline_to_canvas(pipeline, self._graph)
+            # Opening a document replaces the document: a file with no
+            # dashboard section means an empty dashboard, so blocks from
+            # the pipeline that was open before cannot bleed into this
+            # one and be saved into it.
+            self._dashboard_page.restore(extras.get(DASHBOARD_KEY))
         except Exception as exc:  # noqa: BLE001 - reported to the user, not swallowed
             self._show_error("Could not open pipeline", exc)
         else:
-            # A freshly opened pipeline has no results yet.
+            # A freshly opened pipeline has no results yet. Its history
+            # starts here too: undoing past a file load would unbuild the
+            # opened pipeline into whatever was on the canvas before.
+            self._graph.clear_undo_stack()
             self._last_outputs = {}
             self._run_snapshot = {}
+            self._mark_saved(path)
             self.statusBar().showMessage(f"Opened {path}", 5000)
 
     def _on_save_pipeline(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save Pipeline", "", "Pipeline JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Pipeline",
+            self._pipeline_path or self._dialog_folder(),
+            "Pipeline JSON (*.json)",
+        )
         if not path:
             return
         try:
             pipeline = self._build_pipeline_or_raise()
-            save_graph(pipeline, path)
+            # The dashboard travels with the pipeline: one file is the
+            # whole document, so sending someone a pipeline sends the
+            # report with it.
+            save_document(
+                pipeline, path, {DASHBOARD_KEY: self._dashboard_page.to_dict()}
+            )
         except Exception as exc:  # noqa: BLE001
             self._show_error("Could not save pipeline", exc)
         else:
+            self._mark_saved(path)
             self.statusBar().showMessage(f"Saved {path}", 5000)
 
     def _on_export_script(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export as Script", "", "Python (*.py)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export as Script", self._dialog_folder(), "Python (*.py)"
+        )
         if not path:
             return
         try:
@@ -640,16 +1062,16 @@ class MainWindow(QMainWindow):
 
     # -- execution callbacks (GUI thread, via Qt signals) ---------------
 
-    def _on_run_succeeded(
-        self, outputs: dict[str, dict], errors: dict[str, str] | None = None
-    ) -> None:
-        """A manual run finished. ``errors`` is the per-node failure map
-        (empty on a fully clean run); the nodes that ran are in
-        ``outputs`` regardless, so their tables / figures still show."""
-        errors = dict(errors or {})
+    def _on_run_succeeded(self, report) -> None:
+        """A manual run finished. Nodes that ran are in ``report.outputs``
+        whatever else failed, so their tables and figures still show."""
+        outputs = report.outputs
+        errors = dict(report.errors)
+        verbose = bool(settings.get("advanced.verbose_log"))
         for node_id, node_outputs in outputs.items():
             for port_name, value in node_outputs.items():
-                self._pipeline_page.append_log(f"[{node_id}] {port_name} = {value!r}")
+                shown = repr(value) if verbose else _summarise(value)
+                self._pipeline_page.append_log(f"[{node_id}] {port_name} = {shown}")
         for node_id, message in errors.items():
             self._pipeline_page.append_log(f"ERROR [{node_id}]: {message}")
             # dot is already red from the streamed phase; enrich the tooltip
@@ -663,13 +1085,13 @@ class MainWindow(QMainWindow):
         )
         self._table_page.refresh(self._graph, outputs, self._table_modified_set())
 
+        self._show_problems(errors)
         if errors:
+            # No dialog: a failing step is reported in the Problems panel,
+            # which stays until the problem does and leads to the node.
             self.statusBar().showMessage("Pipeline finished with errors.", 5000)
             self._tab_bar.progress.finish_error()
-            self._show_error(
-                "Pipeline finished with errors",
-                "\n".join(f"{node_id}: {msg}" for node_id, msg in errors.items()),
-            )
+            self._pipeline_page.show_problems()
         else:
             self.statusBar().showMessage("Pipeline finished.", 5000)
             self._tab_bar.progress.finish_success()
@@ -680,11 +1102,52 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Pipeline failed.", 5000)
         self._tab_bar.progress.finish_error()
         self._pipeline_page.append_log(f"ERROR: {message}")
-        self._show_error("Pipeline execution failed", message)
+        # A structural problem belongs to the pipeline, not to any one
+        # node, so it gets a row with no node to select.
+        self._show_problems(
+            {
+                GRAPH_PROBLEM: NodeError(
+                    node_id=GRAPH_PROBLEM,
+                    node_type="",
+                    kind="input",
+                    title=message,
+                    detail="The pipeline could not be started.",
+                    raw=message,
+                )
+            }
+        )
+        self._pipeline_page.show_problems()
 
-    def _on_auto_run_finished(self, outputs: dict[str, dict], errors: dict) -> None:
+    # -- the Problems panel ---------------------------------------------
+
+    def _show_problems(self, errors: dict) -> None:
+        """Replace the Problems list and the tab-band chip's count."""
+        problems = [error for error in errors.values() if isinstance(error, NodeError)]
+        self._pipeline_page.problems.set_problems(problems)
+        self._tab_bar.problems_chip.set_count(len(problems))
+
+    def _on_problem_activated(self, node_id: str, field: str) -> None:
+        """A row was clicked: go to that node, and point at the setting."""
+        node = next(
+            (n for n in self._graph.all_nodes() if n.name() == node_id), None
+        )
+        if node is None:
+            return
+        self._tab_bar.set_current_key("pipeline")
+        self._select_only(node)
+        if field:
+            message = str(self._last_run_errors.get(node_id, ""))
+            self._options.set_field_error(field, message)
+
+    def _on_problems_chip_clicked(self) -> None:
+        self._tab_bar.set_current_key("pipeline")
+        self._pipeline_page.show_problems()
+
+    def _on_auto_run_finished(self, report) -> None:
         """Merge a background auto-run's results without any dialog/log noise."""
-        self._last_run_errors = dict(errors or {})
+        outputs = report.outputs
+        self._last_run_errors = dict(report.errors)
+        self._show_problems(self._last_run_errors)
         self._auto_run_ran = True
         self._refresh_auto_pill()  # -> green (clean) or red (raised)
         # the dot is already red from the streamed phase; add the message
@@ -719,6 +1182,7 @@ class MainWindow(QMainWindow):
                 input_dataframe_columns(node, self._last_outputs),
                 input_column_values(node, self._last_outputs),
             )
+            self._options.set_axis_limits(self._axis_limits_for(node))
         if self._dashboard_page.is_editing_figure():
             dsource = self._dashboard_page.options_panel.current_node()
             if dsource is not None:
@@ -726,18 +1190,47 @@ class MainWindow(QMainWindow):
                     input_dataframe_columns(dsource, self._last_outputs),
                     input_column_values(dsource, self._last_outputs),
                 )
+                self._dashboard_page.options_panel.set_axis_limits(
+                    self._axis_limits_for(dsource)
+                )
         if self.current_tab() == "table":
             self._table_page.refresh(
                 self._graph, self._last_outputs, self._table_modified_set()
             )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        """Let any in-flight background run finish before the window dies."""
+        """Confirm unsaved work, remember the window, then let any
+        in-flight background run finish before the window dies."""
+        if not self.confirm_discard_changes():
+            event.ignore()
+            return
+        if settings.get("general.restore_window"):
+            settings.set(
+                "general.window_geometry",
+                bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            )
         self._auto_run.set_enabled(False)
         for worker in (self._worker, getattr(self._auto_run, "_worker", None)):
             if worker is not None and worker.isRunning():
                 worker.wait(3000)
         super().closeEvent(event)
+
+    def restore_window_geometry(self) -> bool:
+        """
+        Put the window back where it was, if that preference is on.
+
+        Called by the entry point rather than from ``__init__`` so a
+        window built in a test keeps its deterministic default size.
+        """
+        if not settings.get("general.restore_window"):
+            return False
+        stored = str(settings.get("general.window_geometry") or "")
+        if not stored:
+            return False
+        try:
+            return self.restoreGeometry(QByteArray.fromBase64(stored.encode("ascii")))
+        except Exception:  # noqa: BLE001 - a bad blob is not worth a crash
+            return False
 
     # -- helpers --------------------------------------------------------
 

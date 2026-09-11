@@ -72,6 +72,7 @@ class FigureItem(QGraphicsObject):
         self.export_node_id = export_node_id
         self._title = title
         self._stale = False
+        self._locked = False
         self._renderer: QSvgRenderer | None = None
         self._aspect = 0.72  # height / width of the image area
         self._rect = QRectF(0.0, 0.0, 380.0, 380.0 * self._aspect + _TITLE_H + _PAD)
@@ -120,6 +121,11 @@ class FigureItem(QGraphicsObject):
 
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt override
         return self._rect.adjusted(-3, -3, 3, 3)
+
+    def visual_rect(self) -> QRectF:
+        """The block itself, without boundingRect's selection padding --
+        what ``dashboard_layout`` aligns on."""
+        return QRectF(self._rect)
 
     def paint(self, painter: QPainter, option: Any, widget: Any = None) -> None:  # noqa: N802
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -184,6 +190,49 @@ class FigureItem(QGraphicsObject):
 
     # -- resize (bottom-right handle) vs. move --------------------
 
+    # -- locking ---------------------------------------------------
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def set_locked(self, locked: bool) -> None:
+        """A locked block cannot be selected, moved, resized or deleted.
+
+        Dashboard > Unlock all is the way back: a block you cannot
+        select is a block you cannot unlock from its own inspector."""
+        self._locked = bool(locked)
+        self.setFlag(QGraphicsItem.ItemIsMovable, not self._locked)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, not self._locked)
+        if self._locked:
+            self.setSelected(False)
+        self.update()
+
+    # -- undo / persistence state ----------------------------------
+
+    def capture_state(self) -> dict[str, Any]:
+        # The export node's name is what a saved block is re-bound by
+        # when the file is opened again -- everything else about a
+        # figure comes back from running the pipeline.
+        return {
+            "export_node_id": self.export_node_id,
+            "title": self._title,
+            "stale": self._stale,
+            "locked": self._locked,
+            "width": self._rect.width(),
+            "aspect": self._aspect,
+        }
+
+    def apply_state(self, state: dict[str, Any]) -> None:
+        self.prepareGeometryChange()
+        self.export_node_id = state.get("export_node_id", self.export_node_id)
+        self._title = state.get("title", self._title)
+        self._stale = state.get("stale", self._stale)
+        self._aspect = state.get("aspect", self._aspect)
+        self._rect.setWidth(state.get("width", self._rect.width()))
+        self._reflow()
+        self.set_locked(state.get("locked", False))
+        self.update()
+
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if self.isSelected() and self._handle_rect().contains(event.pos()):
             self._resizing = True
@@ -220,6 +269,7 @@ _TEXT_DEFAULT: dict[str, Any] = {
     "color": "#202020",
     "align": "left",
     "family": "",
+    "locked": False,
 }
 _TITLE_DEFAULT = {**_TEXT_DEFAULT, "bold": True, "size": 24}
 
@@ -237,6 +287,9 @@ class TextItem(QGraphicsTextItem):
         super().__init__(text or ("Title" if is_title else "Text"))
         self.is_title = is_title
         self._style: dict[str, Any] = dict(_TITLE_DEFAULT if is_title else _TEXT_DEFAULT)
+        preferred = self._preferred_family()
+        if preferred:
+            self._style["family"] = preferred
         self.setFlags(
             QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable
         )
@@ -245,6 +298,59 @@ class TextItem(QGraphicsTextItem):
         self._apply_style()
 
     # -- style ------------------------------------------------------
+
+    def _preferred_family(self) -> str:
+        """The Dashboard font preference for this kind of item, if set."""
+        from ruyso_app.engine import settings
+
+        key = "dashboard.title_font" if self.is_title else "dashboard.text_font"
+        return str(settings.get(key) or "")
+
+    def apply_font_preference(self) -> None:
+        """
+        Adopt the current font preference, unless this item was restyled.
+
+        A person who picked a font in the inspector has said what they
+        want for that box; changing the default afterwards should not
+        undo it. Only an item still on its inherited family follows.
+        """
+        preferred = self._preferred_family()
+        if not preferred or self._style.get("_family_chosen"):
+            return
+        self.set_style(family=preferred)
+        self._style["_family_chosen"] = False  # still inherited
+
+    # -- locking ---------------------------------------------------
+
+    def is_locked(self) -> bool:
+        return bool(self._style.get("locked"))
+
+    def set_locked(self, locked: bool) -> None:
+        """See FigureItem.set_locked -- same contract."""
+        self._style["locked"] = bool(locked)
+        self.setFlag(QGraphicsItem.ItemIsMovable, not locked)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, not locked)
+        if locked:
+            self.setSelected(False)
+        self.update()
+
+    # -- undo / persistence state ----------------------------------
+
+    def capture_state(self) -> dict[str, Any]:
+        return {
+            "text": self.toPlainText(),
+            "style": dict(self._style),
+            "is_title": self.is_title,
+            "width": self.textWidth(),
+        }
+
+    def apply_state(self, state: dict[str, Any]) -> None:
+        self.is_title = state.get("is_title", self.is_title)
+        self.setPlainText(state.get("text", self.toPlainText()))
+        self.setTextWidth(state.get("width", self.textWidth()))
+        self._style = dict(state.get("style", self._style))
+        self._apply_style()
+        self.set_locked(bool(self._style.get("locked")))
 
     def style(self) -> dict[str, Any]:
         return dict(self._style)
@@ -301,7 +407,7 @@ class TextInspector(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._item: TextItem | None = None
+        self._items: list[TextItem] = []
 
         self._bold = QCheckBox("Bold", self)
         self._italic = QCheckBox("Italic", self)
@@ -326,30 +432,54 @@ class TextInspector(QWidget):
         self._italic.toggled.connect(lambda v: self._push(italic=v))
         self._size.valueChanged.connect(lambda v: self._push(size=v))
         self._align.currentTextChanged.connect(lambda v: self._push(align=v))
-        self._family.currentFontChanged.connect(lambda f: self._push(family=f.family()))
+        # ``_family_chosen`` records that this box's font was picked by
+        # hand, so a later change to the Dashboard font preference
+        # leaves it alone (see TextItem.apply_font_preference).
+        self._family.currentFontChanged.connect(
+            lambda f: self._push(family=f.family(), _family_chosen=True)
+        )
         self._color.clicked.connect(self._pick_color)
 
-    def set_item(self, item: TextItem | None) -> None:
-        self._item = None  # suppress feedback while loading
-        if item is not None:
-            s = item.style()
+    def set_items(self, items: list[TextItem]) -> None:
+        """
+        Bind the form to one text box or to several at once.
+
+        Editing a whole selection is most of why the pane exists: making
+        five captions match by hand is the tedious part. Where the
+        selection disagrees the field simply shows the first one's
+        value, and setting it applies to all.
+        """
+        self._items = []  # suppress feedback while loading
+        if items:
+            s = items[0].style()
             self._bold.setChecked(bool(s["bold"]))
             self._italic.setChecked(bool(s["italic"]))
             self._size.setValue(int(s["size"]))
             self._align.setCurrentText(s["align"])
             if s["family"]:
                 self._family.setCurrentFont(QFont(s["family"]))
-        self._item = item
+        self._items = list(items)
+
+    def set_item(self, item: TextItem | None) -> None:
+        """Bind a single item (kept for callers that have just one)."""
+        self.set_items([item] if item is not None else [])
+
+    def items(self) -> list[TextItem]:
+        return list(self._items)
 
     def _push(self, **changes: Any) -> None:
-        if self._item is not None:
-            self._item.set_style(**changes)
+        for item in self._items:
+            item.set_style(**changes)
+        self.changed()
+
+    def changed(self) -> None:
+        """Hook the page replaces, so an edit can be pushed onto undo."""
 
     def _pick_color(self) -> None:
-        if self._item is None:
+        if not self._items:
             return
         chosen = QColorDialog.getColor(
-            QColor(self._item.style()["color"]), self, "Text colour"
+            QColor(self._items[0].style()["color"]), self, "Text colour"
         )
         if chosen.isValid():
-            self._item.set_style(color=chosen.name())
+            self._push(color=chosen.name())

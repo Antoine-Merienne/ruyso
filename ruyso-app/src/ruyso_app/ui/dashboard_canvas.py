@@ -19,9 +19,10 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QLabel, QWidget
 
+from ruyso_app.engine import settings
 from ruyso_app.ui import theme
 
 #: On macOS Qt maps Cmd to ControlModifier; on Windows/Linux it's Ctrl.
@@ -30,6 +31,10 @@ _ZOOM_MODIFIERS = Qt.ControlModifier | Qt.MetaModifier
 _RMB_DRAG_THRESHOLD = 4
 #: A pinch ``value()`` is a small increment; treat it as a scale delta.
 _PINCH_GAIN = 1.0
+#: Arrow-key nudge distances, in scene units.
+_NUDGE = 1.0
+_NUDGE_LARGE = 10.0
+
 #: Absolute zoom clamp (view transform scale factor).
 _ZOOM_MIN = 0.1
 _ZOOM_MAX = 8.0
@@ -62,6 +67,11 @@ class DashboardView(QGraphicsView):
     context_menu_requested = Signal(QPoint)
     #: Emitted on Delete / Backspace while no text item is being edited.
     delete_requested = Signal()
+    #: Emitted after a drag that actually moved the selection, so the
+    #: page can record it as one undoable step.
+    items_moved = Signal()
+    #: Emitted with ``(dx, dy)`` in scene units for an arrow-key nudge.
+    nudge_requested = Signal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -111,20 +121,109 @@ class DashboardView(QGraphicsView):
         super().resizeEvent(event)
         self.overlay.setGeometry(self.viewport().rect())
 
-    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            focus = self._scene.focusItem()
-            editing = (
-                focus is not None
-                and focus.textInteractionFlags() != Qt.NoTextInteraction
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().mouseReleaseEvent(event)
+        self.snap_selection()
+        # A drag that actually moved something is one undoable step. The
+        # threshold keeps a plain click -- which Qt also reports as a
+        # press and a release -- from pushing an empty one.
+        start = getattr(self, "_press_pos", None)
+        moved = (
+            start is not None
+            and (event.position().toPoint() - start).manhattanLength() > 2
+        )
+        if moved and self._scene.selectedItems():
+            self.items_moved.emit()
+        self._press_pos = None
+
+    def snap_selection(self) -> None:
+        """
+        Round the selected items' positions to the grid.
+
+        On release rather than during the drag: snapping continuously
+        makes the item lag the pointer, which reads as the drag being
+        broken rather than as alignment help.
+        """
+        size = self.grid_size()
+        if not self.snapping_enabled():
+            return
+        for item in self._scene.selectedItems():
+            position = item.pos()
+            item.setPos(
+                round(position.x() / size) * size, round(position.y() / size) * size
             )
-            if not editing:
-                self.delete_requested.emit()
-                return
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if self._editing_text():
+            super().keyPressEvent(event)  # the keys belong to the text box
+            return
+
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.delete_requested.emit()
+            return
+
+        step = _NUDGE_LARGE if event.modifiers() & Qt.ShiftModifier else _NUDGE
+        delta = {
+            Qt.Key_Left: (-step, 0.0),
+            Qt.Key_Right: (step, 0.0),
+            Qt.Key_Up: (0.0, -step),
+            Qt.Key_Down: (0.0, step),
+        }.get(event.key())
+        if delta is not None and self._scene.selectedItems():
+            self.nudge_requested.emit(*delta)
+            return
         super().keyPressEvent(event)
+
+    def _editing_text(self) -> bool:
+        """Whether a text box has the keyboard, so arrows and Delete are its."""
+        focus = self._scene.focusItem()
+        return (
+            focus is not None
+            and getattr(focus, "textInteractionFlags", None) is not None
+            and focus.textInteractionFlags() != Qt.NoTextInteraction
+        )
 
     def apply_theme(self) -> None:
         self.setBackgroundBrush(QColor(*theme.current_theme().canvas_background))
+        self.viewport().update()
+
+    def grid_size(self) -> int:
+        """Spacing of the dashboard grid, in scene units (0 = disabled)."""
+        try:
+            size = int(settings.get("dashboard.grid_size"))
+        except (TypeError, ValueError):
+            return 0
+        return size if size > 1 else 0
+
+    def snapping_enabled(self) -> bool:
+        return bool(settings.get("dashboard.snap")) and self.grid_size() > 0
+
+    def drawBackground(self, painter, rect) -> None:  # noqa: N802 - Qt override
+        """
+        Paint the optional alignment grid behind the items.
+
+        Drawn here rather than as scene items so it costs nothing to
+        hide, never appears in the exported PDF/PNG (``QGraphicsScene.render``
+        does not call a *view's* background), and cannot be selected or
+        dragged by accident.
+        """
+        super().drawBackground(painter, rect)
+        size = self.grid_size()
+        if not size or not settings.get("dashboard.show_grid"):
+            return
+        colour = QColor(*theme.current_theme().canvas_background)
+        colour = colour.lighter(112) if colour.value() < 128 else colour.darker(106)
+        painter.setPen(QPen(colour, 0))
+        left = int(rect.left()) - (int(rect.left()) % size)
+        top = int(rect.top()) - (int(rect.top()) % size)
+        for x in range(left, int(rect.right()) + 1, size):
+            painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
+        for y in range(top, int(rect.bottom()) + 1, size):
+            painter.drawLine(int(rect.left()), y, int(rect.right()), y)
 
 
 class DashboardNavigation(QObject):

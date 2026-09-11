@@ -10,9 +10,39 @@ import pytest
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_ruyso_config(tmp_path_factory):
-    """Point ``engine.colormaps`` at a throwaway config dir so tests never
-    touch (or depend on) the real ~/.config/ruyso/colormaps.json."""
+    """Point ``engine.colormaps`` and ``engine.settings`` at a throwaway
+    config dir so tests never touch (or depend on) the real
+    ``~/.config/ruyso/``.
+
+    The unsaved-changes prompt is switched off for the whole run: it is
+    a *modal* dialog raised from ``MainWindow.closeEvent``, and every
+    test that builds a window and closes it would sit waiting for a
+    click that never comes. ``tests/ui/test_main_window.py`` exercises
+    the prompt directly instead, with ``QMessageBox.question`` patched.
+    """
     os.environ["RUYSO_CONFIG_DIR"] = str(tmp_path_factory.mktemp("ruyso-config"))
+
+    from ruyso_app.engine import settings
+
+    settings.reload()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _never_prompt_on_close():
+    """
+    Keep the unsaved-changes prompt off for every test.
+
+    Re-asserted per test rather than once per session because tests that
+    exercise the settings store legitimately delete the file, which
+    would otherwise restore the prompt's default (on) for everything
+    that ran afterwards -- and a modal raised from ``closeEvent`` in a
+    headless run does not fail, it *hangs*, waiting for a click.
+    """
+    from ruyso_app.engine import settings
+
+    if settings.get("general.confirm_on_close"):
+        settings.set("general.confirm_on_close", False)
     yield
 
 

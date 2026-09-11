@@ -18,10 +18,50 @@ itself on a dark/light theme toggle with no code here.
 from __future__ import annotations
 
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QSizePolicy, QWidget
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtWidgets import QStyle, QStyleOptionButton
 
 from ruyso_app.ui.auto_status import AutoStatusPill
+from ruyso_app.ui.problems_chip import ProblemsChip
 from ruyso_app.ui.run_progress import RunProgressBar
+
+#: Fallback chrome around a tab's text -- the QSS margins, border and
+#: padding -- used only if the style cannot be asked (see below).
+_TAB_CHROME = 2 * 2 + 2 + 2 * 20
+
+
+def _reserve_bold_width(button: QPushButton) -> None:
+    """
+    Make a tab as wide as its label in **bold**.
+
+    The active tab is bold (see the ``#ruysoTabButton:checked`` rule),
+    but Qt sizes the button from the regular font it is built with, so
+    the widest label -- "Dashboard" -- was clipped the moment it became
+    the active one.
+
+    The chrome around the text is measured by asking the style, not by
+    adding up the numbers in the stylesheet: a first attempt at this
+    counted the padding and the border but forgot the margins, and came
+    out four pixels short -- enough to still elide "Dashboard".
+    """
+    bold = button.font()
+    bold.setBold(True)
+    metrics = QFontMetrics(bold)
+    text = QSize(
+        metrics.horizontalAdvance(button.text()), metrics.height()
+    )
+
+    button.ensurePolished()  # the stylesheet rules must be resolved first
+    option = QStyleOptionButton()
+    option.initFrom(button)
+    option.text = button.text()
+    option.fontMetrics = metrics
+    size = button.style().sizeFromContents(
+        QStyle.CT_PushButton, option, text, button
+    )
+    button.setMinimumWidth(max(size.width(), text.width() + _TAB_CHROME))
 
 
 class TabBar(QWidget):
@@ -56,6 +96,7 @@ class TabBar(QWidget):
             button = QPushButton(label, self)
             button.setObjectName("ruysoTabButton")
             button.setCheckable(True)
+            _reserve_bold_width(button)
             button.clicked.connect(lambda _checked, k=key: self.set_current_key(k))
             self._group.addButton(button)
             self._buttons[key] = button
@@ -78,6 +119,11 @@ class TabBar(QWidget):
         #: Background auto-run status ("· auto"), driven by MainWindow.
         self.auto_pill = AutoStatusPill(self)
         layout.addWidget(self.auto_pill, 0, Qt.AlignVCenter)
+
+        #: Appears only when the pipeline has failures; clicking it goes
+        #: to the Problems panel on the Pipeline tab.
+        self.problems_chip = ProblemsChip(self)
+        layout.addWidget(self.problems_chip, 0, Qt.AlignVCenter)
         layout.addSpacing(14)
 
         if tabs:

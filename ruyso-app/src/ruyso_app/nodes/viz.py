@@ -9,8 +9,10 @@ as an output value for the caller to render or save.
 
 from typing import Any, Literal
 
+from ruyso_app.core import colors, dtformat
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
+    axis_limit_field,
     checkbox_list_field,
     color_field,
     colormap_field,
@@ -26,12 +28,45 @@ from ruyso_app.core.registry import register_node
 #: never leaks into other nodes or the host process.
 _BASE_STYLE = "seaborn-v0_8-whitegrid"
 
+
+def _plot_context(plt: Any):
+    """
+    The style context every figure is drawn inside.
+
+    Layers the Chart-defaults preferences (``charts.style`` /
+    ``charts.font_family`` / ``charts.dpi``) over the built-in base
+    style, as a *context* rather than a global rcParams change so a
+    figure never leaks its styling into whatever draws next. Falls back
+    to the built-in style if the configured one is not installed --
+    a preference naming a missing style should not stop plots rendering.
+
+    Note that this makes a figure depend on machine-local preferences,
+    which an exported script will not carry: the same caveat that
+    already applies to custom colormaps (see README).
+    """
+    from ruyso_app.engine import settings
+
+    overrides: dict[str, Any] = {}
+    family = settings.get("charts.font_family")
+    if family:
+        overrides["font.family"] = family
+    dpi = settings.get("charts.dpi")
+    if dpi:
+        overrides["figure.dpi"] = float(dpi)
+
+    style = settings.get("charts.style") or _BASE_STYLE
+    try:
+        return plt.style.context([style, overrides])
+    except (OSError, ValueError):
+        return plt.style.context([_BASE_STYLE, overrides])
+
 #: Default single colour for dots / lines / bars / boxes.
 _DEFAULT_COLOR = "darkblue"
 
 #: Suggested colours offered in the colour-picker dropdown (any
 #: matplotlib colour string is still accepted).
 _COMMON_COLORS = [
+    "materialblue",  # the app's accent (core.colors.NAMED_COLORS)
     "darkblue", "steelblue", "royalblue", "black", "dimgray",
     "crimson", "seagreen", "darkorange", "purple", "teal",
 ]
@@ -150,10 +185,15 @@ def _new_figure(p: Any, nrows: int = 1, ncols: int = 1, *, squeeze: bool = True)
     it is dropped. ``savefig`` / ``FigureCanvasAgg`` attach a canvas on
     demand, so the returned figure renders exactly as before.
 
-    Call this inside a ``with plt.style.context(_BASE_STYLE):`` block so
+    Call this inside a ``with _plot_context(plt):`` block so
     the axes still pick up the shared style.
     """
     from matplotlib.figure import Figure
+
+    # Every grapher comes through here, so this is the one place that has
+    # to teach matplotlib the app's extra colour names before any param
+    # value reaches it. Idempotent and cheap (a dict setdefault).
+    colors.register()
 
     fig = Figure(figsize=_fig_size(p))
     axes = fig.subplots(nrows, ncols, squeeze=squeeze)
@@ -288,20 +328,24 @@ def _limit_value(raw: Any) -> Any:
 
 
 def _apply_axis_limits(axes: Any, p: Any) -> None:
-    """Apply the ``x_limits`` / ``y_limits`` manual ranges from ``p`` to
-    one Axes or a list of them. A no-op when the params don't carry the
-    fields or the ``*_limits`` toggle is off."""
+    """
+    Apply whichever manual axis edges ``p`` carries to one Axes or a list.
+
+    Each edge is independent and *blank means "fit this edge to the
+    data"*, so a person can pin only the y-axis floor and leave the other
+    three on autoscale. Passing ``None`` to ``set_xlim`` leaves that side
+    exactly as matplotlib computed it, which is what makes a per-edge
+    blank work. A no-op when the params carry none of the fields.
+    """
     ax_list = list(axes) if isinstance(axes, (list, tuple)) else [axes]
-    if getattr(p, "x_limits", False):
-        lo, hi = _limit_value(getattr(p, "x_min", None)), _limit_value(getattr(p, "x_max", None))
-        if lo is not None or hi is not None:
-            for ax in ax_list:
-                ax.set_xlim(left=lo, right=hi)
-    if getattr(p, "y_limits", False):
-        lo, hi = _limit_value(getattr(p, "y_min", None)), _limit_value(getattr(p, "y_max", None))
-        if lo is not None or hi is not None:
-            for ax in ax_list:
-                ax.set_ylim(bottom=lo, top=hi)
+    x_lo, x_hi = _limit_value(getattr(p, "x_min", None)), _limit_value(getattr(p, "x_max", None))
+    if x_lo is not None or x_hi is not None:
+        for ax in ax_list:
+            ax.set_xlim(left=x_lo, right=x_hi)
+    y_lo, y_hi = _limit_value(getattr(p, "y_min", None)), _limit_value(getattr(p, "y_max", None))
+    if y_lo is not None or y_hi is not None:
+        for ax in ax_list:
+            ax.set_ylim(bottom=y_lo, top=y_hi)
 
 
 def _finalize_plot(
@@ -649,20 +693,10 @@ class MatplotlibPlotParams(NodeParams):
     # -- axes ---------------------------------------------------------
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -844,7 +878,7 @@ class MatplotlibPlot(Node):
 
         marginals_on = bool(p.show_marginals) and p.kind == "scatter"
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             if marginals_on:
                 fig, ax, ax_top, ax_right = _new_joint_figure(p)
             else:
@@ -1308,7 +1342,7 @@ class TableViewer(Node):
         if not cell_text:
             cell_text = [[""] * max(len(col_labels), 1)]
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             ax.axis("off")
             pad = float(p.padding)
@@ -1540,20 +1574,10 @@ class BoxPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -1616,7 +1640,7 @@ class BoxPlot(Node):
 
         custom_box = p.kind == "box" and p.box_stat != "iqr"
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             vertical = p.orientation == "vertical"
             axis_kw = (
@@ -1735,20 +1759,10 @@ class HistogramPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -1793,7 +1807,7 @@ class HistogramPlot(Node):
             )
         hue = _categorical_hue(df, p.color_by)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             common: dict[str, Any] = {"data": df, "x": p.value_column, "ax": ax}
             if hue:
@@ -1948,7 +1962,7 @@ class HeatmapPlot(Node):
                 float(np.sqrt(chi2 / (total * (k - 1)))) if total and k > 1 else 0.0
             )
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             sns.heatmap(
                 table,
@@ -2092,7 +2106,7 @@ class ConfusionMatrixPlot(Node):
         _require_classifier(model, "confusion_matrix_plot")
         X = _aligned_X(inputs)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             ConfusionMatrixDisplay.from_estimator(
                 model,
@@ -2129,20 +2143,10 @@ class _CurvePlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2190,7 +2194,7 @@ def _draw_ovr_curve(
         line = {"color": colour, "linewidth": p.line_width}
         return line if kind == "det" else {"curve_kwargs": line}
 
-    with plt.style.context(_BASE_STYLE):
+    with _plot_context(plt):
         fig, ax = _new_figure(p)
 
         if len(classes) <= 2:
@@ -2307,20 +2311,10 @@ class CalibrationCurvePlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2364,7 +2358,7 @@ class CalibrationCurvePlot(Node):
             )
         X = _aligned_X(inputs)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             CalibrationDisplay.from_estimator(
                 model,
@@ -2410,20 +2404,10 @@ class LearningCurvePlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2467,7 +2451,7 @@ class LearningCurvePlot(Node):
         model = inputs["model"]
         X = _aligned_X(inputs)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             LearningCurveDisplay.from_estimator(
                 clone(model),
@@ -2513,20 +2497,10 @@ class QQPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -2572,7 +2546,7 @@ class QQPlot(Node):
             residual, dist="norm"
         )
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             ax.scatter(
                 theoretical, ordered, s=p.point_size,
@@ -2678,7 +2652,7 @@ class PieChart(Node):
         cmap = plt.get_cmap(p.colormap or "tab10")
         colors = [cmap(i % cmap.N) for i in range(len(values))]
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
 
             if p.style in ("pie", "doughnut"):
@@ -2822,7 +2796,7 @@ class Heatmap1D(Node):
         if label_col and label_col in df.columns and not wrapped:
             labels = [str(v) for v in df[label_col].tolist()[: n_cells]]
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             im = ax.imshow(grid, aspect="auto", cmap=p.colormap or "viridis")
             ax.set_xticks([])
@@ -2930,7 +2904,7 @@ class Autocorrelogram(Node):
         alpha = (1.0 - float(p.confidence_level)) if p.show_ci else None
         n_plots = int(p.show_acf) + int(p.show_pacf)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, axes = _new_figure(p, n_plots, 1, squeeze=False)
             axes = axes[:, 0]
             i = 0
@@ -3018,20 +2992,10 @@ class Density2DParams(NodeParams):
     legend_font_size: int = visible_field(9, visible_when_set="color_by")
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3085,7 +3049,7 @@ class Density2D(Node):
         def _neutral_marginal_color() -> Any:
             return plt.get_cmap(p.colormap or "viridis")(0.6)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             if marginals_on:
                 fig, ax, ax_top, ax_right = _new_joint_figure(p)
             else:
@@ -3183,20 +3147,10 @@ class PCAScreePlotParams(NodeParams):
     )
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: float = visible_field(
-        0.0, visible_when=("x_limits", "True"), description="Left edge of the x-axis."
-    )
-    x_max: float = visible_field(
-        1.0, visible_when=("x_limits", "True"), description="Right edge of the x-axis."
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3243,7 +3197,7 @@ class PCAScreePlot(Node):
                 f"missing column(s): {sorted(missing)}"
             )
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             positions = range(len(variance))
             ax.bar(
@@ -3366,7 +3320,7 @@ class PCACorrCirclePlot(Node):
         scale_x = float(var_lookup[p.x_component]) ** 0.5
         scale_y = float(var_lookup[p.y_component]) ** 0.5
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             if p.show_circle:
                 ax.add_patch(
@@ -3401,16 +3355,28 @@ class PCACorrCirclePlot(Node):
 _TIME_FREQ = Literal["auto", "year", "quarter", "month", "week", "day", "hour"]
 
 
-def _apply_time_ticks(ax: Any, freq: str) -> None:
-    """Set the x-axis major locator / formatter for a datetime axis."""
+def _apply_time_ticks(ax: Any, freq: str, fmt: str | None = None) -> None:
+    """
+    Set the x-axis major locator / formatter for a datetime axis.
+
+    ``fmt`` is the display format the plotted column carries (see
+    :mod:`ruyso_app.core.dtformat`) and is only ever passed when a node
+    upstream set one *explicitly* -- a format merely inferred from the
+    values must not override ``ConciseDateFormatter``, which reads far
+    better on an automatic axis. When given, it wins: the person asked
+    for their dates to look a certain way, and an axis is one of the two
+    places that request is supposed to show up.
+    """
     import matplotlib.dates as mdates
 
     if freq == "auto":
         locator = mdates.AutoDateLocator()
         ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.xaxis.set_major_formatter(
+            mdates.DateFormatter(fmt) if fmt else mdates.ConciseDateFormatter(locator)
+        )
         return
-    locator, fmt = {
+    locator, default_fmt = {
         "year": (mdates.YearLocator(), "%Y"),
         "quarter": (mdates.MonthLocator(bymonth=(1, 4, 7, 10)), "%Y-%m"),
         "month": (mdates.MonthLocator(), "%Y-%m"),
@@ -3419,7 +3385,7 @@ def _apply_time_ticks(ax: Any, freq: str) -> None:
         "hour": (mdates.HourLocator(), "%m-%d %H:%M"),
     }[freq]
     ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt or default_fmt))
     for label in ax.get_xticklabels():
         label.set_rotation(30)
         label.set_horizontalalignment("right")
@@ -3543,22 +3509,10 @@ class TimeSeriesPlotParams(NodeParams):
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: str = visible_field(
-        "", visible_when=("x_limits", "True"),
-        description="Start of the x-axis, e.g. 2020-01-01 (blank = data start).",
-    )
-    x_max: str = visible_field(
-        "", visible_when=("x_limits", "True"),
-        description="End of the x-axis, e.g. 2021-12-31 (blank = data end).",
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3627,7 +3581,7 @@ class TimeSeriesPlot(Node):
         color_active = bool(hue and color_col)
         style_active = bool(hue and style_col)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             if color_active:
                 cmap = plt.get_cmap(p.colormap or "tab10")
@@ -3641,7 +3595,9 @@ class TimeSeriesPlot(Node):
             else:
                 self._draw_lines(ax, groups, colors, shapes, p, hue, style_active, np)
 
-            _apply_time_ticks(ax, p.x_tick_freq)
+            _apply_time_ticks(
+                ax, p.x_tick_freq, dtformat.display_formats(df).get(p.x_column)
+            )
             if hue and p.show_legend:
                 _place_legend(ax, p, p.legend_title or group_col)
             elif not hue:
@@ -3739,7 +3695,13 @@ class MultivariateTimeSeriesPlotParams(NodeParams):
         normalize: z-score each series (useful when scales differ, for
             ``overlay``).
         x_tick_freq: Major x-tick spacing.
-        alpha / colormap: Line opacity / palette.
+        alpha: Line opacity.
+        colormap / mark_color: How the series are coloured, which follows
+            ``layout``. In ``overlay`` every line shares one axes, so
+            each takes its own colour from a qualitative ``colormap``.
+            In ``grid`` each series already has its own panel, so colour
+            carries no information and a single ``mark_color`` is used.
+            Only the field that applies to the current layout is shown.
     """
 
     datetime_column: str = column_field(dtypes=("datetime", "any"))
@@ -3748,28 +3710,23 @@ class MultivariateTimeSeriesPlotParams(NodeParams):
     normalize: bool = False
     x_tick_freq: _TIME_FREQ = "auto"
     alpha: float = unit_interval_field(0.9)
-    colormap: str = reactive_choice_field(
-        options="colormaps", depends_on="variables", default="tab10",
+    colormap: str = colormap_field(
+        kind="qualitative", default="tab10",
+        description="One colour per series.",
+        visible_when=("layout", "overlay"),
+    )
+    mark_color: str = color_field(
+        suggestions=_COMMON_COLORS, default="materialblue",
+        description="Line colour for every panel.",
+        visible_when=("layout", "grid"),
     )
 
     x_label: str = ""
     y_label: str = ""
-    x_limits: bool = False
-    x_min: str = visible_field(
-        "", visible_when=("x_limits", "True"),
-        description="Start of the x-axis, e.g. 2020-01-01 (blank = data start).",
-    )
-    x_max: str = visible_field(
-        "", visible_when=("x_limits", "True"),
-        description="End of the x-axis, e.g. 2021-12-31 (blank = data end).",
-    )
-    y_limits: bool = False
-    y_min: float = visible_field(
-        0.0, visible_when=("y_limits", "True"), description="Bottom edge of the y-axis."
-    )
-    y_max: float = visible_field(
-        1.0, visible_when=("y_limits", "True"), description="Top edge of the y-axis."
-    )
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
@@ -3824,20 +3781,27 @@ class MultivariateTimeSeriesPlot(Node):
                 std = s.std(ddof=0)
                 work[c] = (s - s.mean()) / std if std else s - s.mean()
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             if p.layout == "grid":
                 fig, axes = _new_figure(p, len(cols), 1, squeeze=False)
                 axes = list(axes[:, 0])
             else:
                 fig, ax = _new_figure(p)
                 axes = [ax] * len(cols)
-            cmap = plt.get_cmap(p.colormap or "tab10")
+            if p.layout == "overlay":
+                # One axes, so colour is the only thing separating the
+                # lines -- give each series its own from the palette.
+                cmap = plt.get_cmap(p.colormap or "tab10")
+                line_colors = [cmap(i % cmap.N) for i in range(len(cols))]
+            else:
+                # One panel per series: colour carries no information.
+                line_colors = [p.mark_color or "materialblue"] * len(cols)
 
             for i, col in enumerate(cols):
                 a = axes[i]
                 a.plot(
                     work["x"].to_numpy(), work[col].to_numpy(),
-                    color=cmap(i % cmap.N), alpha=float(p.alpha), label=col,
+                    color=line_colors[i], alpha=float(p.alpha), label=col,
                 )
                 if p.layout == "grid":
                     a.set_ylabel(col, fontsize=p.axis_font_size)
@@ -3847,7 +3811,9 @@ class MultivariateTimeSeriesPlot(Node):
                         a.tick_params(labelbottom=False)
 
             last = axes[-1]
-            _apply_time_ticks(last, p.x_tick_freq)
+            _apply_time_ticks(
+                last, p.x_tick_freq, dtformat.display_formats(df).get(p.datetime_column)
+            )
             if p.layout == "overlay":
                 if p.show_legend:
                     _place_legend(axes[0], p, p.legend_title or "series")
@@ -3958,7 +3924,7 @@ class ForecastPlot(Node):
             fx = np.arange(len(endog), len(endog) + steps)
             hx = np.arange(len(endog) - len(hist), len(endog))
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, axes = _new_figure(p, len(chosen), 1, squeeze=False)
             for ax, name in zip(axes[:, 0], chosen):
                 j = names.index(name)
@@ -4030,7 +3996,7 @@ class VarAcorrPlot(Node):
         band = z / np.sqrt(n)
         lags = np.arange(max_lag + 1)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, axes = _new_figure(p, k, k, squeeze=False)
             for i in range(k):
                 for j in range(k):
@@ -4133,7 +4099,7 @@ class IrfPlot(Node):
         responses = _sel(p.responses)
         impulses = _sel(p.shocks)
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, axes = _new_figure(p, len(responses), len(impulses), squeeze=False)
             for ri, r in enumerate(responses):
                 for ci, c in enumerate(impulses):

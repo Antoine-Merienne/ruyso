@@ -23,7 +23,7 @@ class PipelineExecutionWorker(QThread):
 
     Usage:
         worker = PipelineExecutionWorker(pipeline)
-        worker.succeeded.connect(on_success)   # slot(dict[str, dict])
+        worker.succeeded.connect(on_success)   # slot(engine.scheduler.RunReport)
         worker.failed.connect(on_failure)      # slot(str)
         worker.start()
 
@@ -32,10 +32,11 @@ class PipelineExecutionWorker(QThread):
     a running window.
     """
 
-    #: Emitted when the run completes, with ``(outputs, errors)`` --
-    #: ``outputs`` is {node_id: {port: value}} for the nodes that ran,
-    #: ``errors`` is {node_id: message} (empty on a fully clean run).
-    succeeded = Signal(dict, dict)
+    #: Emitted when the run completes, carrying the whole
+    #: :class:`~ruyso_app.engine.scheduler.RunReport`: what ran, what
+    #: raised (as ``NodeError``s the Problems panel can render), and
+    #: what never got to run.
+    succeeded = Signal(object)
 
     #: Emitted only if the run could not start at all (e.g. the graph
     #: failed structural validation), with a human-readable message.
@@ -69,7 +70,7 @@ class PipelineExecutionWorker(QThread):
     def run(self) -> None:
         """Entry point invoked by Qt on the background thread (do not call directly)."""
         try:
-            outputs, errors = self._scheduler.run(
+            report = self._scheduler.run(
                 self._pipeline,
                 progress_callback=lambda done, total: self.progress.emit(done, total),
                 node_callback=lambda node_id, phase: self.node_status.emit(node_id, phase),
@@ -77,4 +78,4 @@ class PipelineExecutionWorker(QThread):
         except Exception as exc:  # noqa: BLE001 - reported to the UI, never swallowed
             self.failed.emit(str(exc))
         else:
-            self.succeeded.emit(outputs, errors)
+            self.succeeded.emit(report)

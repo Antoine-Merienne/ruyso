@@ -32,7 +32,7 @@ from ruyso_app.core.port import Port
 from ruyso_app.core.registry import register_node
 from ruyso_app.nodes.geo_transforms import _align_crs
 from ruyso_app.nodes.viz import (
-    _BASE_STYLE,
+    _plot_context,
     _COMMON_COLORS,
     _LEGEND_LOCATIONS,
     _new_figure,
@@ -156,7 +156,7 @@ class GeoPlot(Node):
         col = (p.color_by or "").strip()
         size_col = (p.size_by or "").strip()
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             kw: dict[str, Any] = {
                 "ax": ax,
@@ -287,7 +287,7 @@ class GeoDensity(Node):
         x = gdf.geometry.x.to_numpy()
         y = gdf.geometry.y.to_numpy()
 
-        with plt.style.context(_BASE_STYLE):
+        with _plot_context(plt):
             fig, ax = _new_figure(p)
             if p.kind == "hexbin":
                 ax.hexbin(

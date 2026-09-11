@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from ruyso_app.ui.dataframe_model import DataFrameTableModel
+from ruyso_app.ui.height_grip import HeightGrip
 from ruyso_app.ui.table_description import (
     TableDescription,
     describe_table,
@@ -106,6 +107,15 @@ class TableDescriptionWidget(QWidget):
         self._numeric_table = _make_stat_table(_NUMERIC_HEADERS)
         self._categorical_label = QLabel("<b>String / categorical variables</b>")
         self._categorical_table = _make_stat_table(_CATEGORICAL_HEADERS)
+        # A table is as tall as its rows. The grip under it appears only
+        # when there are more rows than fit, and caps how much of the
+        # panel that table takes -- a table of 40 variables would
+        # otherwise push the next section off the panel, and which of
+        # the two you need room for depends on the data.
+        self._numeric_grip = HeightGrip(self._numeric_table)
+        self._categorical_grip = HeightGrip(self._categorical_table)
+        self._numeric_grip.setVisible(False)
+        self._categorical_grip.setVisible(False)
 
         self._content = QWidget()
         content_layout = QVBoxLayout(self._content)
@@ -113,8 +123,10 @@ class TableDescriptionWidget(QWidget):
         content_layout.addWidget(self._summary_host)
         content_layout.addWidget(self._numeric_label)
         content_layout.addWidget(self._numeric_table)
+        content_layout.addWidget(self._numeric_grip)
         content_layout.addWidget(self._categorical_label)
         content_layout.addWidget(self._categorical_table)
+        content_layout.addWidget(self._categorical_grip)
         content_layout.addStretch(1)
 
         scroll = QScrollArea(self)
@@ -135,24 +147,35 @@ class TableDescriptionWidget(QWidget):
     def show_description(self, df: Any) -> None:
         description = describe_table(df)
         self._populate_summary(description)
-        _fill_stat_table(
+        numeric_height = _fill_stat_table(
             self._numeric_table,
             [
                 [v.name, v.dtype, v.mean, v.std, v.minimum, v.maximum]
                 for v in description.numeric_vars
             ],
         )
-        _fill_stat_table(
+        categorical_height = _fill_stat_table(
             self._categorical_table,
             [
                 [v.name, v.dtype, str(v.n_distinct)]
                 for v in description.categorical_vars
             ],
         )
-        self._numeric_label.setVisible(bool(description.numeric_vars))
-        self._numeric_table.setVisible(bool(description.numeric_vars))
-        self._categorical_label.setVisible(bool(description.categorical_vars))
-        self._categorical_table.setVisible(bool(description.categorical_vars))
+        has_numeric = bool(description.numeric_vars)
+        has_categorical = bool(description.categorical_vars)
+        self._numeric_label.setVisible(has_numeric)
+        self._numeric_table.setVisible(has_numeric)
+        self._categorical_label.setVisible(has_categorical)
+        self._categorical_table.setVisible(has_categorical)
+        # Each table is as tall as its rows; its grip appears only once
+        # there are more rows than the cap allows, and then decides how
+        # much of the panel that table takes before it scrolls.
+        self._numeric_grip.set_content_height(numeric_height)
+        self._categorical_grip.set_content_height(categorical_height)
+        if not has_numeric:
+            self._numeric_grip.setVisible(False)
+        if not has_categorical:
+            self._categorical_grip.setVisible(False)
 
         self._empty.setVisible(False)
         self._content.setVisible(True)
@@ -314,13 +337,20 @@ def _make_stat_table(headers: list[str]) -> QTableWidget:
     return table
 
 
-def _fill_stat_table(table: QTableWidget, rows: list[list[str]]) -> None:
+def _fill_stat_table(table: QTableWidget, rows: list[list[str]]) -> int:
+    """
+    Fill one description table and return the height its rows want.
+
+    The height is applied by the table's :class:`~ui.height_grip.HeightGrip`
+    rather than here: a widget whose minimum is set in one place and
+    whose maximum is set in another ends up with minimum > maximum, and
+    the layout around it then places items on top of each other.
+    """
     table.setRowCount(len(rows))
     for r, row in enumerate(rows):
         for c, value in enumerate(row):
             table.setItem(r, c, QTableWidgetItem(value))
     table.resizeColumnsToContents()
-    # Keep the widget just tall enough for its rows (plus header).
     row_h = table.verticalHeader().defaultSectionSize()
     header_h = table.horizontalHeader().height()
-    table.setMaximumHeight(header_h + row_h * max(len(rows), 1) + 4)
+    return header_h + row_h * max(len(rows), 1) + 4

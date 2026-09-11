@@ -52,3 +52,20 @@ def test_tabs_are_mutually_exclusive(qapp):
 
     checked = [k for k, b in bar._buttons.items() if b.isChecked()]
     assert checked == ["dashboard"]
+
+
+def test_a_tab_is_wide_enough_for_its_label_in_bold(qapp):
+    """The active tab is bold, but Qt sizes a button from the regular
+    font it was built with -- so "Dashboard" was clipped the moment it
+    became the active one."""
+    from PySide6.QtGui import QFontMetrics
+
+    bar = TabBar(TABS)
+    button = bar._buttons["dashboard"]
+    bold = button.font()
+    bold.setBold(True)
+
+    assert button.minimumWidth() > QFontMetrics(bold).horizontalAdvance("Dashboard")
+    # ... and it is the bold width that is reserved, not the regular one.
+    regular = QFontMetrics(button.font()).horizontalAdvance("Dashboard")
+    assert button.minimumWidth() > regular

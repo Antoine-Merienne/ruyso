@@ -790,6 +790,120 @@ def test_combine_datetime_empty_mapping_is_a_passthrough():
     assert CombineDatetime(params=CombineDatetimeParams()).run(df=df)["df"] is df
 
 
+# -- combine_datetime: display format ------------------------------------
+#
+# The format is display metadata, never a dtype change: the column has to
+# stay a real datetime or sorting, resampling and the date axes break.
+
+from ruyso_app.core import dtformat  # noqa: E402
+
+
+def test_combine_datetime_records_the_display_format_without_changing_dtype():
+    df = pd.DataFrame({"y": [2020, 2019], "m": [2, 7]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "y", "month": "m"}), display_format="%Y-%m"
+        )
+    ).run(df=df)["df"]
+
+    assert pd.api.types.is_datetime64_any_dtype(out["datetime"])
+    assert dtformat.display_formats(out) == {"datetime": "%Y-%m"}
+    assert dtformat.format_value(out["datetime"].iloc[0], "%Y-%m") == "2020-02"
+
+
+def test_combine_datetime_display_format_follows_a_renamed_output_column():
+    df = pd.DataFrame({"y": [2020], "m": [2]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "y", "month": "m"}),
+            output_column="period", display_format="%Y-%m",
+        )
+    ).run(df=df)["df"]
+    assert dtformat.display_formats(out) == {"period": "%Y-%m"}
+
+
+def test_combine_datetime_without_a_display_format_infers_one():
+    """A column of whole days must not render a constant 00:00:00."""
+    df = pd.DataFrame({"y": [2020], "m": [2]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(mapping=json.dumps({"year": "y", "month": "m"}))
+    ).run(df=df)["df"]
+    assert dtformat.display_formats(out) == {}
+    assert dtformat.display_format_for(out, "datetime") == "%Y-%m-%d"
+
+
+def test_combine_datetime_display_format_applies_to_a_parsed_text_column():
+    df = pd.DataFrame({"raw": ["2023-03-15"]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "raw"}),
+            datetime_format="%Y-%m-%d", display_format="%d/%m/%Y",
+        )
+    ).run(df=df)["df"]
+    # The input format read the column; the display format only renders it.
+    assert out["datetime"].iloc[0] == pd.Timestamp("2023-03-15")
+    assert dtformat.display_formats(out) == {"datetime": "%d/%m/%Y"}
+
+
+# -- combine_datetime: last of period ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mapping, first, last",
+    [
+        ({"year": "y"}, "2020-01-01", "2020-12-31"),
+        ({"year": "y", "quarter": "q"}, "2020-01-01", "2020-03-31"),
+        ({"year": "y", "month": "m"}, "2020-02-01", "2020-02-29"),  # leap year
+        ({"year": "y", "week": "w"}, "2020-01-06", "2020-01-12"),
+    ],
+)
+def test_combine_datetime_last_of_period(mapping, first, last):
+    df = pd.DataFrame({"y": [2020], "q": [1], "m": [2], "w": [2]})
+    encoded = json.dumps(mapping)
+
+    default = CombineDatetime(
+        params=CombineDatetimeParams(mapping=encoded)
+    ).run(df=df)["df"]
+    assert default["datetime"].iloc[0] == pd.Timestamp(first)
+
+    end = CombineDatetime(
+        params=CombineDatetimeParams(mapping=encoded, last_of_period=True)
+    ).run(df=df)["df"]
+    assert end["datetime"].iloc[0] == pd.Timestamp(last)
+
+
+def test_combine_datetime_last_of_period_lands_at_midnight():
+    """"Last unit at midnight", not the last instant (23:59:59.999999)."""
+    df = pd.DataFrame({"y": [2020], "m": [2]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "y", "month": "m"}), last_of_period=True
+        )
+    ).run(df=df)["df"]
+    stamp = out["datetime"].iloc[0]
+    assert (stamp.hour, stamp.minute, stamp.second, stamp.microsecond) == (0, 0, 0, 0)
+
+
+def test_combine_datetime_last_of_period_is_a_no_op_at_day_resolution():
+    df = pd.DataFrame({"y": [2020], "m": [2], "d": [10]})
+    encoded = json.dumps({"year": "y", "month": "m", "day": "d"})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(mapping=encoded, last_of_period=True)
+    ).run(df=df)["df"]
+    assert out["datetime"].iloc[0] == pd.Timestamp("2020-02-10")
+
+
+def test_combine_datetime_last_of_period_still_adds_the_time_parts():
+    df = pd.DataFrame({"y": [2020], "m": [2], "h": [9]})
+    out = CombineDatetime(
+        params=CombineDatetimeParams(
+            mapping=json.dumps({"year": "y", "month": "m", "hour": "h"}),
+            last_of_period=True,
+        )
+    ).run(df=df)["df"]
+    assert out["datetime"].iloc[0] == pd.Timestamp("2020-02-29 09:00:00")
+
+
 def _dt_df():
     return pd.DataFrame(
         {
@@ -854,6 +968,51 @@ def test_resample_datetime_ohlc_flattens_columns():
         params=ResampleDatetimeParams(datetime_column="ts", rule="W", agg="ohlc")
     ).run(df=_series_df())["df"]
     assert {"v_open", "v_high", "v_low", "v_close"} <= set(out.columns)
+
+
+def _monthly_df():
+    return pd.DataFrame(
+        {"ts": pd.date_range("2020-01-01", periods=70, freq="D"), "v": range(70)}
+    )
+
+
+def test_resample_datetime_last_of_period_relabels_the_bins():
+    default = ResampleDatetime(
+        params=ResampleDatetimeParams(datetime_column="ts", rule="MS", agg="mean")
+    ).run(df=_monthly_df())["df"]
+    assert default["ts"].tolist()[:2] == [
+        pd.Timestamp("2020-01-01"), pd.Timestamp("2020-02-01")
+    ]
+
+    end = ResampleDatetime(
+        params=ResampleDatetimeParams(
+            datetime_column="ts", rule="MS", agg="mean", last_of_period=True
+        )
+    ).run(df=_monthly_df())["df"]
+    assert end["ts"].tolist()[:2] == [
+        pd.Timestamp("2020-01-31"), pd.Timestamp("2020-02-29")
+    ]
+
+
+def test_resample_datetime_last_of_period_only_moves_the_label():
+    """Relabelling must not change which rows fall in which bin."""
+    kwargs = dict(datetime_column="ts", rule="MS", agg="mean")
+    default = ResampleDatetime(params=ResampleDatetimeParams(**kwargs)).run(
+        df=_monthly_df()
+    )["df"]
+    end = ResampleDatetime(
+        params=ResampleDatetimeParams(**kwargs, last_of_period=True)
+    ).run(df=_monthly_df())["df"]
+    assert default["v"].tolist() == end["v"].tolist()
+
+
+def test_resample_datetime_last_of_period_is_a_no_op_for_unit_rules():
+    out = ResampleDatetime(
+        params=ResampleDatetimeParams(
+            datetime_column="ts", rule="D", agg="mean", last_of_period=True
+        )
+    ).run(df=_monthly_df())["df"]
+    assert out["ts"].iloc[0] == pd.Timestamp("2020-01-01")
 
 
 # --------------------------------------------------------------------------

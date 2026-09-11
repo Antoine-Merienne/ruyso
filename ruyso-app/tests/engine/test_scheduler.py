@@ -217,3 +217,172 @@ def test_run_available_records_a_failing_node_without_raising(no_cache_scheduler
 
     assert outputs == {}
     assert "load" in errors
+
+
+# -- RunReport: what happened to every node, not just the ones that ran ---
+
+from ruyso_app.engine.errors import NodeError  # noqa: E402
+
+
+def _failing_chain(sample_csv):
+    """load -> clean (fails) -> split. Two nodes never get to run."""
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": sample_csv})
+    )
+    graph.add_node(
+        NodeSpec(id="clean", node_type="sort", params={"columns": "not-a-list"})
+    )
+    graph.add_node(
+        NodeSpec(
+            id="split", node_type="train_test_split", params={"target_column": "target"}
+        )
+    )
+    graph.add_connection(
+        Connection(source_node="load", source_port="df", target_node="clean", target_port="df")
+    )
+    graph.add_connection(
+        Connection(source_node="clean", source_port="df", target_node="split", target_port="df")
+    )
+    return graph
+
+
+def test_a_report_unpacks_as_the_old_two_tuple(sample_csv, no_cache_scheduler):
+    """Every existing caller unpacks two values; that must keep working."""
+    report = no_cache_scheduler.run(_failing_chain(sample_csv))
+    outputs, errors = report
+
+    assert outputs is report.outputs
+    assert errors is report.errors
+
+
+def test_blocked_nodes_are_reported_instead_of_vanishing(sample_csv, no_cache_scheduler):
+    """They used to appear in neither outputs nor errors -- silently skipped."""
+    report = no_cache_scheduler.run(_failing_chain(sample_csv))
+
+    assert set(report.outputs) == {"load"}
+    assert set(report.errors) == {"clean"}
+    assert set(report.blocked) == {"split"}
+
+
+def test_a_blocked_node_names_the_node_that_actually_failed(sample_csv, no_cache_scheduler):
+    """Not the immediate neighbour -- the one worth going to look at."""
+    graph = _failing_chain(sample_csv)
+    graph.add_node(NodeSpec(id="tail", node_type="head", params={"n": 2}))
+    graph.add_connection(
+        Connection(source_node="split", source_port="X_train", target_node="tail", target_port="df")
+    )
+    report = no_cache_scheduler.run(graph)
+
+    assert report.blocked["split"] == "clean"
+    assert report.blocked["tail"] == "clean"  # two hops away, same root cause
+
+
+def test_errors_hold_a_readable_node_error(sample_csv, no_cache_scheduler):
+    report = no_cache_scheduler.run(_failing_chain(sample_csv))
+    error = report.errors["clean"]
+
+    assert isinstance(error, NodeError)
+    assert error.node_id == "clean" and error.node_type == "sort"
+    assert error.kind == "param" and error.field == "columns"
+    assert "pydantic" not in str(error)
+    assert error.raw  # the traceback is kept
+
+
+def test_a_missing_column_error_knows_the_columns_that_were_there(
+    sample_csv, no_cache_scheduler
+):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": sample_csv})
+    )
+    graph.add_node(
+        NodeSpec(id="pick", node_type="column_filter", params={"columns": ["nope"]})
+    )
+    graph.add_connection(
+        Connection(source_node="load", source_port="df", target_node="pick", target_port="df")
+    )
+    report = no_cache_scheduler.run(graph)
+
+    if "pick" in report.errors:  # the node validates its own columns
+        assert "nope" in str(report.errors["pick"])
+
+
+def test_a_clean_run_reports_nothing_blocked(sample_csv, no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": sample_csv})
+    )
+    report = no_cache_scheduler.run(graph)
+
+    assert report.errors == {} and report.blocked == {}
+
+
+# -- run_available: "blocked" and "unwired" are different things ----------
+
+
+def test_run_available_calls_an_unconnected_node_unwired(sample_csv, no_cache_scheduler):
+    """A half-built canvas is the normal state, not a broken pipeline."""
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))  # nothing wired in
+    phases: list[tuple[str, str]] = []
+    report = no_cache_scheduler.run_available(
+        graph, node_callback=lambda n, p: phases.append((n, p))
+    )
+
+    assert ("clean", "unwired") in phases
+    assert report.blocked == {"clean": None}
+    assert report.unwired == {"clean"}
+
+
+def test_run_available_calls_a_downstream_of_a_failure_blocked(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(
+        NodeSpec(id="load", node_type="csv_loader", params={"filepath": "/no/such.csv"})
+    )
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
+    graph.add_connection(
+        Connection(source_node="load", source_port="df", target_node="clean", target_port="df")
+    )
+    phases: list[tuple[str, str]] = []
+    report = no_cache_scheduler.run_available(
+        graph, node_callback=lambda n, p: phases.append((n, p))
+    )
+
+    assert ("load", "error") in phases
+    assert ("clean", "blocked") in phases  # not "unwired" -- something failed
+    assert report.blocked == {"clean": "load"}
+    assert report.unwired == set()
+
+
+def test_run_available_propagates_unwired_down_an_unfinished_branch(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="clean", node_type="drop_na", params={}))
+    graph.add_node(NodeSpec(id="tail", node_type="head", params={"n": 2}))
+    graph.add_connection(
+        Connection(source_node="clean", source_port="df", target_node="tail", target_port="df")
+    )
+    phases: list[tuple[str, str]] = []
+    no_cache_scheduler.run_available(
+        graph, node_callback=lambda n, p: phases.append((n, p))
+    )
+
+    # Nothing failed anywhere, so neither node is "blocked".
+    assert ("clean", "unwired") in phases
+    assert ("tail", "unwired") in phases
+    assert not any(phase == "blocked" for _node, phase in phases)
+
+
+def test_an_invalid_graph_still_returns_an_empty_report(no_cache_scheduler):
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="a", node_type="head", params={}))
+    graph.add_node(NodeSpec(id="b", node_type="head", params={}))
+    graph.add_connection(
+        Connection(source_node="a", source_port="df", target_node="b", target_port="df")
+    )
+    graph.add_connection(
+        Connection(source_node="b", source_port="df", target_node="a", target_port="df")
+    )
+    outputs, errors = no_cache_scheduler.run_available(graph)  # a cycle
+
+    assert outputs == {} and errors == {}

@@ -330,14 +330,20 @@ def test_background_tint_follows_selected_macro_type(qapp):
     assert "background-color: rgb(" in panel.styleSheet()
 
 
-def test_loader_has_no_datetime_params(qapp):
+def test_loader_date_parsing_is_off_and_its_details_are_hidden(qapp):
+    """The loader offers date parsing, but only once you opt in."""
     graph = _graph(qapp)
     loader = graph.create_node(qt_type_for("csv_loader"), name="load")
     panel = OptionsPanel()
     panel.show_node(loader, BY_CAT, input_columns={"date": "categorical", "n": "numeric"})
 
-    assert "datetime_columns" not in panel._field_widgets
-    assert "datetime_format" not in panel._field_widgets
+    assert loader.get_property("parse_dates") is False
+    rows = _rows(panel)
+    assert rows["datetime columns"] is False and rows["datetime format"] is False
+
+    panel._field_widgets["parse_dates"].setChecked(True)
+    rows = _rows(panel)
+    assert rows["datetime columns"] is True and rows["datetime format"] is True
 
 
 def test_loading_micro_type_dropdown_is_grouped_with_separators(qapp):
@@ -465,18 +471,48 @@ def test_visible_when_in_shows_the_row_for_any_listed_value(qapp):
     assert _rows(panel)["show outliers"] is False
 
 
-def test_axis_limit_spin_boxes_are_hidden_until_the_toggle_is_ticked(qapp):
+def _axis_panel(qapp):
     graph = _graph(qapp)
     node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
     panel = OptionsPanel()
     panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+    return panel, node
+
+
+def test_axis_limit_boxes_are_always_visible_and_start_blank(qapp):
+    panel, node = _axis_panel(qapp)
 
     rows = _rows(panel)
-    assert rows["x min"] is False and rows["x max"] is False
-    panel._field_widgets["x_limits"].setChecked(True)
-    rows = _rows(panel)
-    assert rows["x min"] is True and rows["x max"] is True
-    assert rows["y min"] is False  # y toggle still off
+    for label in ("x min", "x max", "y min", "y max"):
+        assert rows[label] is True, label
+    for field in ("x_min", "x_max", "y_min", "y_max"):
+        assert node.get_property(field) == ""  # blank = fit to the data
+
+
+def test_axis_limit_boxes_show_the_limits_the_plot_used(qapp):
+    panel, node = _axis_panel(qapp)
+    panel.set_axis_limits({"x_min": "0.9", "x_max": "3.1", "y_min": "8", "y_max": "52"})
+
+    assert panel._axis_limit_edits["x_min"].text() == "0.9"
+    assert panel._axis_limit_edits["y_max"].text() == "52"
+    # Display only -- an untouched edge stays on autoscale.
+    assert node.get_property("x_min") == ""
+    assert node.get_property("y_max") == ""
+
+
+def test_typing_an_axis_limit_pins_it_and_survives_a_refresh(qapp):
+    panel, node = _axis_panel(qapp)
+    panel.set_axis_limits({"y_min": "8", "y_max": "52"})
+
+    edit = panel._axis_limit_edits["y_min"]
+    edit.setText("0")
+    edit.textEdited.emit("0")  # what typing emits
+    assert node.get_property("y_min") == "0"
+
+    # A later run must not overwrite the pinned edge, but may refresh the rest.
+    panel.set_axis_limits({"y_min": "-5", "y_max": "99"})
+    assert edit.text() == "0"
+    assert panel._axis_limit_edits["y_max"].text() == "99"
 
 
 def test_custom_operation_code_field_is_a_multiline_editor_with_a_column_hint(qapp):
@@ -676,8 +712,9 @@ def test_grapher_mark_colour_field_has_a_choose_button(qapp):
     panel, _plot = _grapher(qapp, None)
 
     combo = panel._field_widgets["mark_color"]._combo
-    assert combo.currentText() == "darkblue"
+    assert combo.currentText() == "darkblue"  # this node's own default
     assert "darkblue" in [combo.itemText(i) for i in range(combo.count())]
+    assert "materialblue" in [combo.itemText(i) for i in range(combo.count())]
     row = panel._field_widgets["mark_color"]
     assert any(b.text() == "Choose..." for b in row.findChildren(QPushButton))
 
@@ -1169,11 +1206,49 @@ def test_colour_name_dropdown_gets_swatches_and_a_live_preview(qapp):
     panel = OptionsPanel()
     panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
 
+    from ruyso_app.ui.swatch_combo import SwatchItemDelegate
+
     row = panel._field_widgets["mark_color"]
     combo = _combo_in(row)
-    assert all(not combo.itemIcon(i).isNull() for i in range(combo.count()))
-    # the row's leading QLabel shows a live swatch of the current colour
-    preview = next(
-        lbl for lbl in row.findChildren(QLabel) if lbl.pixmap() is not None and not lbl.pixmap().isNull()
-    )
-    assert preview is not None
+
+    # Exactly ONE square in the closed box. Three things could each draw
+    # one, so all three are pinned: no separate preview label beside the
+    # combo, no item icons (an editable combo repeats the current item's
+    # icon in its own box), and one swatch on the line edit.
+    squares = [
+        lbl for lbl in row.findChildren(QLabel)
+        if lbl.pixmap() is not None and not lbl.pixmap().isNull()
+    ]
+    assert squares == []
+    assert all(combo.itemIcon(i).isNull() for i in range(combo.count()))
+    actions = combo.lineEdit().actions()
+    assert len(actions) == 1 and not actions[0].icon().isNull()
+
+    # The dropdown rows still get their swatches, from the delegate.
+    assert isinstance(combo.itemDelegate(), SwatchItemDelegate)
+
+
+def test_the_colour_swatch_follows_a_typed_value(qapp):
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    combo = _combo_in(panel._field_widgets["mark_color"])
+    action = combo.lineEdit().actions()[0]
+    combo.setCurrentText("#ff8800")  # a colour with no item of its own
+    assert not action.icon().isNull()
+
+
+def test_a_saved_custom_colour_is_not_reverted_to_a_suggestion(qapp):
+    """setItemIcon re-syncs an editable combo from currentIndex; the
+    widget must seed its value after decorating, not before."""
+    graph = _graph(qapp)
+    node = graph.create_node(qt_type_for("matplotlib_plot"), name="plot")
+    node.set_property("mark_color", "#ff8800")
+
+    panel = OptionsPanel()
+    panel.show_node(node, BY_CAT, input_columns={"a": "numeric", "b": "numeric"})
+
+    assert _combo_in(panel._field_widgets["mark_color"]).currentText() == "#ff8800"
+    assert node.get_property("mark_color") == "#ff8800"

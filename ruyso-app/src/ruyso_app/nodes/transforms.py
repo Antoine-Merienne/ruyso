@@ -6,6 +6,7 @@ transformation so pipelines stay easy to read and to compose.
 
 from typing import Any, Literal
 
+from ruyso_app.core import dtformat
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
     category_map_field,
@@ -23,10 +24,9 @@ from ruyso_app.core.registry import register_node
 
 #: strptime patterns offered (non-binding) by every datetime-related
 #: field in this module (``change_type`` -> datetime, ``combine_datetime``,
-#: ``split_datetime``).
-_COMMON_DATETIME_FORMATS = [
-    "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d", "ISO8601",
-]
+#: ``split_datetime``). Defined in ``core.dtformat`` so the loaders'
+#: "parse dates" option can offer the same list.
+_COMMON_DATETIME_FORMATS = dtformat.COMMON_DATETIME_FORMATS
 
 
 class DropNAParams(NodeParams):
@@ -917,10 +917,15 @@ class Merge(Node):
         keys = [c for c in (p.on or []) if c in left.columns and c in right.columns]
         kwargs = dict(how=p.how, suffixes=(p.suffix_left, p.suffix_right))
         if keys:
-            return {"df": pd.merge(left, right, on=keys, **kwargs)}
-        return {
-            "df": pd.merge(left, right, left_index=True, right_index=True, **kwargs)
-        }
+            merged = pd.merge(left, right, on=keys, **kwargs)
+        else:
+            merged = pd.merge(left, right, left_index=True, right_index=True, **kwargs)
+        # A two-parent result: pandas drops ``attrs`` rather than pick a
+        # side, so datetime display formats are re-attached by hand (left
+        # wins, as its column names do). Done here as well as in the
+        # scheduler so an exported script, which calls run() directly,
+        # renders its dates the same way the app does.
+        return {"df": dtformat.carry_formats(merged, left, right)}
 
 
 # --------------------------------------------------------------------------
@@ -1388,7 +1393,11 @@ class OneHotEncode(Node):
             index=df.index,
         )
         base = df.drop(columns=cols) if p.replace else df
-        return {"df": pd.concat([base, dummies], axis=1)}
+        # ``dummies`` is a fresh frame, so the concat has two parents and
+        # pandas drops ``attrs`` -- carry the input's formats across (see
+        # Merge.run for the full reasoning).
+        encoded = pd.concat([base, dummies], axis=1)
+        return {"df": dtformat.carry_formats(encoded, df)}
 
 
 class OrdinalEncodeParams(NodeParams):
@@ -1466,8 +1475,20 @@ class CombineDatetimeParams(NodeParams):
             (year / month / day / hour / ...) to a dataframe column. A
             single mapped column that is *text* is parsed whole (using
             ``datetime_format``); several numeric columns are assembled.
-        datetime_format: strptime pattern, used only when the single
-            mapped source column is text.
+        datetime_format: strptime pattern used to *read* a single text
+            source column. It never affects how the result is shown --
+            that is ``display_format``.
+        display_format: strftime pattern used to *show* the result in
+            the Table tab and on plot axes. Display only: the produced
+            column stays a real datetime, so sorting, resampling and
+            time-series plots keep working on it. Blank picks the
+            coarsest pattern that loses nothing (a column of whole days
+            shows as ``2020-02-01``, not ``2020-02-01 00:00:00``).
+        last_of_period: Land on the **last** unit of each period instead
+            of the first -- with year + month mapped, February 2020
+            becomes ``2020-02-29`` rather than ``2020-02-01``. Ignored
+            when a day (or finer) component is mapped, since a one-day
+            period starts and ends on the same day.
         output_column: Name of the produced datetime column.
         replace: Drop the mapped source columns (default: keep them).
     """
@@ -1479,8 +1500,16 @@ class CombineDatetimeParams(NodeParams):
     )
     datetime_format: str = suggestions_field(
         suggestions=_COMMON_DATETIME_FORMATS, default="",
-        description="strptime format for a single text source column.",
+        description="Input format: strptime pattern for a single text source column.",
     )
+    display_format: str = suggestions_field(
+        suggestions=_COMMON_DATETIME_FORMATS, default="",
+        description=(
+            "Output format: how the datetime is displayed in tables and on "
+            "plot axes. Blank = automatic. The column stays a real datetime."
+        ),
+    )
+    last_of_period: bool = False
     output_column: str = "datetime"
     replace: bool = False
 
@@ -1529,18 +1558,23 @@ class CombineDatetime(Node):
                     df[col], format=(p.datetime_format or None), errors="coerce"
                 )
             else:
-                result = self._assemble(df, mapping)
+                result = self._assemble(df, mapping, p.last_of_period)
         else:
-            result = self._assemble(df, mapping)
+            result = self._assemble(df, mapping, p.last_of_period)
 
         out[out_name] = result
+        # Display only -- the column above stays a real datetime64, which
+        # is what keeps `sort` chronological and the date axes usable.
+        dtformat.set_display_format(out, out_name, p.display_format)
         if p.replace:
             drop = [c for c in set(mapping.values()) if c != out_name and c in out.columns]
             out = out.drop(columns=drop)
         return {"df": out}
 
     @staticmethod
-    def _assemble(df: Any, mapping: dict[str, str]) -> Any:
+    def _assemble(
+        df: Any, mapping: dict[str, str], last_of_period: bool = False
+    ) -> Any:
         import pandas as pd
 
         def num(component: str) -> Any:
@@ -1578,6 +1612,15 @@ class CombineDatetime(Node):
                 },
                 errors="coerce",
             )
+
+        # "Last of period": snap the date part to the final unit of the
+        # period the mapped components describe (year+month -> the last
+        # day of that month), at midnight. A no-op once a day-level
+        # component is mapped -- a one-day period ends where it starts.
+        if last_of_period:
+            code = dtformat.period_code_for_components(mapping)
+            if code:
+                base = dtformat.to_period_end(base, code)
 
         seconds = pd.Series(0.0, index=df.index)
         for component, factor in (("hour", 3600), ("minute", 60), ("second", 1)):
@@ -1671,10 +1714,17 @@ class ResampleDatetimeParams(NodeParams):
         agg: Down-sampling aggregation applied to numeric columns
             (non-numeric columns take the first value in the bin).
         fill: Up-sampling fill for the gaps a finer rule creates.
+        last_of_period: Label each bin with the **last** unit of its
+            period instead of the first -- with ``MS``, February 2020
+            reads ``2020-02-29`` rather than ``2020-02-01``. Only the
+            label moves; which rows fall in which bin is unchanged. A
+            no-op for rules whose bin already *is* one unit (``D``,
+            ``h``, ``15min``, ...).
     """
 
     datetime_column: str = column_field(dtypes=("datetime",))
     rule: str = suggestions_field(suggestions=_RESAMPLE_RULES, default="D")
+    last_of_period: bool = False
     agg: Literal[
         "mean", "sum", "median", "min", "max", "first", "last", "count", "ohlc"
     ] = "mean"
@@ -1734,6 +1784,13 @@ class ResampleDatetime(Node):
             res = res.interpolate(method="linear")
         elif p.fill == "interpolate_time":
             res = res.interpolate(method="time")
+
+        if p.last_of_period:
+            # Relabel only -- the binning above already happened, so this
+            # moves each stamp from the period's first unit to its last.
+            code = dtformat.period_code_for_rule(rule)
+            if code:
+                res.index = dtformat.to_period_end(res.index, code)
 
         return {"df": res.reset_index(names=p.datetime_column)}
 

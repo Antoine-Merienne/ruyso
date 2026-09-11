@@ -29,6 +29,10 @@ OnPickMacro = Callable[[str, "list[float] | None"], None]
 #: same graph is a no-op (NodeGraphMenu.get_menu is unreliable upstream).
 _INSTALLED_FLAG = "_ruyso_new_node_menu_installed"
 
+#: Where the per-category commands are stashed on the graph, so their
+#: enabled state can be refreshed after a toolbox change.
+_COMMANDS_ATTR = "_ruyso_new_node_commands"
+
 
 def install_new_node_menu(graph: NodeGraph, on_pick_macro: OnPickMacro) -> None:
     """
@@ -60,11 +64,24 @@ def install_new_node_menu(graph: NodeGraph, on_pick_macro: OnPickMacro) -> None:
     graph_menu = graph.get_context_menu("graph")
     new_node_menu = graph_menu.add_menu("New Node")
 
-    available = core_node_types_by_category()
+    commands: dict[str, object] = {}
     for category, label in theme.MACRO_TYPE_LABELS.items():
         command = new_node_menu.add_command(
             label,
             lambda _graph, c=category: on_pick_macro(c, _cursor_scene_pos()),
         )
-        if category not in available:
-            command.set_enabled(False)
+        commands[category] = command
+    # Kept on the graph so a toolbox switched on or off can re-enable
+    # them; NodeGraphQt offers no way to look a command back up.
+    setattr(graph, _COMMANDS_ATTR, commands)
+    refresh_new_node_menu(graph)
+
+
+def refresh_new_node_menu(graph: NodeGraph) -> None:
+    """Re-enable / disable each macro entry for what is registered now."""
+    commands = getattr(graph, _COMMANDS_ATTR, None)
+    if not commands:
+        return
+    available = core_node_types_by_category()
+    for category, command in commands.items():
+        command.set_enabled(category in available)

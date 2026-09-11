@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from types import ModuleType
+from typing import Container
 
 from ruyso_app.core.node import Node
 
@@ -114,7 +115,9 @@ class NodeRegistry:
         return {category: sorted(node_types) for category, node_types in grouped.items()}
 
     @classmethod
-    def discover_package(cls, package: ModuleType) -> None:
+    def discover_package(
+        cls, package: ModuleType, only: Container[str] | None = None
+    ) -> None:
         """
         Import every submodule of ``package`` so that any
         ``@register_node``-decorated Node subclasses they define
@@ -123,11 +126,21 @@ class NodeRegistry:
         Args:
             package: An already-imported package object whose
                 submodules should be scanned (e.g. ``ruyso_app.nodes``).
+            only: If given, the submodule names to import; the rest are
+                left alone. Backs the Preferences toolboxes
+                (``core.toolboxes``): a family switched off is a family
+                whose modules are never imported, which is the only way
+                to actually not pay for it. Note that a module another
+                one imports arrives anyway -- ``geo_viz`` pulls in
+                ``viz`` -- so this shortens the import list rather than
+                guaranteeing an exact set.
         """
         if not hasattr(package, "__path__"):
             raise TypeError(f"{package!r} is not a package (no __path__).")
 
         for module_info in pkgutil.iter_modules(package.__path__):
+            if only is not None and module_info.name not in only:
+                continue
             importlib.import_module(f"{package.__name__}.{module_info.name}")
 
 

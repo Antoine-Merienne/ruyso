@@ -27,7 +27,7 @@ import json
 from NodeGraphQt import BaseNode
 from NodeGraphQt.constants import NodePropWidgetEnum
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -59,7 +59,7 @@ from ruyso_app.ui.column_spec import (
 from ruyso_app.ui.file_filters import filter_for
 from ruyso_app.ui.micro_type_groups import grouped_micro_types
 from ruyso_app.ui.property_forms import iter_field_specs
-from ruyso_app.ui.swatch_combo import SwatchComboBox
+from ruyso_app.ui.swatch_combo import SwatchComboBox, SwatchItemDelegate
 
 #: Minimum width; the panel lives in a splitter and can be widened.
 MIN_PANEL_WIDTH = 340
@@ -175,6 +175,12 @@ class OptionsPanel(QWidget):
         self._column_fields: dict[str, tuple] = {}
         # field name -> widget, for controller wiring
         self._field_widgets: dict[str, QWidget] = {}
+        #: Manual axis-range boxes, by field name -- refilled after each
+        #: run with the limits the plot chose (see set_axis_limits).
+        self._axis_limit_edits: dict[str, QLineEdit] = {}
+        #: Rows currently outlined in red, mapped to the stylesheet they
+        #: had before, so clearing restores rather than blanks it.
+        self._field_errors: dict[str, str] = {}
         # form row index -> [(field, kind, target)]; the row is shown only
         # while *every* condition holds. kind is "eq" (field == target) or
         # "set" (field holds any non-empty value; target None).
@@ -205,10 +211,7 @@ class OptionsPanel(QWidget):
         self._node_help.setObjectName("ruysoNodeHelp")
         self._node_help.setWordWrap(True)
         self._node_help.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._node_help.setStyleSheet(
-            "QLabel#ruysoNodeHelp { color: palette(mid); font-size: 11px; "
-            "padding: 10px 0 8px 0; line-height: 140%; }"
-        )
+        self._apply_help_style()
         self._node_help.setVisible(False)
 
         self._macro_combo = QComboBox(self)
@@ -405,6 +408,21 @@ class OptionsPanel(QWidget):
         self.setStyleSheet(
             f"QWidget#ruysoOptionsPanel {{ background-color: {background}; }}"
         )
+        self._apply_help_style()
+
+    def _apply_help_style(self) -> None:
+        """
+        Colour the "what this node does" blurb.
+
+        ``palette(mid)`` is the *border* colour, which against the
+        panel's macro-type tint left the sentence all but invisible.
+        This is the text colour muted a fixed amount instead: quiet
+        enough to stay secondary, dark enough to read, in both themes.
+        """
+        self._node_help.setStyleSheet(
+            f"QLabel#ruysoNodeHelp {{ color: {theme.muted_text_color()}; "
+            "font-size: 11px; padding: 10px 0 8px 0; line-height: 140%; }"
+        )
 
     # -- internals --------------------------------------------------------
 
@@ -461,6 +479,8 @@ class OptionsPanel(QWidget):
         self._category_maps.clear()
         self._column_maps.clear()
         self._code_hints.clear()
+        self._axis_limit_edits.clear()
+        self._field_errors.clear()  # the widgets they pointed at are gone
 
         specs = list(iter_field_specs(type(node).CORE_NODE_CLASS.params_schema))
         controllers = {
@@ -677,16 +697,19 @@ class OptionsPanel(QWidget):
         if spec.is_optimize_bounds:
             return self._build_optimize_bounds_widget(node, spec)
 
+        if spec.is_axis_limit:
+            return self._build_axis_limit_widget(node, spec, current)
+
         if spec.widget == enum.QCOMBO_BOX:
             is_colormap = name == "colormap"
             combo = SwatchComboBox() if is_colormap else QComboBox()
             combo.addItems(spec.choices or [])
+            swatch_kind = _SWATCH_FIELDS.get(name)
+            if swatch_kind:  # icons first -- see _build_color_widget
+                self._decorate_combo(combo, swatch_kind)
             if current is not None:
                 combo.setCurrentText(str(current))
             combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
-            swatch_kind = _SWATCH_FIELDS.get(name)
-            if swatch_kind:
-                self._decorate_combo(combo, swatch_kind)
             return combo
 
         if spec.widget == enum.QCHECK_BOX:
@@ -860,30 +883,44 @@ class OptionsPanel(QWidget):
         An editable combo pre-filled with common colour names, plus a
         small "Choose..." button opening a colour dialog. Any
         matplotlib colour string (name or ``#rrggbb``) is accepted.
+
+        The combo carries **one** swatch, shown on each dropdown row and
+        on the collapsed box. An earlier version also put a separate
+        preview square to the left of the combo, which just meant the
+        same colour was drawn twice on one row. Because the combo is
+        editable, a typed value that is not one of the suggestions has no
+        item to take its icon from, so the current colour is painted onto
+        the line edit's own leading action instead -- keeping a single
+        swatch that tracks whatever is in the box.
         """
+        from ruyso_app.ui import swatches
+
         name = spec.name
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         combo.addItems(spec.color_choices or [])
+        # Row swatches come from a delegate rather than setItemIcon: an
+        # item icon would *also* be drawn in the combo's collapsed box,
+        # doubling up with the line edit's own swatch below.
+        combo.setItemDelegate(SwatchItemDelegate("color", combo))
         combo.setCurrentText("" if current in (None, "") else str(current))
         combo.currentTextChanged.connect(lambda v, n=name: node.set_property(n, v))
-        self._decorate_combo(combo, "color")  # swatch on each suggested colour
 
-        # A live swatch of the current colour (updates as the user types
-        # or picks); an unparseable value shows nothing.
-        from ruyso_app.ui import swatches
+        # The single collapsed swatch. It lives on the line edit rather
+        # than on an item so it can follow a typed "#ff8800" too, which
+        # has no item of its own to take an icon from.
+        swatch_action = combo.lineEdit().addAction(
+            QIcon(), QLineEdit.LeadingPosition
+        )
 
-        preview = QLabel()
-        preview.setFixedWidth(18)
-        preview.setAlignment(Qt.AlignCenter)
+        def _refresh_swatch(text: str) -> None:
+            pixmap = swatches.color_pixmap(text)
+            swatch_action.setIcon(QIcon(pixmap) if not pixmap.isNull() else QIcon())
 
-        def _refresh_preview(text: str) -> None:
-            preview.setPixmap(swatches.color_pixmap(text))
-
-        _refresh_preview(combo.currentText())
-        combo.currentTextChanged.connect(_refresh_preview)
+        _refresh_swatch(combo.currentText())
+        combo.currentTextChanged.connect(_refresh_swatch)
 
         button = QPushButton("Choose...")
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -901,11 +938,98 @@ class OptionsPanel(QWidget):
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.addWidget(preview, 0)
         row_layout.addWidget(combo, 1)
         row_layout.addWidget(button, 0)
         row._combo = combo  # for _connect_controller
         return row
+
+    # -- field errors --------------------------------------------------
+
+    def set_field_error(self, name: str, message: str) -> None:
+        """
+        Outline one parameter row in red and explain why on its tooltip.
+
+        Used when a problem is opened from the Problems panel, so the
+        sentence in the list points at the exact row it is about. A
+        field that is not on screen (wrong node, hidden row) is ignored
+        rather than remembered: the highlight is a pointer, not state.
+        """
+        widget = self._field_widgets.get(name)
+        if widget is None:
+            return
+        target = getattr(widget, "_combo", None) or getattr(widget, "editor", widget)
+        self._field_errors[name] = target.styleSheet()
+        target.setStyleSheet(
+            f"{target.styleSheet()}\nborder: 1px solid {theme.STATUS_COLORS['error']};"
+        )
+        target.setToolTip(message)
+
+    def clear_field_error(self, name: str) -> None:
+        """Drop the outline on one row -- called when it is edited."""
+        original = self._field_errors.pop(name, None)
+        if original is None:
+            return
+        widget = self._field_widgets.get(name)
+        if widget is None:
+            return
+        target = getattr(widget, "_combo", None) or getattr(widget, "editor", widget)
+        target.setStyleSheet(original)
+        target.setToolTip("")
+
+    def clear_field_errors(self) -> None:
+        for name in list(self._field_errors):
+            self.clear_field_error(name)
+
+    def field_errors(self) -> set[str]:
+        """Which rows are currently outlined (used by tests)."""
+        return set(self._field_errors)
+
+    # -- axis limits ---------------------------------------------------
+
+    def _build_axis_limit_widget(self, node: BaseNode, spec, current) -> QWidget:
+        """
+        One edge of a manual axis range: a text box that always shows a
+        real number (or date) and can be typed over.
+
+        The four edges used to hide behind an ``x_limits`` / ``y_limits``
+        tickbox, and the spin boxes behind it started at 0.0/1.0 -- so
+        ticking the box crushed the plot to a meaningless range until all
+        four were filled in by hand. Now the boxes are always visible and
+        :meth:`set_axis_limits` seeds each one with the limit the last
+        run's plot actually chose, so they read as "here is your axis,
+        adjust it".
+
+        The seeding is display-only. The widget writes to the node
+        *only* on ``textEdited``, which Qt emits for typing but never for
+        a programmatic ``setText`` -- so an untouched box leaves the
+        parameter blank and the axis on autoscale, and the plot keeps
+        following the data. Clearing a box returns that edge to auto.
+        """
+        edit = QLineEdit("" if current in (None, "") else str(current))
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        edit.setPlaceholderText("auto")
+        edit.textEdited.connect(lambda v, n=spec.name: node.set_property(n, v))
+        self._axis_limit_edits[spec.name] = edit
+        return edit
+
+    def set_axis_limits(self, limits: dict[str, str] | None) -> None:
+        """
+        Show the limits the selected node's plot used, for the edges the
+        person has not pinned themselves.
+
+        A box holding a typed value is left alone -- that value is the
+        parameter, and overwriting it would silently discard their edit.
+        """
+        for name, edit in self._axis_limit_edits.items():
+            pinned = self._node is not None and str(
+                self._node.get_property(name) or ""
+            ).strip()
+            if pinned:
+                continue  # the parameter holds a typed value; leave it be
+            value = (limits or {}).get(name, "")
+            edit.blockSignals(True)  # never mistake a refill for an edit
+            edit.setText(str(value))
+            edit.blockSignals(False)
 
     # -- column-reference fields ---------------------------------------
 

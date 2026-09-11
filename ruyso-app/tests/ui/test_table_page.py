@@ -82,4 +82,3 @@ def test_columns_are_interactively_resizable(qapp):
 
     header = page._table_view.horizontalHeader()
     assert header.sectionResizeMode(0) == QHeaderView.Interactive
-

@@ -62,6 +62,11 @@ class Theme:
     default_category_color: tuple[int, int, int]
     window_background: str  # hex, e.g. "#22252b"
     panel_background: str
+    #: Dropdown lists and menus. A popup floats above the window, so in
+    #: the light theme it is white -- brighter than the panel it opens
+    #: from -- while the dark theme has nowhere brighter to go and keeps
+    #: the panel colour.
+    popup_background: str
     input_background: str  # text fields / lists / tables
     text_color: str
     border_color: str
@@ -88,6 +93,7 @@ DARK_THEME = Theme(
     default_category_color=(96, 96, 96),
     window_background="#1a1a1a",
     panel_background="#242424",
+    popup_background="#242424",
     input_background="#121212",
     text_color="#ededed",
     border_color="#3d3d3d",
@@ -104,6 +110,7 @@ LIGHT_THEME = Theme(
     default_category_color=(178, 176, 172),
     window_background="#faf9f7",
     panel_background="#f1efeb",
+    popup_background="#ffffff",
     input_background="#ffffff",
     text_color="#1c1c1e",
     border_color="#dcd8d1",
@@ -188,6 +195,21 @@ def toggle_theme() -> Theme:
 def color_for_category(category: str, theme: Theme | None = None) -> tuple[int, int, int]:
     theme = theme if theme is not None else current_theme()
     return theme.category_colors.get(category, theme.default_category_color)
+
+
+def muted_text_color(theme: Theme | None = None, amount: float = 0.38) -> str:
+    """
+    Secondary text: the theme's text colour blended toward the panel.
+
+    For captions and help text that should read as quieter than the
+    body without disappearing. ``amount`` is how far toward the panel
+    colour to go -- 0 is body text, 1 is invisible.
+    """
+    theme = theme if theme is not None else current_theme()
+    blended = _blend(
+        _hex_to_rgb(theme.text_color), _hex_to_rgb(theme.panel_background), amount
+    )
+    return "#{:02x}{:02x}{:02x}".format(*blended)
 
 
 def label_for_category(category: str) -> str:
@@ -279,6 +301,147 @@ def palette_for(theme: Theme | None = None):
 _applied_theme_name: str | None = None
 
 
+def accent_color() -> str:
+    """
+    The ``appearance.accent_color`` preference, or ``""`` to use the
+    active palette's own highlight.
+
+    An unparseable value is treated as unset: a typo in a colour should
+    leave the app looking normal, not paint every focus ring black.
+    """
+    from PySide6.QtGui import QColor
+
+    from ruyso_app.engine import settings
+
+    value = str(settings.get("appearance.accent_color") or "").strip()
+    if not value:
+        return ""
+    return value if QColor(value).isValid() else ""
+
+
+def ui_font_size() -> int:
+    """The ``appearance.font_size`` preference in points (0 = platform default)."""
+    from ruyso_app.engine import settings
+
+    try:
+        size = int(settings.get("appearance.font_size"))
+    except (TypeError, ValueError):
+        return 0
+    return size if 7 <= size <= 24 else 0
+
+
+#: Installed once on the QApplication; see :func:`install_combo_popup_styler`.
+_popup_styler: object | None = None
+
+
+def install_combo_popup_styler(app) -> object:
+    """
+    Strip the square frame Qt draws behind every popup -- combo-box
+    dropdowns *and* menus -- so both show the rounded card the QSS asks
+    for.
+
+    A ``QComboBox`` popup is two nested widgets: a
+    ``QComboBoxPrivateContainer`` (a plain ``QFrame`` top-level window)
+    holding the list view. The QSS above rounds the *view*, but the
+    container still painted its own square-cornered -- and usually
+    wider -- background behind it, so every dropdown read as a rounded
+    list sitting inside a square box. Making the container frameless and
+    translucent leaves only the rounded list visible.
+
+    A ``QMenu`` has the same problem in one widget: its own window is
+    opaque, so the ``border-radius`` was painted over at the corners and
+    every right-click menu came up square. The same two flags fix it,
+    which is what makes the canvas menus match the dropdowns.
+    NodeGraphQt's ``BaseMenu`` additionally ships a hard-coded dark
+    stylesheet of its own (``widgets/actions.py``); a widget-local
+    stylesheet beats the application one, so it is cleared here -- that
+    is the only reason the "New Node" menu looked nothing like the rest
+    of the app.
+
+    One application-wide event filter rather than a call per widget: the
+    combo container is private API with no public accessor, and menus
+    are built on the fly all over the app and inside NodeGraphQt.
+    ``Polish`` is the hook rather than ``Show`` because
+    ``setWindowFlags`` *hides* an already-visible widget -- restyling on
+    show would close the popup the person just opened.
+
+    Idempotent: returns the existing filter if one is already installed.
+    """
+    global _popup_styler
+    if _popup_styler is not None:
+        return _popup_styler
+
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import QMenu
+
+    def _flatten(widget) -> None:
+        """Make one popup window frameless and translucent."""
+        widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        widget.setWindowFlags(
+            widget.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        if hasattr(widget, "setFrameShape"):  # it is a QFrame
+            widget.setFrameShape(widget.Shape.NoFrame)
+
+    class ComboPopupStyler(QObject):
+        """Flattens each popup window the first time it is polished."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.styled = 0
+            self.menus_styled = 0
+
+        def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+            if event.type() != QEvent.Type.Polish:
+                return False
+            try:
+                if isinstance(watched, QMenu):
+                    self._style_menu(watched)
+                    return False
+                if not watched.inherits("QComboBoxPrivateContainer"):
+                    return False
+            except (AttributeError, RuntimeError):
+                return False
+            _flatten(watched)
+            self._plain_rows(watched)
+            self.styled += 1
+            return False  # never swallow it -- the popup must still appear
+
+        @staticmethod
+        def _plain_rows(container) -> None:
+            """
+            Draw the rows as view items rather than as combo boxes.
+
+            Qt's private combo delegate paints each row with the *combo*
+            as the styled widget, so every row wore the closed combo's
+            own bordered box. See ui/popup_delegate.py.
+            """
+            from PySide6.QtWidgets import QAbstractItemView
+
+            from ruyso_app.ui import popup_delegate
+
+            view = container.findChild(QAbstractItemView)
+            if view is not None:
+                popup_delegate.install_on(view)
+
+        def _style_menu(self, menu) -> None:
+            if menu.property("ruysoStyled"):
+                return
+            # Set the guard first: clearing a stylesheet re-polishes the
+            # widget, which would re-enter this handler.
+            menu.setProperty("ruysoStyled", True)
+            if menu.styleSheet():
+                menu.setStyleSheet("")  # NodeGraphQt's own dark menu QSS
+            _flatten(menu)
+            self.menus_styled += 1
+
+    _popup_styler = ComboPopupStyler()
+    app.installEventFilter(_popup_styler)
+    return _popup_styler
+
+
 def apply_to_app(app, force: bool = False) -> None:
     """
     Force a consistent look on ``app``: the Fusion style, the current
@@ -287,6 +450,9 @@ def apply_to_app(app, force: bool = False) -> None:
     theme has not changed since the last application.
     """
     global _applied_theme_name
+
+    install_combo_popup_styler(app)
+
     if not force and _applied_theme_name == _current_theme_name and app.styleSheet():
         return
 
@@ -334,7 +500,14 @@ def stylesheet_for(theme: Theme | None = None) -> str:
     _white = (255, 255, 255)
     _black = (0, 0, 0)
 
-    primary = theme.highlight_color
+    # A point size of 0 means "whatever the platform picked", so the
+    # rule is omitted entirely rather than being written out as 0pt.
+    size = ui_font_size()
+    base_font_size = f"\n    font-size: {size}pt;" if size else ""
+
+    # The accent preference overrides the palette's own highlight; an
+    # unparseable value is ignored rather than painting the app black.
+    primary = accent_color() or theme.highlight_color
     primary_rgb = _hex_to_rgb(primary)
     on_primary = "#ffffff"
     # Hover/pressed shades of the indigo primary, and a faint indigo
@@ -350,12 +523,24 @@ def stylesheet_for(theme: Theme | None = None) -> str:
     border = theme.border_color
     surface = theme.panel_background
     text = theme.text_color
+    text_rgb = _hex_to_rgb(theme.text_color)
+    # Popups (dropdown lists, menus) and the hover overlay on their
+    # rows: a tint of the text colour, so one rule serves both themes.
+    popup = theme.popup_background
+    popup_rgb = _hex_to_rgb(popup)
+    popup_hover = _rgb_css(_blend(popup_rgb, text_rgb, 0.10))
+    # Splitter grips: three dots painted on the handle. A true mid-grey
+    # reads on both themes, so they are static assets like the chevrons
+    # -- a border-coloured line was what made the light theme's handles
+    # impossible to find.
+    grip_h = (_ASSETS_DIR / "grip-horizontal.svg").as_posix()
+    grip_v = (_ASSETS_DIR / "grip-vertical.svg").as_posix()
     chevron_down = (_ASSETS_DIR / "chevron-down.svg").as_posix()
     chevron_up = (_ASSETS_DIR / "chevron-up.svg").as_posix()
 
     return f"""
 QWidget {{
-    font-family: {UI_FONT_FAMILY};
+    font-family: {UI_FONT_FAMILY};{base_font_size}
 }}
 QPlainTextEdit, QTextEdit {{
     font-family: {MONOSPACE_FONT_FAMILY};
@@ -440,19 +625,36 @@ QComboBox::down-arrow {{
     width: 12px;
     height: 12px;
 }}
+/* The dropdown list. ``show-decoration-selected: 0`` keeps Qt from
+   painting the selection band edge-to-edge behind the rounded row --
+   that square bar spanning the whole popup was the artefact the rows'
+   own border-radius could not hide. The view and its viewport are both
+   painted: the viewport is a child widget with its own background, and
+   leaving it on the palette's Base colour showed a white slab under
+   the rounded list. */
 QComboBox QAbstractItemView {{
-    background-color: {surface};
+    background-color: {popup};
     border: 1px solid {border};
     border-radius: 8px;
     padding: 4px;
     outline: none;
-    selection-background-color: {primary};
-    selection-color: {on_primary};
+    show-decoration-selected: 0;
+}}
+QComboBox QAbstractItemView::viewport {{
+    background-color: {popup};
+    border-radius: 8px;
 }}
 QComboBox QAbstractItemView::item {{
+    background-color: transparent;
+    color: {text};
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 6px;
     min-height: 20px;
+}}
+QComboBox QAbstractItemView::item:hover,
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {popup_hover};
+    color: {text};
 }}
 
 /* --- Buttons: tonal by default, indigo when pressed ------------- */
@@ -490,19 +692,22 @@ QMenuBar::item {{
 QMenuBar::item:selected {{
     background-color: {tonal_hover};
 }}
+/* A menu is the same kind of floating card as a dropdown list, so it
+   takes the same surface and the same rounded hover overlay. */
 QMenu {{
-    background-color: {surface};
+    background-color: {popup};
     border: 1px solid {border};
     border-radius: 8px;
     padding: 4px;
 }}
 QMenu::item {{
+    background-color: transparent;
     padding: 5px 24px 5px 12px;
     border-radius: 6px;
 }}
 QMenu::item:selected {{
-    background-color: {primary};
-    color: {on_primary};
+    background-color: {popup_hover};
+    color: {text};
 }}
 QMenu::item:disabled {{
     color: {disabled_text};
@@ -511,6 +716,78 @@ QMenu::separator {{
     height: 1px;
     background: {border};
     margin: 4px 8px;
+}}
+
+/* --- Splitters ------------------------------------------------ */
+/* No band between the panes: the handle paints only a short grip of
+   three dots, centred, so the Log/Problems strip butts straight
+   against the canvas and the drag target is on the panel's own edge. */
+QSplitter::handle {{
+    background: transparent;
+    image: none;
+}}
+QSplitter::handle:horizontal {{
+    width: 7px;
+    image: url("{grip_v}");
+}}
+QSplitter::handle:vertical {{
+    height: 7px;
+    image: url("{grip_h}");
+}}
+QSplitter::handle:hover {{
+    background-color: {tonal_hover};
+}}
+/* Same affordance, for a panel that scrolls and so cannot be split
+   (see ui/height_grip.py). */
+QWidget#ruysoHeightGrip {{
+    background-color: transparent;
+    background-image: url("{grip_h}");
+    background-repeat: no-repeat;
+    background-position: center;
+    border-radius: 4px;
+}}
+QWidget#ruysoHeightGrip:hover {{
+    background-color: {tonal_hover};
+}}
+
+/* --- Tab widgets (the Log / Problems strip) -------------------- */
+/* Rounded folder tabs on a frameless pane, so the strip reads as part
+   of the page rather than as a boxed-in sub-window. */
+QTabWidget::pane {{
+    border: none;
+    background: transparent;
+}}
+QTabWidget::tab-bar {{
+    left: 6px;
+}}
+QTabBar {{
+    background: transparent;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {disabled_text};
+    border: 1px solid transparent;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    padding: 5px 16px;
+    margin-right: 2px;
+}}
+QTabBar::tab:hover {{
+    color: {text};
+    background-color: {tonal_hover};
+}}
+QTabBar::tab:selected {{
+    background-color: {surface};
+    color: {text};
+    font-weight: bold;
+}}
+/* The run log is the page under those tabs, not a field on it: a
+   bordered box there reads as a sub-window boxed off from the canvas,
+   which is the seam this strip is meant not to have. */
+QPlainTextEdit#ruysoRunLog {{
+    background-color: {surface};
+    border: none;
+    border-radius: 0px;
 }}
 
 /* --- Scroll areas & slim scrollbars --------------------------- */
@@ -610,6 +887,33 @@ QLabel#ruysoDashboardHint {{
     font-size: 16px;
 }}
 
+/* Dashboard tool strip down the left edge (see ui/dashboard_tools.py).
+   Reads as part of the window chrome, separated from the canvas by a
+   single hairline rather than a panel of its own. */
+QWidget#ruysoDashboardTools {{
+    background-color: {theme.window_background};
+    border-right: 1px solid {border};
+}}
+QToolButton#ruysoDashTool {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+}}
+QToolButton#ruysoDashTool:hover {{
+    background-color: {tonal_hover};
+}}
+QToolButton#ruysoDashTool:pressed {{
+    background-color: {tonal};
+    border: 1px solid {primary};
+}}
+QToolButton#ruysoDashTool::menu-indicator {{
+    image: url("{chevron_down}");
+    width: 7px;
+    height: 7px;
+    subcontrol-origin: padding;
+    subcontrol-position: bottom right;
+}}
+
 /* Custom tab band at the top of the window (see ui/tab_bar.py).
    The tabs are shaped like binder dividers: rounded-top folder tabs
    sitting on the band's baseline, the active one raised, capped with a
@@ -639,7 +943,6 @@ QPushButton#ruysoTabButton:checked {{
     color: {text};
     font-weight: bold;
     border: 1px solid {border};
-    border-top: 2px solid {primary};
     border-bottom-color: {surface};
     margin-top: 3px;
 }}
@@ -702,6 +1005,28 @@ QLabel#ruysoAutoLabel {{
 QLabel#ruysoAutoDot {{
     border-radius: 4px;
     background-color: {border};
+}}
+QWidget#ruysoProblemsChip {{
+    border: 1px solid {STATUS_COLORS["error"]};
+    border-radius: 8px;
+    background: transparent;
+}}
+QWidget#ruysoProblemsChip:hover {{
+    background-color: {tonal_hover};
+}}
+QLabel#ruysoProblemsLabel {{
+    color: {STATUS_COLORS["error"]};
+    font-size: 10px;
+    background: transparent;
+}}
+QLabel#ruysoProblemsDot {{
+    border-radius: 4px;
+    background-color: {STATUS_COLORS["error"]};
+}}
+QFrame#ruysoProblemRow {{
+    border: none;
+    border-bottom: 1px solid {border};
+    background: transparent;
 }}
 QLabel#ruysoAutoDot[state="running"] {{ background-color: {STATUS_COLORS["running"]}; }}
 QLabel#ruysoAutoDot[state="ok"] {{ background-color: {STATUS_COLORS["ok"]}; }}

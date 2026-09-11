@@ -172,6 +172,29 @@ def color_field(
     return Field(default=default, description=description, json_schema_extra=extra, **field_kwargs)
 
 
+AXIS_LIMIT_KEY = "ruyso_axis_limit"
+
+
+def axis_limit_field(description: str | None = None, **field_kwargs: Any) -> Any:
+    """
+    Declare one edge of a manual axis range.
+
+    Stored as a string so a *blank* value can mean "let the plot fit this
+    edge to the data" -- a float field has no way to say that, and a
+    number and an ISO date ("2020-01-01", for a time axis) have to share
+    the one field. The value is parsed by ``nodes.viz._limit_value``.
+
+    The marker is what tells the Options panel to fill the box with the
+    limit the last run's plot actually used, so the four edges always
+    show real numbers to edit rather than an empty box or a placeholder
+    ``0.0`` that would silently crush the axis if left alone. That
+    prefill is display-only: the parameter stays blank until the person
+    types in it (see ``ui.options_panel._build_axis_limit_widget``).
+    """
+    extra = _merge({AXIS_LIMIT_KEY: {}}, _pop_visible(field_kwargs))
+    return Field(default="", description=description, json_schema_extra=extra, **field_kwargs)
+
+
 COLORMAP_FIELD_KINDS = ("continuous", "qualitative")
 
 
@@ -386,6 +409,10 @@ def field_suggestions(field_info: FieldInfo) -> list[str] | None:
 def color_field_values(field_info: FieldInfo) -> list[str] | None:
     marker = _marker(field_info, COLOR_FIELD_KEY)
     return list(marker.get("values", [])) if marker is not None else None
+
+
+def is_axis_limit_field(field_info: FieldInfo) -> bool:
+    return _marker(field_info, AXIS_LIMIT_KEY) is not None
 
 
 def colormap_field_kind(field_info: FieldInfo) -> str | None:

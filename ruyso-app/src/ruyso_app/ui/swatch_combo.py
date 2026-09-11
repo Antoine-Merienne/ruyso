@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QStyle,
     QStyleOptionComboBox,
+    QStyleOptionViewItem,
     QStylePainter,
     QStyledItemDelegate,
 )
@@ -87,6 +88,42 @@ class ColormapItemDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):  # noqa: N802 - Qt override
         size = super().sizeHint(option, index)
         size.setHeight(max(size.height(), _ROW_HEIGHT + 4))
+        return size
+
+
+class SwatchItemDelegate(QStyledItemDelegate):
+    """
+    Paints a swatch beside each dropdown row, without setting item icons.
+
+    ``setItemIcon`` would make an *editable* combo draw the current
+    item's icon in its collapsed box as well, which is one square too
+    many next to the swatch the line edit already carries. Drawing the
+    row swatches here instead keeps the popup informative while leaving
+    the collapsed box with exactly one.
+    """
+
+    def __init__(self, kind: str, parent=None) -> None:
+        super().__init__(parent)
+        self._kind = kind
+
+    def paint(self, painter, option, index):  # noqa: N802 - Qt override
+        size = swatches.icon_size(self._kind)
+        pixmap = swatches.pixmap_for(self._kind, index.data() or "")
+
+        shifted = QStyleOptionViewItem(option)
+        self.initStyleOption(shifted, index)
+        shifted.rect = option.rect.adjusted(size.width() + 10, 0, 0, 0)
+        super().paint(painter, shifted, index)
+
+        if not pixmap.isNull():
+            top = option.rect.top() + (option.rect.height() - size.height()) // 2
+            painter.drawPixmap(option.rect.left() + 6, top, pixmap)
+
+    def sizeHint(self, option, index):  # noqa: N802 - Qt override
+        size = super().sizeHint(option, index)
+        swatch = swatches.icon_size(self._kind)
+        size.setWidth(size.width() + swatch.width() + 10)
+        size.setHeight(max(size.height(), swatch.height() + 6))
         return size
 
 

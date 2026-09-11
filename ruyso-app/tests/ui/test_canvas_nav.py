@@ -218,3 +218,57 @@ def test_pinch_gesture_zooms(qapp):
 
     assert nav.eventFilter(viewer.viewport(), _Pinch()) is True
     assert _range(viewer)[2:] != before[2:]
+
+
+# -- snap to grid --------------------------------------------------------
+
+
+def test_nodes_snap_to_the_grid_when_the_preference_is_on(qapp):
+    """NodeGraphQt draws a grid but has no notion of snapping to it."""
+    from ruyso_app.engine import settings
+    from ruyso_app.ui.canvas import PipelineCanvas
+    from ruyso_app.ui.node_factory import qt_type_for
+
+    try:
+        settings.update({"appearance.snap_to_grid": True, "appearance.grid_size": 20})
+        canvas = PipelineCanvas()
+        node = canvas.graph.create_node(qt_type_for("sort"), pos=[137.0, 214.0])
+        assert node.pos() == [140.0, 220.0]
+
+        node.set_pos(103.0, 197.0)
+        canvas.snap_node(node)
+        assert node.pos() == [100.0, 200.0]
+    finally:
+        settings.reset()
+
+
+def test_nodes_are_left_alone_when_snapping_is_off(qapp):
+    from ruyso_app.engine import settings
+    from ruyso_app.ui.canvas import PipelineCanvas
+    from ruyso_app.ui.node_factory import qt_type_for
+
+    try:
+        settings.set("appearance.snap_to_grid", False)
+        canvas = PipelineCanvas()
+        node = canvas.graph.create_node(qt_type_for("sort"), pos=[137.0, 214.0])
+        assert node.pos() == [137.0, 214.0]
+    finally:
+        settings.reset()
+
+
+def test_the_canvas_grid_mode_follows_the_preference(qapp):
+    from NodeGraphQt.constants import ViewerEnum
+
+    from ruyso_app.engine import settings
+    from ruyso_app.ui.canvas import PipelineCanvas
+
+    try:
+        settings.set("appearance.canvas_grid", "none")
+        canvas = PipelineCanvas()
+        assert canvas.graph.scene().grid_mode == ViewerEnum.GRID_DISPLAY_NONE.value
+
+        settings.set("appearance.canvas_grid", "lines")
+        canvas.apply_preferences()
+        assert canvas.graph.scene().grid_mode == ViewerEnum.GRID_DISPLAY_LINES.value
+    finally:
+        settings.reset()

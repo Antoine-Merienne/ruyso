@@ -21,6 +21,7 @@ from typing import Any
 from NodeGraphQt import BaseNode, NodeGraph
 
 from ruyso_app.engine.graph import Connection, NodeSpec, PipelineGraph
+from ruyso_app.ui import node_defaults
 from ruyso_app.ui.node_factory import qt_type_for
 from ruyso_app.ui.property_forms import extract_params_from_node
 
@@ -86,16 +87,21 @@ def pipeline_to_canvas(pipeline: PipelineGraph, graph: NodeGraph) -> dict[str, B
     """
     canvas_nodes: dict[str, BaseNode] = {}
 
-    for index, spec in enumerate(pipeline.nodes.values()):
-        canvas_node = graph.create_node(
-            qt_type_for(spec.node_type),
-            name=spec.id,
-            pos=(index * 220, 0),
-            push_undo=False,
-        )
-        for field_name, value in spec.params.items():
-            canvas_node.set_property(field_name, _property_display_value(value))
-        canvas_nodes[spec.id] = canvas_node
+    # A file describes the pipeline completely: a parameter it does not
+    # mention means the node's own default, the same on every machine.
+    # Seeding from local preferences here would quietly make it mean
+    # "whatever this person prefers" instead.
+    with node_defaults.suspended():
+        for index, spec in enumerate(pipeline.nodes.values()):
+            canvas_node = graph.create_node(
+                qt_type_for(spec.node_type),
+                name=spec.id,
+                pos=(index * 220, 0),
+                push_undo=False,
+            )
+            for field_name, value in spec.params.items():
+                canvas_node.set_property(field_name, _property_display_value(value))
+            canvas_nodes[spec.id] = canvas_node
 
     for connection in pipeline.connections:
         source_port = canvas_nodes[connection.source_node].outputs()[connection.source_port]

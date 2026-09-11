@@ -372,9 +372,16 @@ def color_pixmap(spec: str, size: QSize | None = None) -> QPixmap:
         return QPixmap()
     pm = _blank(size)
     painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setPen(QPen(QColor(0, 0, 0, 70), 1))
     painter.setBrush(QBrush(qcolor))
-    painter.drawRoundedRect(QRectF(0.5, 0.5, size.width() - 1, size.height() - 1), 3, 3)
+    # Rounded to match the 8px radius the theme gives every control;
+    # scaled to the swatch so a small square still reads as rounded
+    # rather than as a circle.
+    radius = min(size.width(), size.height()) / 3.0
+    painter.drawRoundedRect(
+        QRectF(0.5, 0.5, size.width() - 1, size.height() - 1), radius, radius
+    )
     painter.end()
     return pm
 
@@ -389,6 +396,13 @@ def _to_qcolor(spec: str) -> QColor | None:
     try:  # matplotlib understands many names Qt does not ("darkblue" it does; "C0" it doesn't)
         from matplotlib.colors import to_hex
 
+        from ruyso_app.core import colors
+
+        # The panel draws swatches long before any plot has run, so the
+        # app's own colour names ("materialblue") have to be registered
+        # here too -- otherwise they render as an empty square until the
+        # first figure is built. Idempotent.
+        colors.register()
         return QColor(to_hex(spec))
     except Exception:  # noqa: BLE001
         return None

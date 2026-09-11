@@ -86,3 +86,67 @@ def save_graph(graph: PipelineGraph, path: str | Path, *, indent: int = 2) -> No
 def load_graph(path: str | Path) -> PipelineGraph:
     """Read a JSON file and build a PipelineGraph from it."""
     return graph_from_json(Path(path).read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------
+# Documents: the pipeline, plus whatever else the file carries
+# --------------------------------------------------------------------------
+#
+# A saved file is more than its graph -- the Dashboard's layout lives in
+# it too, so sending someone a pipeline sends the report with it. That
+# extra material is kept in *separate top-level keys*, never mixed into
+# the node and connection lists, so:
+#
+#   * ``graph_to_dict`` / ``graph_from_dict`` stay exactly what they
+#     were. A hand-written file, the bundled examples and the headless
+#     CLI neither produce nor need any of it.
+#   * A key this version does not understand is carried in and out
+#     untouched rather than dropped, so a file written by a newer build
+#     survives a round trip through an older one.
+
+#: Top-level keys that belong to the graph itself.
+GRAPH_KEYS = frozenset({"nodes", "connections"})
+
+#: Key under which the Dashboard stores its layout.
+DASHBOARD_KEY = "dashboard"
+
+
+def document_to_dict(
+    graph: PipelineGraph, extras: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """
+    The graph, plus any extra top-level sections.
+
+    Extra keys that collide with the graph's own are ignored rather than
+    allowed to overwrite the pipeline -- losing a report is a nuisance,
+    losing the pipeline is losing the work.
+    """
+    data = graph_to_dict(graph)
+    for key, value in (extras or {}).items():
+        if key not in GRAPH_KEYS and value:
+            data[key] = value
+    return data
+
+
+def document_from_dict(data: dict[str, Any]) -> tuple[PipelineGraph, dict[str, Any]]:
+    """``(graph, extras)`` -- extras being every non-graph top-level key."""
+    graph = graph_from_dict(data)
+    extras = {k: v for k, v in data.items() if k not in GRAPH_KEYS}
+    return graph, extras
+
+
+def save_document(
+    graph: PipelineGraph,
+    path: str | Path,
+    extras: dict[str, Any] | None = None,
+    *,
+    indent: int = 2,
+) -> None:
+    """Write a graph and its extra sections to a JSON file."""
+    payload = document_to_dict(graph, extras)
+    Path(path).write_text(json.dumps(payload, indent=indent), encoding="utf-8")
+
+
+def load_document(path: str | Path) -> tuple[PipelineGraph, dict[str, Any]]:
+    """Read a JSON file as ``(graph, extras)``."""
+    return document_from_dict(json.loads(Path(path).read_text(encoding="utf-8")))

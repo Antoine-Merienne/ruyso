@@ -20,9 +20,11 @@ from typing import Any, Callable
 from NodeGraphQt import BaseNode, NodeGraph
 
 import ruyso_app.nodes  # noqa: F401 - imported for its registration side effects
+from ruyso_app.core import toolboxes
 from ruyso_app.core.node import Node
 from ruyso_app.core.registry import NodeRegistry
-from ruyso_app.ui import theme
+from ruyso_app.ui import node_defaults, theme
+from ruyso_app.ui.node_item import RuysoNodeItem
 from ruyso_app.ui.node_preview import is_figure_core_class
 from ruyso_app.ui.property_forms import add_properties_to_node
 
@@ -65,7 +67,10 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
     """
 
     def __init__(self) -> None:
-        BaseNode.__init__(self)
+        # RuysoNodeItem paints the node as a panel-coloured card with a
+        # macro-type contour instead of NodeGraphQt's colour slab; the
+        # colour set below becomes that contour. See ui/node_item.py.
+        BaseNode.__init__(self, qgraphics_item=RuysoNodeItem)
         self.set_color(*theme.color_for_category(node_cls.category))
 
         for port in node_cls.inputs:
@@ -74,6 +79,10 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
             self.add_output(port.name)
 
         add_properties_to_node(self, node_cls.params_schema)
+        # Chart / Export / Data preferences describe how a *new* node
+        # should start; a node rebuilt from a saved file has its stored
+        # params written over these a moment later. See ui.node_defaults.
+        node_defaults.apply_to(self, node_cls)
 
         # Figure-bearing nodes (grapher, and figure
         # sinks like export_figure) get an on-canvas preview, but it is
@@ -97,20 +106,58 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
     return qt_class
 
 
-def register_all_nodes(graph: NodeGraph) -> None:
+def register_all_nodes(graph: NodeGraph, all_toolboxes: bool = False) -> None:
     """
-    Discover every node in ``ruyso_app.nodes`` and register a matching
-    NodeGraphQt class on ``graph``, so they all appear in the canvas's
-    "add node" search (press Tab on the canvas) and in a
+    Discover the enabled nodes in ``ruyso_app.nodes`` and register a
+    matching NodeGraphQt class on ``graph``, so they appear in the
+    canvas's "add node" search (press Tab on the canvas) and in a
     ``NodesPaletteWidget``.
 
-    Safe to call more than once: ``NodeRegistry.discover_package`` is
-    idempotent, and re-registering a node type under the same
-    identifier simply replaces the previous class.
+    Only the enabled toolboxes' modules are imported (see
+    ``core.toolboxes``), which is where the startup saving comes from,
+    and only their nodes get a Qt class -- so the Tab search agrees with
+    the menus about what exists.
+
+    Args:
+        all_toolboxes: Register everything regardless of the preference.
+            Used when opening a pipeline whose nodes come from a family
+            that is switched off, after the person has agreed to turn it
+            back on.
+
+    Safe to call more than once on the same graph, which matters because
+    enabling a toolbox has to register the newly available classes onto
+    a canvas that already has the others. NodeGraphQt does *not* allow
+    that by itself -- its factory raises ``NodeRegistrationError`` rather
+    than replacing -- so already-registered types are skipped here.
     """
-    NodeRegistry.discover_package(ruyso_app.nodes)
+    if all_toolboxes:
+        NodeRegistry.discover_package(ruyso_app.nodes)
+        allowed = None
+    else:
+        NodeRegistry.discover_package(
+            ruyso_app.nodes, only=toolboxes.enabled_modules()
+        )
+        allowed = toolboxes.enabled_keys()
+
+    known = set(getattr(graph.node_factory, "nodes", {}))
     for node_type, node_cls in sorted(NodeRegistry.all().items()):
+        if allowed is not None and not _in_enabled_toolbox(node_cls, allowed):
+            continue
+        if qt_type_for(node_type) in known:
+            continue
         graph.register_node(build_node_graph_class(node_type, node_cls))
+
+
+def _in_enabled_toolbox(node_cls: type[Node], allowed: set[str]) -> bool:
+    """
+    Whether a node's family is switched on.
+
+    A node whose module belongs to no declared family is treated as
+    enabled: an out-of-tree node should show up, not vanish because
+    nobody thought to put it in a toolbox.
+    """
+    toolbox = toolboxes.toolbox_for_node_class(node_cls)
+    return toolbox is None or toolbox.key in allowed
 
 
 def register_node_context_menu_actions(
@@ -164,14 +211,25 @@ def core_node_types_by_category() -> dict[str, list[str]]:
     concrete node yet) is shown disabled rather than offered as an
     empty submenu.
 
+    Node types from a switched-off toolbox are left out, which is what
+    narrows the New Node menu, the canvas menu and the Options panel's
+    micro-type dropdown together -- they all read this one function. The
+    filter lives here rather than in ``NodeRegistry`` on purpose: the
+    registry is the truth about what the app *has*, and a preference
+    about what to show is not the registry's business.
+
     Returns:
         ``{category: [node_type, ...]}``, each list sorted, categories
         in the order they appear in ``theme.MACRO_TYPE_LABELS`` followed
-        by any extras.
+        by any extras. A category left with no enabled node is absent,
+        so its menu entry is shown disabled rather than empty.
     """
-    NodeRegistry.discover_package(ruyso_app.nodes)
+    NodeRegistry.discover_package(ruyso_app.nodes, only=toolboxes.enabled_modules())
+    allowed = toolboxes.enabled_keys()
     grouped: dict[str, list[str]] = {}
     for node_type, node_cls in NodeRegistry.all().items():
+        if not _in_enabled_toolbox(node_cls, allowed):
+            continue
         grouped.setdefault(node_cls.category, []).append(node_type)
 
     ordered: dict[str, list[str]] = {}

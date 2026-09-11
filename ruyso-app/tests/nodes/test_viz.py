@@ -19,23 +19,36 @@ def _run(**params):
     return node.run(df=df)["figure"]
 
 
-# -- manual axis limits (x_limits / y_limits) ------------------------
+# -- manual axis limits --------------------------------------------------
+#
+# There is no ``x_limits`` / ``y_limits`` toggle: the four edges are
+# always live, and each one is independent, with a *blank* value meaning
+# "fit this edge to the data".
 
 
 def test_matplotlib_plot_manual_xy_limits_are_applied():
     ax = _run(
         x="x", y="y", kind="scatter",
-        x_limits=True, x_min=1.5, x_max=3.5,
-        y_limits=True, y_min=5.0, y_max=25.0,
+        x_min="1.5", x_max="3.5", y_min="5.0", y_max="25.0",
     ).axes[0]
     assert ax.get_xlim() == (1.5, 3.5)
     assert ax.get_ylim() == (5.0, 25.0)
 
 
-def test_axis_limits_off_leaves_autoscale():
-    ax = _run(x="x", y="y", kind="scatter", x_min=99.0, x_max=100.0).axes[0]  # ignored
+def test_blank_axis_limits_leave_autoscale():
+    ax = _run(x="x", y="y", kind="scatter").axes[0]
     lo, hi = ax.get_xlim()
-    assert lo < 1 and hi > 4  # still autoscaled to the data
+    assert lo < 1 and hi > 4  # autoscaled to the data
+
+
+def test_a_single_pinned_edge_leaves_the_other_three_on_autoscale():
+    """The per-edge blank the old both-edges-or-nothing toggle could not do."""
+    auto = _run(x="x", y="y", kind="scatter").axes[0]
+    ax = _run(x="x", y="y", kind="scatter", y_min="0").axes[0]
+
+    assert ax.get_ylim()[0] == 0.0  # pinned
+    assert ax.get_ylim()[1] == auto.get_ylim()[1]  # untouched
+    assert ax.get_xlim() == auto.get_xlim()  # untouched
 
 
 def test_time_series_plot_accepts_date_string_x_limits():
@@ -49,8 +62,7 @@ def test_time_series_plot_accepts_date_string_x_limits():
     )
     ax = TimeSeriesPlot(
         params=TimeSeriesPlotParams(
-            x_column="d", y_column="v",
-            x_limits=True, x_min="2021-03-01", x_max="2021-05-01",
+            x_column="d", y_column="v", x_min="2021-03-01", x_max="2021-05-01",
         )
     ).run(df=ts)["figure"].axes[0]
     lo, hi = (mdates.num2date(v).date().isoformat() for v in ax.get_xlim())
@@ -67,12 +79,27 @@ def test_time_series_plot_blank_x_limit_edge_stays_auto():
     )
     ax = TimeSeriesPlot(
         params=TimeSeriesPlotParams(
-            x_column="d", y_column="v", x_limits=True, x_min="2021-02-01", x_max="",
+            x_column="d", y_column="v", x_min="2021-02-01", x_max="",
         )
     ).run(df=ts)["figure"].axes[0]
     import matplotlib.dates as mdates
 
     assert mdates.num2date(ax.get_xlim()[0]).date().isoformat() == "2021-02-01"
+
+
+def test_no_grapher_still_carries_an_axis_limit_toggle():
+    """Every grapher moved to always-visible edges, none kept the tickbox."""
+    from ruyso_app.core.registry import NodeRegistry
+
+    for node_type, cls in NodeRegistry.all().items():
+        if cls.category != "grapher":
+            continue
+        fields = cls.params_schema.model_fields
+        assert "x_limits" not in fields and "y_limits" not in fields
+        if "x_min" in fields:
+            for edge in ("x_min", "x_max", "y_min", "y_max"):
+                assert fields[edge].annotation is str, f"{node_type}.{edge}"
+                assert fields[edge].default == ""
 
 
 def test_matplotlib_plot_returns_a_figure_with_correct_labels():
@@ -1415,3 +1442,103 @@ def test_var_forecast_and_irf_ci_styles_and_colours(ci_style):
 def test_var_plots_reject_a_non_var_model():
     with pytest.raises(ValueError, match="var"):
         IrfPlot(params=IrfPlotParams()).run(model=object())
+
+
+# -- multivariate time series: one mark colour, not a colormap -----------
+
+
+def _multivariate_df():
+    import numpy as np
+
+    return pd.DataFrame(
+        {
+            "t": pd.date_range("2020-01-01", periods=5),
+            "v": np.arange(5.0),
+            "w": np.arange(5.0)[::-1],
+            "z": np.arange(5.0) * 2,
+        }
+    )
+
+
+def _line_colors(figure):
+    return [line.get_color() for ax in figure.axes for line in ax.lines]
+
+
+def test_multivariate_overlay_gives_each_series_its_own_colour():
+    """One axes, so colour is the only thing separating the lines."""
+    from ruyso_app.nodes.viz import (
+        MultivariateTimeSeriesPlot,
+        MultivariateTimeSeriesPlotParams,
+    )
+
+    figure = MultivariateTimeSeriesPlot(
+        params=MultivariateTimeSeriesPlotParams(
+            datetime_column="t", variables=["v", "w", "z"], layout="overlay"
+        )
+    ).run(df=_multivariate_df())["figure"]
+
+    colors = _line_colors(figure)
+    assert len(colors) == 3
+    assert len({str(c) for c in colors}) == 3
+
+
+def test_multivariate_overlay_honours_the_chosen_colormap():
+    from ruyso_app.nodes.viz import (
+        MultivariateTimeSeriesPlot,
+        MultivariateTimeSeriesPlotParams,
+    )
+
+    def colors(colormap):
+        figure = MultivariateTimeSeriesPlot(
+            params=MultivariateTimeSeriesPlotParams(
+                datetime_column="t", variables=["v", "w"],
+                layout="overlay", colormap=colormap,
+            )
+        ).run(df=_multivariate_df())["figure"]
+        return [str(c) for c in _line_colors(figure)]
+
+    assert colors("tab10") != colors("Set1")
+
+
+def test_multivariate_grid_uses_one_mark_colour_for_every_panel():
+    """One panel per series, so colour carries no information."""
+    from ruyso_app.nodes.viz import (
+        MultivariateTimeSeriesPlot,
+        MultivariateTimeSeriesPlotParams,
+    )
+
+    figure = MultivariateTimeSeriesPlot(
+        params=MultivariateTimeSeriesPlotParams(
+            datetime_column="t", variables=["v", "w", "z"], layout="grid"
+        )
+    ).run(df=_multivariate_df())["figure"]
+    assert set(_line_colors(figure)) == {"materialblue"}
+
+    custom = MultivariateTimeSeriesPlot(
+        params=MultivariateTimeSeriesPlotParams(
+            datetime_column="t", variables=["v", "w"],
+            layout="grid", mark_color="crimson",
+        )
+    ).run(df=_multivariate_df())["figure"]
+    assert set(_line_colors(custom)) == {"crimson"}
+
+
+def test_multivariate_colour_fields_are_each_tied_to_a_layout():
+    from ruyso_app.core.params import visible_when
+    from ruyso_app.nodes.viz import MultivariateTimeSeriesPlotParams
+
+    fields = MultivariateTimeSeriesPlotParams.model_fields
+    assert fields["mark_color"].default == "materialblue"
+    assert fields["colormap"].default == "tab10"
+    assert visible_when(fields["colormap"]) == ("layout", "overlay")
+    assert visible_when(fields["mark_color"]) == ("layout", "grid")
+
+
+def test_materialblue_resolves_once_a_figure_has_been_built():
+    from matplotlib.colors import to_hex
+
+    from ruyso_app.core import colors
+
+    colors.register()
+    assert to_hex("materialblue") == "#1e88e5"
+    assert to_hex("darkblue") == "#00008b"  # never shadows a built-in name

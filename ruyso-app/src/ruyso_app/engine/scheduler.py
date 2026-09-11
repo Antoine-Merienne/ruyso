@@ -16,11 +16,20 @@ headlessly (from a script, a test, or a CLI) with no UI involved.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import traceback
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterator
 
 import joblib
 
+from ruyso_app.core import dtformat as _dtformat
 from ruyso_app.core.registry import NodeRegistry
+from ruyso_app.engine import errors as _errors
+from ruyso_app.engine import run_cache as _run_cache
+from ruyso_app.engine import settings as _settings
+from ruyso_app.engine import signatures as _signatures
+from ruyso_app.engine.errors import NodeError
+from ruyso_app.engine.run_cache import ResultCache, is_skippable
 from ruyso_app.engine import colormaps as _colormaps
 from ruyso_app.engine.cache import get_memory
 from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
@@ -51,7 +60,57 @@ def _execute_node(
     node_cls = NodeRegistry.get(node_type)
     node = node_cls(params=params)
     node.validate_inputs(inputs)
-    return node.run(**inputs)
+    outputs = node.run(**inputs)
+    # Datetime display formats ride along in ``DataFrame.attrs``, which
+    # pandas drops for any result built from two parents (a merge, say).
+    # Restoring them here covers every node at once, including ones
+    # written later. Duck-typed, so no pandas import reaches the engine.
+    _dtformat.carry_formats_through(outputs, inputs)
+    return outputs
+
+
+@dataclass
+class RunReport:
+    """
+    What one execution of a pipeline produced.
+
+    Three outcomes, kept apart because they mean different things to
+    whoever reads them:
+
+    * :attr:`outputs` -- nodes that ran cleanly, mapped to their output
+      dicts.
+    * :attr:`errors` -- nodes that raised, mapped to a
+      :class:`~ruyso_app.engine.errors.NodeError`. ``str()`` of one is a
+      plain sentence, so anywhere the old code interpolated the
+      exception keeps working.
+    * :attr:`blocked` -- nodes that never ran, mapped to *the node that
+      caused it*, or ``None`` when the node is simply not wired up yet.
+      These used to appear in neither dict, so a run that stopped a
+      third of the way through reported one failure and said nothing at
+      all about the eight steps it silently skipped.
+
+    Unpacks as ``(outputs, errors)`` so every existing caller --
+    ``PipelineExecutionWorker``, ``AutoRunController``, the engine tests
+    -- keeps working untouched while the blocked map becomes available
+    to anything that asks for it.
+    """
+
+    outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    errors: dict[str, NodeError] = field(default_factory=dict)
+    blocked: dict[str, str | None] = field(default_factory=dict)
+    #: Nodes whose result came from the cache instead of being computed
+    #: (see :mod:`ruyso_app.engine.run_cache`). They appear in
+    #: :attr:`outputs` like any other; this says which ones did no work,
+    #: which is what lets the UI skip re-drawing a figure it already has.
+    reused: set[str] = field(default_factory=set)
+
+    def __iter__(self) -> Iterator[dict]:
+        return iter((self.outputs, self.errors))
+
+    @property
+    def unwired(self) -> set[str]:
+        """Blocked nodes that are missing a connection rather than a result."""
+        return {node_id for node_id, cause in self.blocked.items() if cause is None}
 
 
 class PipelineScheduler:
@@ -88,7 +147,7 @@ class PipelineScheduler:
         graph: PipelineGraph,
         progress_callback: Callable[[int, int], None] | None = None,
         node_callback: Callable[[str, str], None] | None = None,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    ) -> RunReport:
         """
         Execute ``graph`` in dependency order, attempting *every* node.
 
@@ -107,53 +166,103 @@ class PipelineScheduler:
                 ``"running"`` / ``"ok"`` / ``"error"`` / ``"blocked"``.
 
         Returns:
-            ``(outputs, errors)`` — ``outputs`` maps node id -> output
-            dict for the nodes that ran cleanly; ``errors`` maps node id
-            -> message for the nodes that raised.
+            A :class:`RunReport`. It unpacks as ``(outputs, errors)``,
+            so existing two-value callers are unaffected.
         """
         _colormaps.register_all(force=False)  # custom colormaps -> matplotlib
         graph.validate()
 
         order = graph.topological_order()
         total = len(order)
-        outputs: dict[str, dict[str, Any]] = {}
-        errors: dict[str, str] = {}
-        blocked: set[str] = set()
+        report = RunReport()
 
         def emit(node_id: str, phase: str) -> None:
             if node_callback is not None:
                 node_callback(node_id, phase)
 
+        stop_on_first_error = bool(_settings.get("execution.stop_on_first_error"))
+
         for index, node_id in enumerate(order, start=1):
             spec = graph.get_node(node_id)
-            if any(
-                conn.source_node in errors or conn.source_node in blocked
-                for conn in graph.incoming_connections(node_id)
-            ):
-                blocked.add(node_id)
+            cause = self._blocking_cause(graph, node_id, report)
+            if cause is None and stop_on_first_error and report.errors:
+                # Everything after the first failure is reported as
+                # waiting on it, even where the graph would have let it
+                # run: with this on, the first error is the answer and
+                # the rest is noise.
+                report.blocked[node_id] = next(iter(report.errors))
+                emit(node_id, "blocked")
+                if progress_callback is not None:
+                    progress_callback(index, total)
+                continue
+            if cause is not None:
+                # ``validate()`` guarantees every required port is wired,
+                # so in a full run "not run" can only mean an upstream
+                # failure -- never an unconnected input.
+                report.blocked[node_id] = cause
                 emit(node_id, "blocked")
             else:
                 emit(node_id, "running")
-                inputs = self._collect_inputs(graph, node_id, outputs)
+                inputs = self._collect_inputs(graph, node_id, report.outputs)
                 try:
-                    outputs[node_id] = self._execute(
+                    report.outputs[node_id] = self._execute(
                         spec.node_type, spec.params, inputs
                     )
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
-                    errors[node_id] = str(exc)
+                    report.errors[node_id] = self._describe(exc, spec, inputs)
                     emit(node_id, "error")
                 else:
                     emit(node_id, "ok")
             if progress_callback is not None:
                 progress_callback(index, total)
 
-        return outputs, errors
+        return report
+
+    @staticmethod
+    def _blocking_cause(
+        graph: PipelineGraph, node_id: str, report: RunReport
+    ) -> str | None:
+        """
+        The node whose failure stops ``node_id`` from running, or ``None``.
+
+        Reports the node that actually *failed*, not the immediate
+        upstream neighbour: in a chain of five where the second raised,
+        every one after it says "waiting on the second", which is the
+        one worth going and looking at.
+
+        ``None`` means no upstream *failure* -- either the node can run,
+        or (in ``run_available``, where a caller checks for missing
+        inputs first) the branch is merely unwired. The cause recorded
+        for an upstream is passed straight through rather than falling
+        back to the upstream's own name: a node sitting below an
+        unfinished branch is unwired too, not blocked by a failure.
+        """
+        for conn in graph.incoming_connections(node_id):
+            source = conn.source_node
+            if source in report.errors:
+                return source
+            if source in report.blocked:
+                return report.blocked[source]
+        return None
+
+    def _describe(self, exc: BaseException, spec: Any, inputs: dict[str, Any]) -> NodeError:
+        """Read a raised exception as a sentence about the node that raised it."""
+        return _errors.translate(
+            exc,
+            node_id=spec.id,
+            node_type=spec.node_type,
+            node_cls=NodeRegistry.all().get(spec.node_type),
+            input_columns=_errors.columns_from_inputs(inputs),
+            raw=traceback.format_exc(),
+        )
 
     def run_available(
         self,
         graph: PipelineGraph,
         node_callback: Callable[[str, str], None] | None = None,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        result_cache: ResultCache | None = None,
+        skip_categories: frozenset[str] = frozenset(),
+    ) -> RunReport:
         """
         Best-effort partial execution: run every node whose inputs are
         all present and whose execution succeeds, silently skipping
@@ -167,13 +276,33 @@ class PipelineScheduler:
         Args:
             node_callback: If given, called ``(node_id, phase)`` as each
                 node is reached -- ``"running"`` / ``"ok"`` /
-                ``"error"`` / ``"blocked"`` (unwired or downstream of a
-                skip/failure).
+                ``"error"`` / ``"blocked"`` (something upstream failed)
+                / ``"unwired"`` (a required input has nothing plugged
+                into it). The last two used to share the one
+                ``"blocked"`` phase, which conflated a broken pipeline
+                with a half-built one -- the ordinary state of a canvas
+                someone is still assembling.
+            result_cache: If given, a node whose *transitive* signature
+                matches its cached one is served from the cache and
+                never executed. This is what stops a background run
+                re-rendering every figure on the canvas after each
+                keystroke: graphers opt out of the joblib cache, so
+                without this they re-ran unconditionally. Loaders and
+                exports are always executed anyway (see
+                ``run_cache.ALWAYS_RUN_CATEGORIES``), and the manual
+                "Run Pipeline" passes no cache at all, so pressing Run
+                stays the way to force real re-execution.
+            skip_categories: Node categories to leave alone entirely.
+                Backs the "re-render figures during auto-run"
+                preference: with it off, ``{"grapher"}`` is passed and
+                plots are left showing whatever they last rendered
+                rather than being redrawn on every keystroke. Skipped
+                nodes emit no phase, so their canvas dot keeps its last
+                state instead of flickering.
 
         Returns:
-            ``(outputs, errors)`` -- ``outputs`` maps node id -> output
-            dict for the nodes that ran; ``errors`` maps node id ->
-            message for nodes that were reached but raised.
+            A :class:`RunReport`. It unpacks as ``(outputs, errors)``,
+            so existing two-value callers are unaffected.
         """
 
         def emit(node_id: str, phase: str) -> None:
@@ -181,46 +310,101 @@ class PipelineScheduler:
                 node_callback(node_id, phase)
 
         _colormaps.register_all(force=False)  # custom colormaps -> matplotlib
+        report = RunReport()
         try:
             order = graph.topological_order()
         except GraphValidationError:
-            return {}, {}
+            return report
 
-        outputs: dict[str, dict[str, Any]] = {}
-        errors: dict[str, str] = {}
+        # Signatures are folded *as we go* rather than computed upfront,
+        # because what a node's dependents key on can depend on what it
+        # produced -- see run_cache.content_token.
+        caching = result_cache is not None
+        own_signatures = _signatures.pipeline_signatures(graph) if caching else {}
+        upstream_of = _signatures.upstream_map(graph) if caching else {}
+        effective: dict[str, str] = {}
+
         for node_id in order:
             spec = graph.get_node(node_id)
             node_cls = NodeRegistry.all().get(spec.node_type)
             if node_cls is None:
                 continue
+            if getattr(node_cls, "category", "") in skip_categories:
+                continue  # deliberately left alone; not blocked, not failed
 
             inputs: dict[str, Any] = {}
             missing_upstream = False
+            cause: str | None = None
             for conn in graph.incoming_connections(node_id):
-                upstream = outputs.get(conn.source_node)
+                upstream = report.outputs.get(conn.source_node)
                 if upstream is None or conn.source_port not in upstream:
                     missing_upstream = True
+                    cause = self._blocking_cause(graph, node_id, report)
                     break
                 inputs[conn.target_port] = upstream[conn.source_port]
             if missing_upstream:
-                emit(node_id, "blocked")
+                # A missing upstream result is only a *failure* when
+                # something actually failed; otherwise this branch is
+                # merely unfinished, like the node itself.
+                report.blocked[node_id] = cause
+                emit(node_id, "blocked" if cause else "unwired")
                 continue
 
             required = {p.name for p in node_cls.inputs if p.required}
             if not required.issubset(inputs):
-                emit(node_id, "blocked")
+                report.blocked[node_id] = None
+                emit(node_id, "unwired")
                 continue
+
+            # Only now, with the inputs known to be available, is a
+            # cache hit safe to serve: reaching here means nothing
+            # upstream failed this run. Checking earlier would hand back
+            # a stale result under a node whose loader had just started
+            # erroring -- a green node showing yesterday's data below a
+            # red one.
+            signature = ""
+            skippable = False
+            if caching:
+                signature = _signatures.fold_signature(
+                    own_signatures.get(node_id, ""),
+                    (effective.get(s, "") for s in upstream_of.get(node_id, ())),
+                )
+                skippable = is_skippable(node_cls)
+                if skippable:
+                    cached = result_cache.get(node_id, signature)
+                    if cached is not None:
+                        report.outputs[node_id] = cached
+                        report.reused.add(node_id)
+                        effective[node_id] = signature
+                        emit(node_id, "ok")
+                        continue
 
             emit(node_id, "running")
             try:
-                outputs[node_id] = self._execute(spec.node_type, spec.params, inputs)
+                report.outputs[node_id] = self._execute(
+                    spec.node_type, spec.params, inputs
+                )
             except Exception as exc:  # noqa: BLE001 - collected, not raised
-                errors[node_id] = str(exc)
+                report.errors[node_id] = self._describe(exc, spec, inputs)
                 emit(node_id, "error")
             else:
                 emit(node_id, "ok")
+                if caching:
+                    outputs = report.outputs[node_id]
+                    if skippable:
+                        result_cache.put(node_id, signature, outputs)
+                        effective[node_id] = signature
+                    else:
+                        # A loader or an export: its dependents must key
+                        # on what it produced, not merely on how it is
+                        # configured.
+                        effective[node_id] = _run_cache.content_token(
+                            signature, outputs
+                        )
 
-        return outputs, errors
+        if caching:
+            result_cache.prune(order)  # a deleted node keeps nothing alive
+        return report
 
     @staticmethod
     def _collect_inputs(
