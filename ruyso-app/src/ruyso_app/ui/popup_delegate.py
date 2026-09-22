@@ -68,7 +68,9 @@ def install_on(view: QAbstractItemView) -> bool:
     (the colormap and marker swatches, ``ui/swatch_combo.py``) keeps its
     delegate: those draw the preview the person is choosing by.
     """
-    if isinstance(view.itemDelegate(), QStyledItemDelegate):
+    current = view.itemDelegate()
+    # QComboBoxDelegate is Qt's own (a QStyledItemDelegate subclass).
+    if isinstance(current, QStyledItemDelegate) and not current.inherits("QComboBoxDelegate"):
         return False  # someone set a real delegate; leave it alone
     view.setItemDelegate(PopupItemDelegate(view))
     return True

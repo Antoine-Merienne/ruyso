@@ -238,6 +238,30 @@ def test_a_file_changed_on_disk_invalidates_everything_downstream(
     assert "head" in ran and second.reused == set()
 
 
+def test_a_file_changed_on_disk_is_re_read_through_the_joblib_cache(
+    csv_path, tmp_path
+):
+    """
+    The same trap one level down, and the reason every other test here
+    disables joblib: a loader has no *inputs*, so joblib keyed it on its
+    path alone and served the first read of that path for ever. An
+    edited CSV was then invisible to the whole app -- Run included --
+    until the disk cache was cleared by hand.
+    """
+    disk = PipelineScheduler(
+        memory=joblib.Memory(location=str(tmp_path / "joblib"), verbose=0)
+    )
+    graph = _loader_chain(csv_path)
+    cache = ResultCache()
+
+    _executed(disk, graph, cache)
+    pd.DataFrame({"a": [9, 9, 9], "b": [0, 0, 0]}).to_csv(csv_path, index=False)
+
+    assert disk.run(graph).outputs["load"]["df"]["a"].tolist() == [9, 9, 9]
+    _, auto = _executed(disk, graph, cache)
+    assert auto.outputs["head"]["df"]["a"].tolist() == [9, 9]
+
+
 def test_an_unchanged_file_still_lets_everything_downstream_be_skipped(
     csv_path, scheduler
 ):
@@ -291,6 +315,42 @@ def test_an_export_re_runs_even_when_nothing_changed(tmp_path, scheduler):
     ran, _ = _executed(scheduler, graph, cache)
 
     assert "save" in ran and out.exists()  # written again
+
+
+# -- the Run button ------------------------------------------------------
+
+
+def test_a_full_run_can_reuse_what_nothing_changed_for(csv_path, scheduler):
+    """What the Run button passes: the same skip rules as a background
+    run, so pressing Run on a pipeline that is already current is not a
+    minute of recomputation."""
+    graph = _loader_chain(csv_path)
+    cache = ResultCache()
+
+    first = scheduler.run(graph, result_cache=cache)
+    assert first.reused == set()
+
+    second = scheduler.run(graph, result_cache=cache)
+    assert second.reused == {"head"}  # the loader always re-runs
+    assert second.outputs["head"]["df"].equals(first.outputs["head"]["df"])
+
+    graph.get_node("head").params["n"] = 1  # an edit invalidates that node
+    third = scheduler.run(graph, result_cache=cache)
+    assert third.reused == set()
+    assert len(third.outputs["head"]["df"]) == 1
+
+
+def test_a_full_run_without_a_cache_still_runs_everything(csv_path, scheduler):
+    """Force Full Run passes no cache, and that has to keep meaning
+    every single step."""
+    graph = _loader_chain(csv_path)
+    cache = ResultCache()
+    scheduler.run(graph, result_cache=cache)
+
+    report = scheduler.run(graph)
+
+    assert report.reused == set()
+    assert set(report.outputs) == {"load", "head"}
 
 
 def test_without_a_cache_every_node_runs_every_time(csv_path, scheduler):

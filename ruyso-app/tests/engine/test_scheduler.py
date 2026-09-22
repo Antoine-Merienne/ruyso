@@ -126,6 +126,65 @@ def test_cached_execution_returns_identical_result_without_recomputation(tmp_pat
     assert call_count["n"] == 1  # second call served entirely from cache
 
 
+# -- which nodes are worth caching at all ------------------------------
+#
+# joblib has to hash every input before it can say whether it holds a
+# result, and hashing a big table is not cheap. A node that runs in
+# milliseconds is therefore faster to re-run than to look up.
+
+
+def test_only_work_that_took_real_time_goes_to_disk(tmp_path, monkeypatch):
+    """A slow node is cached; a quick one is re-run, once its real cost
+    is known. Both start out cached: a fresh session must not answer its
+    first question about a slow node by running it."""
+    import time as _time
+
+    from ruyso_app.engine import cache as engine_cache
+    from ruyso_app.nodes.transforms import DropNA
+
+    monkeypatch.setattr(engine_cache, "CACHE_MIN_SECONDS", 0.05)
+    engine_cache.forget_compute_times()
+    original = DropNA.run
+    delay = {"seconds": 0.2}
+    calls: list[int] = []
+
+    def timed_run(self, **inputs):
+        calls.append(1)
+        _time.sleep(delay["seconds"])
+        return original(self, **inputs)
+
+    monkeypatch.setattr(DropNA, "run", timed_run)
+    scheduler = PipelineScheduler(
+        memory=joblib.Memory(location=str(tmp_path), verbose=0)
+    )
+    df = pd.DataFrame({"a": [1.0, 2.0, None]})
+
+    scheduler._execute("drop_na", {}, {"df": df})  # cached: nobody had timed it
+    scheduler._execute("drop_na", {}, {"df": df})
+    assert calls == [1]  # slow work: the second call came off the disk
+
+    engine_cache.forget_compute_times()
+    delay["seconds"] = 0.0
+    calls.clear()
+    scheduler._execute("drop_na", {"columns": ["a"]}, {"df": df})
+    scheduler._execute("drop_na", {"columns": ["a"]}, {"df": df})
+    assert calls == [1, 1]  # quick work: cheaper to run than to look up
+
+
+def test_a_node_nobody_has_timed_is_cached(monkeypatch):
+    from ruyso_app.engine import cache as engine_cache
+
+    engine_cache.forget_compute_times()
+    assert engine_cache.worth_caching("arima_fit")
+
+    engine_cache.record_compute_time("arima_fit", 12.0)
+    assert engine_cache.worth_caching("arima_fit")
+
+    engine_cache.record_compute_time("arima_fit", 0.004)
+    assert not engine_cache.worth_caching("arima_fit")
+    engine_cache.forget_compute_times()
+
+
 def test_execute_node_validates_required_inputs():
     with pytest.raises(ValueError, match="missing required input"):
         _execute_node("drop_na", {}, {})

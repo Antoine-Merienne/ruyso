@@ -7,9 +7,11 @@ matplotlib (headless "Agg" backend) and seaborn, and return the Figure
 as an output value for the caller to render or save.
 """
 
+from contextlib import contextmanager
 from typing import Any, Literal
 
 from ruyso_app.core import colors, dtformat
+from ruyso_app.core.figure_lock import figure_guard
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import (
     axis_limit_field,
@@ -29,7 +31,8 @@ from ruyso_app.core.registry import register_node
 _BASE_STYLE = "seaborn-v0_8-whitegrid"
 
 
-def _plot_context(plt: Any):
+@contextmanager
+def _plot_context(plt: Any) -> Any:
     """
     The style context every figure is drawn inside.
 
@@ -39,6 +42,13 @@ def _plot_context(plt: Any):
     figure never leaks its styling into whatever draws next. Falls back
     to the built-in style if the configured one is not installed --
     a preference naming a missing style should not stop plots rendering.
+
+    It also takes :func:`core.figure_lock.figure_guard`, because
+    "rcParams as a context" is still a *global* swap: a figure being
+    drawn on the render thread while this one is being built picked up
+    half of this one's style, and came out with pieces missing or
+    blank. Every grapher builds inside this block, so one lock here
+    covers the whole family.
 
     Note that this makes a figure depend on machine-local preferences,
     which an exported script will not carry: the same caveat that
@@ -55,13 +65,24 @@ def _plot_context(plt: Any):
         overrides["figure.dpi"] = float(dpi)
 
     style = settings.get("charts.style") or _BASE_STYLE
-    try:
-        return plt.style.context([style, overrides])
-    except (OSError, ValueError):
-        return plt.style.context([_BASE_STYLE, overrides])
+    with figure_guard():
+        try:
+            styled = plt.style.context([style, overrides])
+        except (OSError, ValueError):
+            styled = plt.style.context([_BASE_STYLE, overrides])
+        with styled:
+            yield
 
 #: Default single colour for dots / lines / bars / boxes.
 _DEFAULT_COLOR = "darkblue"
+
+#: Point count above which a scatter coloured by a category is drawn one
+#: colour at a time rather than with a colour per row. Matplotlib's
+#: per-row path costs ~11 us a point (2.2 s for 200k), against ~0.15 s
+#: for any size drawn group by group -- but grouping lets the last
+#: category cover the ones before it, so it is reserved for the sizes
+#: that cannot afford the honest ordering.
+_GROUPED_SCATTER_MIN = 20_000
 
 #: Suggested colours offered in the colour-picker dropdown (any
 #: matplotlib colour string is still accepted).
@@ -158,6 +179,10 @@ _LEGEND_LOCATIONS = Literal[
     "best", "upper right", "upper left", "lower right", "lower left",
     "center", "outside right",
 ]
+
+#: How an interval around a fitted / forecast line is drawn (see
+#: :func:`_draw_ci`). Shared by the regression, forecast and IRF plots.
+_CI_STYLE = Literal["band", "lines", "errorbar", "none"]
 
 
 def _fig_size(p: Any) -> tuple[float, float]:
@@ -838,6 +863,53 @@ class MatplotlibPlot(Node):
                 ]
             return [to_rgba(single_color)] * int(mask.sum())
 
+        def uniform_color(mask: Any) -> Any:
+            """
+            The one colour every masked row shares, or ``None`` if they differ.
+
+            Handing matplotlib a per-row colour array puts it on its slow
+            path: a 500k-point scatter took 3.6 s to draw that way and
+            0.2 s with a single colour. Worth asking, because the common
+            cases -- no colour column at all, or one group of a scatter
+            split by the same column it is coloured by -- are uniform.
+            """
+            if color_kind != "discrete":
+                return to_rgba(single_color)
+            codes = np.unique(ci["codes"][mask])
+            if codes.size != 1:
+                return None
+            code = int(codes[0])
+            return color_palette[code] if code >= 0 else _grey
+
+        def colour_runs(mask: Any) -> list | None:
+            """
+            ``(mask, colour)`` pairs covering ``mask``, one colour each,
+            or ``None`` to say "draw this the row-by-row way".
+
+            One scatter call per colour instead of one call carrying a
+            colour per row -- the same split seaborn makes for a hue
+            column, and the reason a categorical scatter draws in 0.3 s
+            rather than 4.3 s at half a million points.
+
+            It is not free, though: each colour then covers the ones
+            drawn before it, where a per-row colour array interleaves
+            them in data order. So it is kept for the plots that cannot
+            afford the slow path -- below
+            :data:`_GROUPED_SCATTER_MIN` the mixing is worth more than
+            the milliseconds.
+            """
+            one = uniform_color(mask)
+            if one is not None:
+                return [(mask, one)]
+            if int(mask.sum()) < _GROUPED_SCATTER_MIN:
+                return None
+            codes = ci["codes"]
+            return [
+                (mask & (codes == code),
+                 color_palette[int(code)] if code >= 0 else _grey)
+                for code in np.unique(codes[mask])
+            ]
+
         # --- shape channel -----------------------------------------
         shape_kind, si = _encode(p.shape_by)
         if shape_kind == "continuous":
@@ -913,10 +985,18 @@ class MatplotlibPlot(Node):
                         ]
                         ax.scatter(x[gmask], y[gmask], s=s_val, marker=marker, c=cols)
                     else:
-                        ax.scatter(
-                            x[gmask], y[gmask], s=s_val, marker=marker,
-                            c=base_row_colors(gmask), alpha=fixed_alpha,
-                        )
+                        runs = colour_runs(gmask)
+                        if runs is None:
+                            ax.scatter(
+                                x[gmask], y[gmask], s=s_val, marker=marker,
+                                c=base_row_colors(gmask), alpha=fixed_alpha,
+                            )
+                        for cmask, colour in runs or ():
+                            ax.scatter(
+                                x[cmask], y[cmask],
+                                s=size_row[cmask] if size_kind != "single" else fixed_size,
+                                marker=marker, color=colour, alpha=fixed_alpha,
+                            )
                 if (
                     color_kind == "continuous"
                     and p.show_legend
@@ -1183,6 +1263,535 @@ class MatplotlibPlot(Node):
                         kind=p.marginal_kind,
                         color=_grey if color_kind == "continuous" else single_color,
                     )
+
+            _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
+
+        return {"figure": fig}
+
+
+# ==========================================================================
+# Regression / smoother plot
+# ==========================================================================
+
+
+#: Points the fitted curve is evaluated at, across each group's x range.
+_FIT_GRID_POINTS = 200
+
+#: Smallest group a curve can be fitted to at all.
+_MIN_FIT_POINTS = 3
+
+#: Seed for the LOWESS bootstrap. Fixed on purpose: the same data must
+#: give the same band on every run, or the interval would flicker on
+#: each auto-run and no test could pin it down.
+_BOOT_SEED = 20240917
+
+
+def _fit_grid(values: Any, points: int = _FIT_GRID_POINTS) -> Any:
+    """Evenly spaced x values spanning ``values``, for evaluating a fit."""
+    import numpy as np
+
+    lo, hi = float(np.nanmin(values)), float(np.nanmax(values))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return np.asarray([lo], dtype="float64")
+    return np.linspace(lo, hi, min(points, max(int(values.size) * 4, 2)))
+
+
+def _lowess_at(y: Any, x: Any, grid: Any, frac: float) -> Any:
+    """LOWESS fit of ``y`` on ``x``, evaluated at ``grid``."""
+    import numpy as np
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+
+    fitted = lowess(y, x, frac=float(frac), it=3, xvals=grid)
+    return np.asarray(fitted, dtype="float64")
+
+
+def _lowess_bootstrap_ci(
+    y: Any, x: Any, grid: Any, frac: float, level: float, n_boot: int
+) -> tuple[Any, Any] | None:
+    """
+    Percentile confidence band for a LOWESS curve.
+
+    ``statsmodels``' lowess returns smoothed values and nothing else, so
+    the interval is resampled rather than derived: refit the smoother on
+    ``n_boot`` bootstrap samples of the rows and take percentiles of the
+    fitted curves at each grid point. A draw that cannot be fitted (a
+    resample landing on too few distinct x values) contributes nothing
+    instead of failing the plot.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(_BOOT_SEED)
+    n = int(x.size)
+    draws = np.full((int(n_boot), grid.size), np.nan, dtype="float64")
+    for b in range(int(n_boot)):
+        idx = rng.integers(0, n, n)
+        if np.unique(x[idx]).size < _MIN_FIT_POINTS:
+            continue
+        try:
+            draws[b] = _lowess_at(y[idx], x[idx], grid, frac)
+        except (ValueError, ZeroDivisionError):  # noqa: PERF203 - per draw
+            continue
+    if np.all(np.isnan(draws)):
+        return None
+    tail = (1.0 - float(level)) / 2.0
+    with np.errstate(invalid="ignore"):
+        low, high = np.nanpercentile(
+            draws, [100.0 * tail, 100.0 * (1.0 - tail)], axis=0
+        )
+    return low, high
+
+
+def _linear_fit_at(y: Any, x: Any, grid: Any, level: float, want_ci: bool):
+    """
+    Least-squares line through ``(x, y)``, evaluated at ``grid``.
+
+    Returns ``(fitted, low, high)``; the bounds are the confidence
+    interval of the *mean response* -- the band around the line itself,
+    which is what a smoother's interval shows -- or ``None`` when not
+    asked for.
+    """
+    import numpy as np
+    import statsmodels.api as sm
+
+    # Centred before fitting: a datetime x arrives as ~1e18 nanoseconds,
+    # and a design matrix of [1, 1.7e18] is rank-deficient in floating
+    # point -- statsmodels warns and the line it returns is noise. The
+    # shift cancels out of the fitted values and of the interval.
+    centre = float(np.nanmean(np.asarray(x, dtype="float64")))
+    design = sm.add_constant(
+        np.asarray(x, dtype="float64") - centre, has_constant="add"
+    )
+    model = sm.OLS(np.asarray(y, dtype="float64"), design).fit()
+    at = sm.add_constant(
+        np.asarray(grid, dtype="float64") - centre, has_constant="add"
+    )
+    prediction = model.get_prediction(at)
+    fitted = np.asarray(prediction.predicted_mean, dtype="float64")
+    if not want_ci:
+        return fitted, None, None
+    bounds = np.asarray(prediction.conf_int(alpha=1.0 - float(level)), dtype="float64")
+    return fitted, bounds[:, 0], bounds[:, 1]
+
+
+class RegressionPlotParams(NodeParams):
+    """
+    Parameters for RegressionPlot.
+
+    Attributes:
+        x / y: Columns fitted against each other. ``x`` may be numeric or
+            datetime; ``y`` must be numeric.
+        method: ``lowess`` (a local regression whose window is ``frac``)
+            or ``linear`` (a least-squares straight line).
+        frac: Fraction of the data used for each local LOWESS fit --
+            larger is smoother.
+        show_points: Draw the observations as well as the fit. Off by
+            default: this node is about the trend.
+        confidence_level / ci_style / n_boot: The interval around the
+            fit. A linear fit's interval is exact; a LOWESS interval is
+            bootstrapped over ``n_boot`` resamples, which costs that many
+            extra fits.
+        color_by / shape_by: A **discrete** column on either channel
+            fits one curve per category, drawn in that category's colour
+            and line style (its points, when shown, take the matching
+            marker). A continuous colour-by column colours the points
+            and leaves a single fit, since there are no groups to split.
+
+    The axis, title and legend blocks match ``matplotlib_plot``.
+    """
+
+    x: str = column_field(dtypes=("any",), description="Column for the x-axis.")
+    y: str = column_field(dtypes=("numeric",), description="Column for the y-axis.")
+    method: Literal["lowess", "linear"] = "lowess"
+    frac: float = unit_interval_field(
+        0.667,
+        lo=0.05,
+        hi=1.0,
+        visible_when=("method", "lowess"),
+        description="Fraction of the data in each local fit (larger = smoother).",
+    )
+    show_points: bool = False
+    title: str | None = None
+
+    # -- confidence interval ------------------------------------------
+    ci_style: _CI_STYLE = "band"
+    confidence_level: float = unit_interval_field(
+        0.95,
+        lo=0.5,
+        hi=0.999,
+        visible_unless=("ci_style", "none"),
+        description="Confidence level of the interval around the fit.",
+    )
+    n_boot: int = visible_field(
+        200,
+        ge=20,
+        le=2000,
+        visible_when=("method", "lowess"),
+        visible_unless=("ci_style", "none"),
+        description="Bootstrap resamples behind a LOWESS interval. statsmodels' "
+        "lowess has no interval of its own, so this is how one is obtained -- "
+        "each resample is a full refit, so a large value on a large table is slow.",
+    )
+
+    # -- colour channel -------------------------------------------------
+    color_by: str = column_field(
+        dtypes=("any",),
+        default="",
+        allow_none=True,
+        description="Fit and colour one curve per level of this column "
+        "(None = a single curve).",
+    )
+    mark_color: str = color_field(
+        suggestions=_COMMON_COLORS,
+        default=_DEFAULT_COLOR,
+        visible_when_unset="color_by",
+        description="Curve colour when not colouring by a column.",
+    )
+    colormap: str = reactive_choice_field(
+        options="colormaps",
+        depends_on="color_by",
+        default="tab10",
+        visible_when_set="color_by",
+        description="Colormap for the colour-by column.",
+    )
+
+    # -- shape channel ------------------------------------------------
+    shape_by: str = column_field(
+        dtypes=("any",),
+        default="",
+        allow_none=True,
+        description="Fit one curve per level of this (discrete) column and vary "
+        "its line style.",
+    )
+    line_style: Literal["solid", "dashed", "dash-dot", "dotted"] = visible_field(
+        "solid",
+        visible_when_unset="shape_by",
+        description="Line style of the fit (fixed).",
+    )
+    marker_shape: Literal[
+        "circle", "square", "triangle", "diamond", "plus", "cross", "star", "point"
+    ] = visible_field(
+        "circle",
+        visible_when=("show_points", "True"),
+        visible_when_unset="shape_by",
+        description="Marker shape for the observations (fixed).",
+    )
+    shape_map: Literal["assorted", "geometric", "bold", "minimal"] = visible_field(
+        "assorted",
+        visible_when_kind=("shape_by", ("categorical", "boolean")),
+        description="Series of line styles / markers assigned to a discrete "
+        "shape-by column's levels.",
+    )
+    line_width: float = 2.0
+    point_size: float = visible_field(
+        28.0,
+        visible_when=("show_points", "True"),
+        description="Marker area for the observations.",
+    )
+    alpha: float = unit_interval_field(0.9, description="Curve opacity.")
+    point_alpha: float = unit_interval_field(
+        0.55,
+        visible_when=("show_points", "True"),
+        description="Opacity of the observations, so they sit behind the fit.",
+    )
+
+    # -- axes ---------------------------------------------------------
+    x_label: str = ""
+    y_label: str = ""
+    x_min: str = axis_limit_field("Left edge of the x-axis (blank = fit to the data).")
+    x_max: str = axis_limit_field("Right edge of the x-axis (blank = fit to the data).")
+    y_min: str = axis_limit_field("Bottom edge of the y-axis (blank = fit to the data).")
+    y_max: str = axis_limit_field("Top edge of the y-axis (blank = fit to the data).")
+    axis_font_size: int = 10
+    show_grid: bool = True
+    show_box: bool = False
+    log_x: bool = False
+    log_y: bool = False
+    fig_width: float = 6.0
+    fig_height: float = 4.0
+
+    # -- title ------------------------------------------------------
+    title_font_size: int = 12
+    title_bold: bool = False
+    title_italic: bool = False
+
+    # -- legend -----------------------------------------------------
+    show_legend: bool = True
+    legend_title: str = ""
+    legend_location: _LEGEND_LOCATIONS = "best"
+    legend_font_size: int = 9
+
+
+@register_node
+class RegressionPlot(Node):
+    """
+    Fit a trend through two columns and draw it, with its confidence
+    interval.
+
+    The counterpart of a grammar-of-graphics smooth layer: what is
+    plotted is the *fit*, not the data, and the observations are an
+    option rather than the point of the chart. A discrete colour-by or
+    shape-by column fits one curve per category rather than one curve
+    through everything, which is the question people usually have when
+    they reach for this.
+    """
+
+    node_type = "regression_plot"
+    category = "grapher"
+    inputs = [Port(name="df", dtype="dataframe")]
+    outputs = [Port(name="figure", dtype="figure")]
+    params_schema = RegressionPlotParams
+    tagline = "Fit a LOWESS or linear trend (per category) with a confidence interval."
+    # As for every grapher: a Figure is not reliably hashable by joblib.
+    cacheable = False
+
+    def run(self, **inputs: Any) -> dict[str, Any]:
+        """
+        Fit and draw.
+
+        Args:
+            df: Input pandas.DataFrame (via the "df" input port).
+
+        Returns:
+            {"figure": matplotlib.figure.Figure}
+        """
+        self.validate_inputs(inputs)
+        import matplotlib
+
+        matplotlib.use("Agg")  # non-interactive backend, safe for headless runs
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        from matplotlib.colors import to_rgba
+        from pandas.api.types import (
+            is_bool_dtype,
+            is_datetime64_any_dtype,
+            is_numeric_dtype,
+        )
+
+        p = self.params
+        df = inputs["df"]
+        for col in (p.x, p.y):
+            if col not in df.columns:
+                raise ValueError(
+                    f"RegressionPlot: column {col!r} is not in the input data."
+                )
+        if not is_numeric_dtype(df[p.y]) or is_bool_dtype(df[p.y]):
+            raise ValueError(
+                f"RegressionPlot: the y column {p.y!r} must be numeric to fit a "
+                "trend through it."
+            )
+        x_is_datetime = is_datetime64_any_dtype(df[p.x])
+        if not x_is_datetime and (
+            not is_numeric_dtype(df[p.x]) or is_bool_dtype(df[p.x])
+        ):
+            raise ValueError(
+                f"RegressionPlot: the x column {p.x!r} must be numeric or datetime "
+                "to fit a trend against it."
+            )
+
+        notes: list[str] = []
+
+        def _discrete(col: str) -> tuple[list, Any] | None:
+            """(categories, codes) for a usable discrete column, else None."""
+            col = (col or "").strip()
+            if not col or col not in df.columns:
+                return None
+            series = df[col]
+            if (
+                is_numeric_dtype(series) or is_datetime64_any_dtype(series)
+            ) and not is_bool_dtype(series):
+                return None
+            categorical = series.astype("category")
+            return list(categorical.cat.categories), categorical.cat.codes.to_numpy()
+
+        # -- channels ------------------------------------------------
+        color_col = (p.color_by or "").strip()
+        shape_col = (p.shape_by or "").strip()
+        colour = _discrete(color_col)
+        shape = _discrete(shape_col)
+        colour_continuous = (
+            color_col in df.columns and colour is None and bool(color_col)
+        )
+        if colour_continuous:
+            notes.append(
+                "a continuous colour-by column can't split the fit -- one curve"
+            )
+        if shape is None and shape_col in df.columns and shape_col:
+            notes.append("shape styling needs a discrete column -- using the fixed style")
+
+        line_seq = _shape_sequence("line", p.shape_map)
+        marker_seq = _shape_sequence("scatter", p.shape_map)
+        if shape is not None and len(shape[0]) > len(line_seq):
+            notes.append(_STYLE_OVERFLOW_NOTE)
+
+        palette: list = []
+        if colour is not None:
+            cmap = plt.get_cmap(p.colormap or "tab10")
+            # A per-level palette needs a qualitative map: sampling a
+            # continuous one at 0, 1, 2 ... gives nearly identical colours.
+            if getattr(cmap, "N", 256) > 32:
+                cmap = plt.get_cmap("tab10")
+            palette = [cmap(i % cmap.N) for i in range(max(len(colour[0]), 1))]
+        single_colour = to_rgba(p.mark_color or _DEFAULT_COLOR)
+        combined = (
+            colour is not None and shape is not None and color_col == shape_col
+        )
+
+        # -- the rows each curve is fitted to ------------------------
+        x_raw = df[p.x]
+        # A datetime is fitted on its integer representation and drawn
+        # back in its own dtype. Not via a hard-coded unit: the same
+        # column can be datetime64[ns] or [us] (pandas 3 resolves many
+        # constructions to microseconds), and assuming one silently
+        # moves every date by a factor of a thousand.
+        x_dtype = x_raw.to_numpy().dtype if x_is_datetime else None
+        x_num = (
+            x_raw.astype("int64").to_numpy().astype("float64")
+            if x_is_datetime
+            else x_raw.to_numpy().astype("float64")
+        )
+        y_num = df[p.y].to_numpy().astype("float64")
+        finite = np.isfinite(x_num) & np.isfinite(y_num)
+
+        #: (colour level or -1, shape level or -1) -> row mask.
+        groups: list[tuple[int, int, Any]] = []
+        colour_codes = colour[1] if colour is not None else None
+        shape_codes = shape[1] if shape is not None else None
+        if colour is None and shape is None:
+            groups = [(-1, -1, finite)]
+        else:
+            colour_levels = range(len(colour[0])) if colour is not None else [-1]
+            shape_levels = range(len(shape[0])) if shape is not None else [-1]
+            for ci_level in colour_levels:
+                for si_level in shape_levels:
+                    if combined and ci_level != si_level:
+                        continue
+                    mask = finite.copy()
+                    if colour_codes is not None:
+                        mask &= colour_codes == ci_level
+                    if shape_codes is not None:
+                        mask &= shape_codes == si_level
+                    if mask.any():
+                        groups.append((ci_level, si_level, mask))
+
+        want_ci = p.ci_style != "none"
+        skipped = 0
+
+        with _plot_context(plt):
+            fig, ax = _new_figure(p)
+
+            if colour_continuous and p.show_points:
+                values = (
+                    df[color_col].astype("int64")
+                    if is_datetime64_any_dtype(df[color_col])
+                    else df[color_col]
+                ).to_numpy().astype("float64")
+                norm = plt.Normalize(np.nanmin(values), np.nanmax(values))
+                cmap = plt.get_cmap(p.colormap or "viridis")
+                ax.scatter(
+                    x_raw[finite], df[p.y][finite],
+                    c=values[finite], cmap=cmap, norm=norm,
+                    s=float(p.point_size),
+                    marker=_MARKER_SHAPES.get(p.marker_shape, "o"),
+                    alpha=float(p.point_alpha), linewidths=0,
+                )
+                if p.show_legend:
+                    mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                    mappable.set_array([])
+                    fig.colorbar(mappable, ax=ax, label=p.legend_title or color_col)
+
+            for ci_level, si_level, mask in groups:
+                curve_colour = (
+                    palette[ci_level] if ci_level >= 0 and palette else single_colour
+                )
+                style = (
+                    line_seq[si_level % len(line_seq)]
+                    if si_level >= 0
+                    else _LINE_STYLES.get(p.line_style, "-")
+                )
+                marker = (
+                    marker_seq[si_level % len(marker_seq)]
+                    if si_level >= 0
+                    else _MARKER_SHAPES.get(p.marker_shape, "o")
+                )
+
+                if p.show_points and not colour_continuous:
+                    ax.scatter(
+                        x_raw[mask], df[p.y][mask],
+                        color=curve_colour, s=float(p.point_size), marker=marker,
+                        alpha=float(p.point_alpha), linewidths=0,
+                    )
+
+                group_x, group_y = x_num[mask], y_num[mask]
+                if group_x.size < _MIN_FIT_POINTS or np.unique(group_x).size < 2:
+                    skipped += 1
+                    continue
+
+                grid = _fit_grid(group_x)
+                if p.method == "linear":
+                    fitted, low, high = _linear_fit_at(
+                        group_y, group_x, grid, p.confidence_level, want_ci
+                    )
+                else:
+                    fitted = _lowess_at(group_y, group_x, grid, p.frac)
+                    bounds = (
+                        _lowess_bootstrap_ci(
+                            group_y, group_x, grid,
+                            p.frac, p.confidence_level, p.n_boot,
+                        )
+                        if want_ci
+                        else None
+                    )
+                    low, high = bounds if bounds is not None else (None, None)
+
+                grid_plot = (
+                    grid.astype("int64").astype(x_dtype) if x_is_datetime else grid
+                )
+                if low is not None and high is not None:
+                    _draw_ci(ax, grid_plot, fitted, low, high, curve_colour, p.ci_style)
+                ax.plot(
+                    grid_plot, fitted,
+                    color=curve_colour, linestyle=style,
+                    linewidth=float(p.line_width), alpha=float(p.alpha),
+                )
+
+            if skipped:
+                notes.append(
+                    f"{skipped} group(s) had too few points to fit"
+                    if skipped > 1
+                    else "one group had too few points to fit"
+                )
+
+            # -- legends -------------------------------------
+            legends: list[tuple[str, list]] = []
+            if p.show_legend and colour is not None and colour[0]:
+                legends.append(
+                    (
+                        p.legend_title or color_col,
+                        _encoding_handles(
+                            "line", colour[0], colors=palette,
+                            shape_seq=line_seq if combined else None,
+                        ),
+                    )
+                )
+            if p.show_legend and shape is not None and shape[0] and not combined:
+                title = shape_col if legends else (p.legend_title or shape_col)
+                legends.append(
+                    (
+                        title,
+                        _encoding_handles(
+                            "line", shape[0], colors=None, shape_seq=line_seq
+                        ),
+                    )
+                )
+            _place_legends(ax, p, legends)
+
+            if notes:
+                fig.text(
+                    0.99, 0.01, "  ·  ".join(dict.fromkeys(notes)),
+                    ha="right", va="bottom",
+                    fontsize=max(p.legend_font_size - 2, 6), style="italic", color="0.4",
+                )
 
             _finalize_plot(fig, ax, p, default_xlabel=p.x, default_ylabel=p.y)
 
@@ -2150,6 +2759,8 @@ class _CurvePlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_x: bool = False
+    log_y: bool = False
     fig_width: float = 6.0
     fig_height: float = 5.0
     title: str | None = None
@@ -2318,6 +2929,8 @@ class CalibrationCurvePlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_x: bool = False
+    log_y: bool = False
     fig_width: float = 6.0
     fig_height: float = 5.0
     title: str | None = None
@@ -2411,6 +3024,8 @@ class LearningCurvePlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_x: bool = False
+    log_y: bool = False
     fig_width: float = 6.0
     fig_height: float = 5.0
     title: str | None = None
@@ -2999,6 +3614,8 @@ class Density2DParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_x: bool = False
+    log_y: bool = False
     fig_width: float = 6.0
     fig_height: float = 4.5
     title: str | None = None
@@ -3075,6 +3692,7 @@ class Density2D(Node):
                         data=sub, x=p.x, y=p.y, fill=bool(p.fill),
                         levels=max(int(p.levels), 2),
                         cmap=sns.light_palette(cat_colors[i], as_cmap=True), ax=ax,
+                        log_scale=(bool(p.log_x), bool(p.log_y)),
                     )
                     if p.show_points:
                         ax.scatter(sub[p.x], sub[p.y], s=6, color=cat_colors[i], alpha=0.3)
@@ -3091,9 +3709,15 @@ class Density2D(Node):
             elif p.kind == "contour":
                 import seaborn as sns
 
+                # The density is estimated in log space rather than
+                # drawn and re-scaled afterwards: switching the axis
+                # under a finished contour leaves limits that do not
+                # match the data, and blows up outright on a degenerate
+                # one.
                 sns.kdeplot(
                     data=data, x=p.x, y=p.y, fill=bool(p.fill),
                     levels=max(int(p.levels), 2), cmap=p.colormap or "viridis", ax=ax,
+                    log_scale=(bool(p.log_x), bool(p.log_y)),
                 )
                 if p.show_points:
                     ax.scatter(data[p.x], data[p.y], s=6, color="black", alpha=0.25)
@@ -3106,6 +3730,8 @@ class Density2D(Node):
                 hb = ax.hexbin(
                     data[p.x], data[p.y], gridsize=max(int(p.gridsize), 4),
                     cmap=p.colormap or "viridis",
+                    xscale="log" if p.log_x else "linear",
+                    yscale="log" if p.log_y else "linear",
                 )
                 fig.colorbar(hb, ax=ax, label="count")
                 if p.show_points:
@@ -3154,6 +3780,7 @@ class PCAScreePlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_y: bool = False
     fig_width: float = 6.0
     fig_height: float = 4.0
     title: str | None = None
@@ -3389,9 +4016,6 @@ def _apply_time_ticks(ax: Any, freq: str, fmt: str | None = None) -> None:
     for label in ax.get_xticklabels():
         label.set_rotation(30)
         label.set_horizontalalignment("right")
-
-
-_CI_STYLE = Literal["band", "lines", "errorbar", "none"]
 
 
 def _draw_ci(ax: Any, x: Any, mid: Any, low: Any, high: Any, color: Any, style: str) -> None:
@@ -3730,6 +4354,7 @@ class MultivariateTimeSeriesPlotParams(NodeParams):
     axis_font_size: int = 10
     show_grid: bool = True
     show_box: bool = False
+    log_y: bool = False
     fig_width: float = 6.5
     fig_height: float = 4.5
     title: str | None = None
@@ -3865,6 +4490,7 @@ class ForecastPlotParams(NodeParams):
 
     axis_font_size: int = 10
     show_grid: bool = True
+    log_y: bool = False
     fig_width: float = 6.5
     fig_height: float = 5.0
     title: str | None = None
@@ -3935,6 +4561,11 @@ class ForecastPlot(Node):
                 ax.set_ylabel(name, fontsize=p.axis_font_size)
                 ax.tick_params(axis="both", labelsize=p.axis_font_size)
                 ax.grid(bool(p.show_grid))
+                # This node lays out its own stack of panels instead of
+                # going through _finalize_plot, so the log toggle has to
+                # be applied to each of them here.
+                if p.log_y:
+                    ax.set_yscale("log")
             axes[0, 0].legend(fontsize=8, loc="best")
             if p.title:
                 fig.suptitle(

@@ -43,6 +43,18 @@ class NodeParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    def source_paths(self) -> tuple[str, ...]:
+        """
+        Files whose *content* this node's result depends on.
+
+        The engine caches a node on its type, parameters and inputs, and
+        a loader has no inputs -- so without this a CSV edited under an
+        unchanged path was never read again. Declared here, by the
+        parameters that know which field is a path, rather than guessed
+        by the engine from a field name.
+        """
+        return ()
+
 
 class Node(ABC):
     """

@@ -16,6 +16,7 @@ headlessly (from a script, a test, or a CLI) with no UI involved.
 
 from __future__ import annotations
 
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
@@ -24,6 +25,7 @@ import joblib
 
 from ruyso_app.core import dtformat as _dtformat
 from ruyso_app.core.registry import NodeRegistry
+from ruyso_app.engine import cache as _cache
 from ruyso_app.engine import errors as _errors
 from ruyso_app.engine import run_cache as _run_cache
 from ruyso_app.engine import settings as _settings
@@ -36,7 +38,10 @@ from ruyso_app.engine.graph import GraphValidationError, PipelineGraph
 
 
 def _execute_node(
-    node_type: str, params: dict[str, Any], inputs: dict[str, Any]
+    node_type: str,
+    params: dict[str, Any],
+    inputs: dict[str, Any],
+    source_token: tuple = (),
 ) -> dict[str, Any]:
     """
     Instantiate and run a single node — a pure function of its inputs.
@@ -53,6 +58,12 @@ def _execute_node(
         params: Raw parameter values for the node (validated here,
             when the node is constructed).
         inputs: Values for the node's input ports, keyed by port name.
+        source_token: A stamp of the files this node reads
+            (:func:`run_cache.source_token`). Unused by the body, and
+            that is the whole point: it is here to be *hashed*. A
+            loader has no inputs, so without it joblib keyed a CSV
+            loader on its path alone and never noticed the file being
+            edited under that path.
 
     Returns:
         The node's output dict, keyed by output port name.
@@ -60,13 +71,83 @@ def _execute_node(
     node_cls = NodeRegistry.get(node_type)
     node = node_cls(params=params)
     node.validate_inputs(inputs)
+    started = time.perf_counter()
     outputs = node.run(**inputs)
+    # Only reached when there was no cached result, so this is always
+    # real work: what ``cache.worth_caching`` decides the node's future
+    # by (see engine/cache.py).
+    _cache.record_compute_time(node_type, time.perf_counter() - started)
     # Datetime display formats ride along in ``DataFrame.attrs``, which
     # pandas drops for any result built from two parents (a merge, say).
     # Restoring them here covers every node at once, including ones
     # written later. Duck-typed, so no pandas import reaches the engine.
     _dtformat.carry_formats_through(outputs, inputs)
     return outputs
+
+
+class _SkipCache:
+    """
+    "Has anything feeding this node changed since it last ran?", for the
+    length of one run.
+
+    Wraps a :class:`~ruyso_app.engine.run_cache.ResultCache` together
+    with the transitive signatures it is keyed on, so both
+    :meth:`PipelineScheduler.run` and
+    :meth:`~PipelineScheduler.run_available` ask the question the same
+    way. Disabled -- every answer a miss -- when no cache was passed.
+
+    Signatures are folded *as the run goes* rather than upfront, because
+    what a node's dependents key on can depend on what it produced: see
+    ``run_cache.content_token``.
+    """
+
+    def __init__(self, graph: PipelineGraph, result_cache: ResultCache | None) -> None:
+        self.cache = result_cache
+        self.enabled = result_cache is not None
+        self._own = _signatures.pipeline_signatures(graph) if self.enabled else {}
+        self._upstream = _signatures.upstream_map(graph) if self.enabled else {}
+        self._effective: dict[str, str] = {}
+
+    def signature(self, node_id: str) -> str:
+        if not self.enabled:
+            return ""
+        return _signatures.fold_signature(
+            self._own.get(node_id, ""),
+            (self._effective.get(s, "") for s in self._upstream.get(node_id, ())),
+        )
+
+    def get(self, node_id: str, node_cls: Any, signature: str) -> dict | None:
+        """This node's previous outputs, if nothing feeding it changed."""
+        if not self.enabled or not is_skippable(node_cls):
+            return None
+        return self.cache.get(node_id, signature)
+
+    def reused(self, node_id: str, signature: str) -> None:
+        self._effective[node_id] = signature
+
+    def store(
+        self,
+        node_id: str,
+        node_cls: Any,
+        signature: str,
+        outputs: dict,
+        source_token: tuple = (),
+    ) -> None:
+        if not self.enabled:
+            return
+        if is_skippable(node_cls):
+            self.cache.put(node_id, signature, outputs)
+            self._effective[node_id] = signature
+        else:
+            # A loader or an export: its dependents must key on what it
+            # produced, not merely on how it is configured.
+            self._effective[node_id] = _run_cache.content_token(
+                signature, outputs, source_token
+            )
+
+    def prune(self, order: Any) -> None:
+        if self.enabled:
+            self.cache.prune(order)  # a deleted node keeps nothing alive
 
 
 @dataclass
@@ -129,24 +210,48 @@ class PipelineScheduler:
         self._memory = memory if memory is not None else get_memory()
         self._cached_execute = self._memory.cache(_execute_node)
 
-    def _execute(self, node_type: str, params: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+    def _execute(
+        self,
+        node_type: str,
+        params: dict[str, Any],
+        inputs: dict[str, Any],
+        source_token: tuple | None = None,
+    ) -> dict[str, Any]:
         """
-        Run a node, going through the joblib cache only if its class
-        opts into caching (``Node.cacheable``). Nodes with side
+        Run a node, going through the joblib cache only if two things
+        are true.
+
+        Its class must opt in (``Node.cacheable``): nodes with side
         effects or non-hashable inputs/outputs (e.g. MatplotlibPlot,
         ExportFigure) declare ``cacheable = False`` and are always
         re-executed directly.
+
+        And the work must be worth caching (``cache.worth_caching``):
+        joblib hashes every input before it can even say whether it
+        has an answer, so for a node that runs in 50 ms that question
+        costs more than the answer. A type is judged by what it last
+        really took, which is a per-type average of sorts -- the same
+        node fed a tiny table and a huge one is remembered by whichever
+        ran last.
+
+        ``source_token`` is folded into the cache key so a node that
+        reads a file re-runs when that file changes. Passed in by
+        ``run_available``, which needs the same stamp for the skip
+        cache; computed here otherwise.
         """
         node_cls = NodeRegistry.get(node_type)
-        if node_cls.cacheable:
-            return self._cached_execute(node_type, params, inputs)
-        return _execute_node(node_type, params, inputs)
+        if not node_cls.cacheable or not _cache.worth_caching(node_type):
+            return _execute_node(node_type, params, inputs)
+        if source_token is None:
+            source_token = _run_cache.source_token(node_cls, params)
+        return self._cached_execute(node_type, params, inputs, source_token)
 
     def run(
         self,
         graph: PipelineGraph,
         progress_callback: Callable[[int, int], None] | None = None,
         node_callback: Callable[[str, str], None] | None = None,
+        result_cache: ResultCache | None = None,
     ) -> RunReport:
         """
         Execute ``graph`` in dependency order, attempting *every* node.
@@ -164,6 +269,13 @@ class PipelineScheduler:
             node_callback: If given, called ``(node_id, phase)`` as each
                 node is reached, with ``phase`` one of
                 ``"running"`` / ``"ok"`` / ``"error"`` / ``"blocked"``.
+            result_cache: If given, a node whose *transitive* signature
+                matches its cached one is served from the cache instead
+                of being executed, exactly as in ``run_available``, and
+                is listed in ``RunReport.reused``. Loaders and exports
+                still always run (``run_cache.ALWAYS_RUN_CATEGORIES``).
+                Passing nothing -- the default -- executes every node,
+                which is what "run this whole pipeline again" means.
 
         Returns:
             A :class:`RunReport`. It unpacks as ``(outputs, errors)``,
@@ -175,6 +287,7 @@ class PipelineScheduler:
         order = graph.topological_order()
         total = len(order)
         report = RunReport()
+        skip = _SkipCache(graph, result_cache)
 
         def emit(node_id: str, phase: str) -> None:
             if node_callback is not None:
@@ -202,20 +315,36 @@ class PipelineScheduler:
                 report.blocked[node_id] = cause
                 emit(node_id, "blocked")
             else:
+                node_cls = NodeRegistry.all().get(spec.node_type)
+                signature = skip.signature(node_id)
+                cached = skip.get(node_id, node_cls, signature)
+                if cached is not None:
+                    report.outputs[node_id] = cached
+                    report.reused.add(node_id)
+                    skip.reused(node_id, signature)
+                    emit(node_id, "ok")
+                    if progress_callback is not None:
+                        progress_callback(index, total)
+                    continue
                 emit(node_id, "running")
                 inputs = self._collect_inputs(graph, node_id, report.outputs)
+                token = _run_cache.source_token(node_cls, spec.params)
                 try:
                     report.outputs[node_id] = self._execute(
-                        spec.node_type, spec.params, inputs
+                        spec.node_type, spec.params, inputs, token
                     )
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
                     report.errors[node_id] = self._describe(exc, spec, inputs)
                     emit(node_id, "error")
                 else:
                     emit(node_id, "ok")
+                    skip.store(
+                        node_id, node_cls, signature, report.outputs[node_id], token
+                    )
             if progress_callback is not None:
                 progress_callback(index, total)
 
+        skip.prune(order)
         return report
 
     @staticmethod
@@ -316,13 +445,7 @@ class PipelineScheduler:
         except GraphValidationError:
             return report
 
-        # Signatures are folded *as we go* rather than computed upfront,
-        # because what a node's dependents key on can depend on what it
-        # produced -- see run_cache.content_token.
-        caching = result_cache is not None
-        own_signatures = _signatures.pipeline_signatures(graph) if caching else {}
-        upstream_of = _signatures.upstream_map(graph) if caching else {}
-        effective: dict[str, str] = {}
+        skip = _SkipCache(graph, result_cache)
 
         for node_id in order:
             spec = graph.get_node(node_id)
@@ -362,48 +485,31 @@ class PipelineScheduler:
             # a stale result under a node whose loader had just started
             # erroring -- a green node showing yesterday's data below a
             # red one.
-            signature = ""
-            skippable = False
-            if caching:
-                signature = _signatures.fold_signature(
-                    own_signatures.get(node_id, ""),
-                    (effective.get(s, "") for s in upstream_of.get(node_id, ())),
-                )
-                skippable = is_skippable(node_cls)
-                if skippable:
-                    cached = result_cache.get(node_id, signature)
-                    if cached is not None:
-                        report.outputs[node_id] = cached
-                        report.reused.add(node_id)
-                        effective[node_id] = signature
-                        emit(node_id, "ok")
-                        continue
+            signature = skip.signature(node_id)
+            cached = skip.get(node_id, node_cls, signature)
+            if cached is not None:
+                report.outputs[node_id] = cached
+                report.reused.add(node_id)
+                skip.reused(node_id, signature)
+                emit(node_id, "ok")
+                continue
 
             emit(node_id, "running")
+            token = _run_cache.source_token(node_cls, spec.params)
             try:
                 report.outputs[node_id] = self._execute(
-                    spec.node_type, spec.params, inputs
+                    spec.node_type, spec.params, inputs, token
                 )
             except Exception as exc:  # noqa: BLE001 - collected, not raised
                 report.errors[node_id] = self._describe(exc, spec, inputs)
                 emit(node_id, "error")
             else:
                 emit(node_id, "ok")
-                if caching:
-                    outputs = report.outputs[node_id]
-                    if skippable:
-                        result_cache.put(node_id, signature, outputs)
-                        effective[node_id] = signature
-                    else:
-                        # A loader or an export: its dependents must key
-                        # on what it produced, not merely on how it is
-                        # configured.
-                        effective[node_id] = _run_cache.content_token(
-                            signature, outputs
-                        )
+                skip.store(
+                    node_id, node_cls, signature, report.outputs[node_id], token
+                )
 
-        if caching:
-            result_cache.prune(order)  # a deleted node keeps nothing alive
+        skip.prune(order)
         return report
 
     @staticmethod

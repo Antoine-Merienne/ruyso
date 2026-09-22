@@ -375,6 +375,14 @@ class ColormapDesigner(QDialog):
         self._kind_cont.toggled.connect(self._on_kind_changed)
 
         self._seed = QComboBox()
+        # Choosing in the list applies it there and then. The button is
+        # kept for seeding the *same* map again after edits, but picking
+        # a colormap and seeing nothing happen reads as "seeding is
+        # broken" -- and the bar's own default happens to be a plain
+        # blue-to-red gradient, so an unapplied seed looks exactly like
+        # somebody's own saved colormap. ``activated`` fires only for a
+        # real choice, never when the list is refilled in code.
+        self._seed.activated.connect(lambda _index: self._apply_seed())
         seed_apply = QPushButton("Seed")
         seed_apply.clicked.connect(self._apply_seed)
         reverse_btn = QPushButton("Reverse")

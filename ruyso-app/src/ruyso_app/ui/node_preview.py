@@ -1,26 +1,30 @@
 """
 On-canvas figure previews for nodes that produce or consume a figure
-(grapher nodes, and figure sinks such as
-``export_figure``).
+(grapher nodes, and figure sinks such as ``export_figure``).
 
-Design decision (spec section 8 -- "a window appears behind / attached
-to the node"): the earlier version embedded a widget *inside* the node
-via NodeGraphQt's ``add_custom_widget``. That was replaced because an
-always-on embedded canvas is heavy and clutters the graph. Instead:
+Each eligible node gets a **preview card** beneath it
+(:class:`~ui.preview_card.PreviewCard`): an item in the canvas scene,
+placed from the node's own ``itemChange`` so it moves in the same frame
+as the node, stacked above the wires and below every node, and drawn as
+a rounded card around the figure's white plate. It replaced a floating
+``QWidget`` over the viewport that a timer re-placed every 60 ms -- the
+preview trailed a dragged node by up to four frames, painted over
+neighbouring nodes, and was rasterised at logical size, so it was blurry
+on a 2x screen.
 
-* Each eligible node gets a small **floating thumbnail** parented to
-  the NodeGraphQt viewport, positioned just beneath the node and
-  scaled with it. Its geometry is re-synced to the node on a light
-  timer (plus immediately on scroll), which is simpler and steadier
-  than trying to push a ``QWidget`` behind ``QGraphicsItem`` nodes
-  (Qt always paints child widgets over the scene, so a true "behind"
-  is not possible -- "attached beneath" is the honest version).
-* Before a run the thumbnail shows a placeholder
-  ("run pipeline to render graph" / "... test"); after a run it shows
-  a bitmap of the resolved figure.
-* Clicking a thumbnail opens a **resizable window** sized to the
-  figure's own aspect ratio (:class:`FigureWindow`), which is how you
-  actually read the plot when several are on the canvas.
+* Before a run a card shows a placeholder line; after a run, a bitmap of
+  the resolved figure at the resolution it is shown at.
+* Clicking a card selects its node and opens a **resizable window** sized
+  to the figure's own aspect ratio (:class:`FigureWindow`), which is how
+  you actually read the plot when several are on the canvas.
+* The chevron on a figure node's name bar collapses its card; the flag is
+  kept on the node item and saved with the pipeline (``canvas`` section,
+  see ``ui/graph_bridge.canvas_layout``).
+
+Clicks on a card or a chevron are taken in a viewport event filter, before
+NodeGraphQt sees them: its viewer treats anything that is not a node or a
+wire as empty canvas and starts a rubber band without ever handing the
+press to the scene.
 
 Only this module knows how to turn a run's ``{node_id: {port: value}}``
 outputs into "the figure for this node".
@@ -30,15 +34,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from NodeGraphQt import BaseNode, NodeGraph
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QImage, QPixmap
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from ruyso_app.core.figure_lock import figure_guard
 from ruyso_app.engine import settings
+from ruyso_app.ui import render_queue
+from ruyso_app.ui.node_item import RuysoNodeItem
+from ruyso_app.ui.preview_card import BASE_WIDTH, GAP, PreviewCard
 
 #: dtype used by core ``Port``s that carry a matplotlib figure.
 FIGURE_DTYPE = "figure"
@@ -47,31 +54,10 @@ FIGURE_DTYPE = "figure"
 #: figure-typed (a statistical test renders a table/plot of results).
 _ALWAYS_PREVIEW_CATEGORIES = frozenset({"grapher"})
 
-#: Thumbnail size on screen at 1:1 zoom, in pixels.
-_THUMB_W = 180
-_THUMB_H = 120
-
-#: Timer interval (ms) for re-syncing thumbnail positions to their nodes,
-#: while the canvas is actually being manipulated.
-_SYNC_INTERVAL_MS = 60
-
-#: How long after the last canvas interaction the sync timer keeps
-#: running. Long enough to cover a gesture's inertia and the tail of a
-#: zoom animation; short enough that an idle canvas costs nothing.
-_SETTLE_MS = 300
-
-#: Events that mean the canvas is (or is about to be) moving.
-_WAKING_EVENTS = frozenset(
-    {
-        QEvent.Type.MouseButtonPress,
-        QEvent.Type.MouseMove,
-        QEvent.Type.MouseButtonRelease,
-        QEvent.Type.Wheel,
-        QEvent.Type.NativeGesture,
-        QEvent.Type.Resize,
-        QEvent.Type.KeyPress,
-    }
-)
+#: How long after the last zoom-driven repaint a card is re-rasterised
+#: for its new size. Rendering a figure is far too slow to do on every
+#: frame of a pinch; the card shows its current bitmap scaled meanwhile.
+_UPGRADE_DELAY_MS = 150
 
 
 # --------------------------------------------------------------------------
@@ -185,10 +171,9 @@ def figure_axis_limits(figure: Figure | None) -> dict[str, str]:
         return {}
     ax = figure.axes[0]
     limits: dict[str, str] = {}
-    for prefix, (low, high), axis in (
-        ("x", ax.get_xlim(), ax.xaxis),
-        ("y", ax.get_ylim(), ax.yaxis),
-    ):
+    with figure_guard():
+        bounds = (("x", ax.get_xlim(), ax.xaxis), ("y", ax.get_ylim(), ax.yaxis))
+    for prefix, (low, high), axis in bounds:
         as_dates = _is_date_axis(axis)
         limits[f"{prefix}_min"] = _format_limit(low, as_dates)
         limits[f"{prefix}_max"] = _format_limit(high, as_dates)
@@ -226,13 +211,82 @@ def _format_limit(value: float, as_dates: bool) -> str:
     return str(int(rounded)) if rounded == int(rounded) else f"{rounded:g}"
 
 
-def figure_to_pixmap(figure: Figure) -> QPixmap:
-    """Rasterize ``figure`` to a QPixmap without disturbing its Qt canvas."""
-    agg = FigureCanvasAgg(figure)
-    agg.draw()
-    width, height = agg.get_width_height()
-    image = QImage(bytes(agg.buffer_rgba()), width, height, QImage.Format_RGBA8888)
-    return QPixmap.fromImage(image.copy())
+def figure_to_png_bytes(figure: Figure, width_px: int | None = None) -> bytes:
+    """
+    Render ``figure`` to PNG data ``width_px`` pixels wide (default: its
+    own size at its own dpi).
+
+    Through ``savefig`` with an explicit dpi rather than by constructing
+    a ``FigureCanvasAgg`` around the figure: that replaces
+    ``figure.canvas`` for good, while ``savefig`` swaps a canvas in only
+    for the call -- so a figure that is also open in a window keeps its
+    own canvas.
+
+    Bytes rather than a QPixmap because this is what runs on the render
+    thread (``ui/render_queue.py``): a QPixmap may only be built on the
+    GUI thread, and building one from ready PNG data costs nothing.
+    """
+    import io
+
+    with figure_guard():
+        width_in, _height_in = figure.get_size_inches()
+        if width_px:
+            dpi = max(float(width_px) / max(float(width_in), 0.1), 10.0)
+        else:
+            dpi = figure.get_dpi()
+        buffer = io.BytesIO()
+        figure.savefig(buffer, format="png", dpi=dpi)
+        return buffer.getvalue()
+
+
+def png_bytes_to_pixmap(data: bytes) -> QPixmap:
+    """The GUI-thread half of a render: PNG data to a QPixmap."""
+    return QPixmap.fromImage(QImage.fromData(data, "PNG"))
+
+
+def figure_to_pixmap(figure: Figure, width_px: int | None = None) -> QPixmap:
+    """Render ``figure`` straight to a QPixmap, on the calling thread."""
+    return png_bytes_to_pixmap(figure_to_png_bytes(figure, width_px=width_px))
+
+
+#: Points on one artist past which it is embedded in the SVG as a
+#: bitmap instead of one vector shape per point. A 400k-point scatter
+#: is a 42 MB file that matplotlib needs 1.8 s to write and Qt 2.7 s to
+#: parse -- and then redraws slowly for ever after; the same plot with
+#: its dots flattened is 50 KB.
+_SVG_RASTER_MIN = 10_000
+
+#: Resolution of those embedded bitmaps. Twice the default, so a block
+#: exported to PDF at twice its on-screen size still looks sharp.
+_SVG_RASTER_DPI = 200
+
+
+def _artist_point_count(artist: Any) -> int:
+    """How many points an artist draws, or 0 when it will not say."""
+    try:
+        offsets = artist.get_offsets()
+        if offsets is not None and len(offsets) > 1:
+            return len(offsets)
+    except (AttributeError, TypeError):
+        pass
+    for accessor in ("get_paths", "get_xdata"):
+        try:
+            return len(getattr(artist, accessor)())
+        except (AttributeError, TypeError):
+            continue
+    return 0
+
+
+def _dense_artists(figure: Figure) -> list:
+    """The artists in ``figure`` that carry too many points to vectorise."""
+    dense = []
+    for axes in figure.get_axes():
+        for artist in list(axes.collections) + list(axes.lines):
+            if artist.get_rasterized():
+                continue  # already flattened by whoever drew it
+            if _artist_point_count(artist) > _SVG_RASTER_MIN:
+                dense.append(artist)
+    return dense
 
 
 def figure_to_svg_bytes(figure: Figure) -> bytes:
@@ -253,9 +307,27 @@ def figure_to_svg_bytes(figure: Figure) -> bytes:
     import matplotlib.pyplot as plt
 
     buffer = io.BytesIO()
-    with plt.rc_context({"svg.fonttype": "none"}):
-        figure.savefig(buffer, format="svg", bbox_inches="tight")
-    return buffer.getvalue()
+    # A dense point cloud becomes one embedded bitmap; the axes, the
+    # text and everything else stay vector. The flags go back on
+    # afterwards, because the figure is also shown elsewhere -- and the
+    # dpi is only passed when something was flattened, so an ordinary
+    # plot's file is exactly what it was before.
+    with figure_guard():
+        dense = _dense_artists(figure)
+        for artist in dense:
+            artist.set_rasterized(True)
+        try:
+            with plt.rc_context({"svg.fonttype": "none"}):
+                figure.savefig(
+                    buffer,
+                    format="svg",
+                    bbox_inches="tight",
+                    **({"dpi": _SVG_RASTER_DPI} if dense else {}),
+                )
+        finally:
+            for artist in dense:
+                artist.set_rasterized(False)
+        return buffer.getvalue()
 
 
 # --------------------------------------------------------------------------
@@ -296,7 +368,11 @@ def window_size_for(figure: Figure) -> QSize:
     if cached is not None:
         return QSize(cached)
 
-    width_in, height_in = figure.get_size_inches()
+    # Under the guard, and memoised only from a reading taken there:
+    # mid-save a 6.0 x 4.0 figure reads as 5.953 x 3.917, and that is
+    # the size the window would then keep for good.
+    with figure_guard():
+        width_in, height_in = figure.get_size_inches()
     width = max(_MIN_WINDOW_W, round(width_in * _WINDOW_DPI))
     height = max(_MIN_WINDOW_H, round(height_in * _WINDOW_DPI))
 
@@ -316,6 +392,21 @@ def window_size_for(figure: Figure) -> QSize:
     except AttributeError:  # pragma: no cover - Figure always allows this
         pass
     return size
+
+
+class _GuardedCanvas(FigureCanvasQTAgg):
+    """
+    A live canvas that paints under the figure guard.
+
+    A window draws its figure on the GUI thread whenever Qt asks, which
+    can land in the middle of the run thread building the *next*
+    figure -- and matplotlib's rcParams are global, so the window then
+    paints with half of somebody else's style.
+    """
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        with figure_guard():
+            super().paintEvent(event)
 
 
 class FigureWindow(QWidget):
@@ -352,7 +443,7 @@ class FigureWindow(QWidget):
             self._layout.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
-        self._canvas = FigureCanvasQTAgg(figure)
+        self._canvas = _GuardedCanvas(figure)
         self._layout.addWidget(self._canvas)
         self._canvas.draw_idle()
 
@@ -366,140 +457,71 @@ class FigureWindow(QWidget):
         self.activateWindow()
 
 
-class FigureThumbnail(QWidget):
-    """Small preview pinned to a node; click to open the full figure window."""
+def _screen_ratio() -> float:
+    """The primary screen's device pixel ratio (1.0 when there is none)."""
+    screen = QGuiApplication.primaryScreen()
+    return float(screen.devicePixelRatio()) if screen is not None else 1.0
 
-    #: Emitted (with the node id) when the thumbnail is clicked.
-    clicked = Signal(str)
 
-    def __init__(self, node_id: str, placeholder: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.node_id = node_id
-        self._figure: Figure | None = None
-        self._pixmap: QPixmap | None = None
-
-        self._label = QLabel(placeholder, self)
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setWordWrap(True)
-        self._label.setStyleSheet(
-            "background: rgba(20,20,20,190); color: rgba(255,255,255,220);"
-            " border: 1px solid rgba(255,255,255,60); font-size: 10px;"
-        )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._label)
-        self.resize(_THUMB_W, _THUMB_H)
-
-    def has_figure(self) -> bool:
-        return self._figure is not None
-
-    def figure(self) -> Figure | None:
-        return self._figure
-
-    def show_placeholder(self, text: str) -> None:
-        self._figure = None
-        self._pixmap = None
-        self._label.setPixmap(QPixmap())
-        self._label.setText(text)
-
-    def show_figure(self, figure: Figure) -> None:
-        """
-        Draw ``figure``, unless it is the one already drawn.
-
-        The skip cache hands an unchanged grapher's *same* Figure object
-        back rather than re-running it, so identity is exactly the right
-        question here: same object, same pixels, and rasterising it
-        again through an Agg canvas would be pure waste on every
-        keystroke-triggered background run.
-        """
-        if figure is self._figure and self._pixmap is not None:
-            return
-        self._figure = figure
-        self._pixmap = figure_to_pixmap(figure)
-        self._label.setText("")
-        self._rescale_pixmap()
-
-    def resizeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
-        super().resizeEvent(event)
-        self._rescale_pixmap()
-
-    def mousePressEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
-        # Accept, and do NOT chain to QWidget.mousePressEvent: the base
-        # implementation *ignores* the event, which then propagates to
-        # the parent -- the NodeGraphQt viewport -- which reads it as a
-        # click on empty canvas and clears the selection. Opening a
-        # figure used to deselect its own node and blank the Options
-        # panel because of that.
-        self.clicked.emit(self.node_id)
-        event.accept()
-
-    def _rescale_pixmap(self) -> None:
-        if self._pixmap is None or self._pixmap.isNull():
-            return
-        self._label.setPixmap(
-            self._pixmap.scaled(
-                self._label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-        )
+#: Which half of the shared render queue a job belongs to (the Dashboard
+#: tab puts its SVG jobs on the same thread).
+_CARD_JOB = "card"
 
 
 # --------------------------------------------------------------------------
-# overlay manager
+# preview manager
 # --------------------------------------------------------------------------
 
 
 class NodePreviewOverlay(QObject):
     """
-    Owns one :class:`FigureThumbnail` per figure-bearing node on a graph
-    and keeps each pinned beneath its node as the canvas pans/zooms.
+    Owns one :class:`~ui.preview_card.PreviewCard` per figure-bearing node
+    on a graph, and the pop-out :class:`FigureWindow`s.
 
-    Also owns the pop-out :class:`FigureWindow`s -- **one per node**,
-    hidden on close and reused, so clicking a figure twice raises the
-    window it already has rather than stacking copies (the old list of
-    windows was only ever appended to, so every window ever opened was
-    kept alive for the session).
+    Windows are **one per node**, hidden on close and reused, so clicking a
+    figure twice raises the window it already has rather than stacking
+    copies.
     """
 
-    #: Emitted with a node id when its figure thumbnail is clicked, so
-    #: ``MainWindow`` can select that node and fill the Options panel --
-    #: clicking a figure means "I want to work on this plot".
+    #: Emitted with a node id when its preview is clicked, so ``MainWindow``
+    #: can select that node and fill the Options panel -- clicking a figure
+    #: means "I want to work on this plot".
     node_activated = Signal(str)
+    #: Emitted when a preview is collapsed or expanded from its chevron.
+    #: That flag is saved with the pipeline, so it is an edit to the document.
+    layout_changed = Signal()
 
     def __init__(self, graph: NodeGraph) -> None:
         super().__init__()
         self._graph = graph
         self._viewer = graph.viewer()
         self._viewport = self._viewer.viewport()
-        self._thumbs: dict[str, FigureThumbnail] = {}
+        self._cards: dict[str, PreviewCard] = {}
+        #: node id -> its node item, so a deleted node's listener can be
+        #: detached without the node itself.
+        self._views: dict[str, Any] = {}
         self._windows: dict[str, FigureWindow] = {}
         self._outputs: dict[str, dict] = {}
+        #: ``(kind, node id)`` of a press this filter took, awaiting release.
+        self._pressed: tuple[str, str] | None = None
 
-        # Thumbnails are plain widgets over the QGraphicsView, so nothing
-        # moves them when the canvas does -- they have to be re-placed on
-        # a timer. It used to tick every 60ms for the life of the app,
-        # burning a wakeup 16 times a second to re-place widgets that had
-        # not moved. Now it runs only while the canvas is being
-        # manipulated, and stops shortly after (see _wake).
-        self._timer = QTimer(self)
-        self._timer.setInterval(_SYNC_INTERVAL_MS)
-        self._timer.timeout.connect(self.sync_positions)
-        self._idle = QTimer(self)
-        self._idle.setSingleShot(True)
-        self._idle.setInterval(_SETTLE_MS)
-        self._idle.timeout.connect(self._timer.stop)
+        render_queue.queue().rendered.connect(self._on_rendered)
+
+        self._upgrades: set[str] = set()
+        self._upgrade_timer = QTimer(self)
+        self._upgrade_timer.setSingleShot(True)
+        self._upgrade_timer.setInterval(_UPGRADE_DELAY_MS)
+        self._upgrade_timer.timeout.connect(self._run_upgrades)
 
         graph.node_created.connect(self._on_node_created)
         graph.nodes_deleted.connect(self._on_nodes_deleted)
         graph.session_changed.connect(lambda *_: self.clear())
-        self._viewer.horizontalScrollBar().valueChanged.connect(self.sync_positions)
-        self._viewer.verticalScrollBar().valueChanged.connect(self.sync_positions)
         self._viewport.installEventFilter(self)
-        self._viewer.installEventFilter(self)
 
         for node in graph.all_nodes():
             self._on_node_created(node)
 
-    # -- lifecycle ----------------------------------------------------------
+    # -- preferences -----------------------------------------------------
 
     def thumbnails_enabled(self) -> bool:
         return bool(settings.get("appearance.node_thumbnails"))
@@ -508,61 +530,68 @@ class NodePreviewOverlay(QObject):
         try:
             width = int(settings.get("appearance.thumbnail_width"))
         except (TypeError, ValueError):
-            return _THUMB_W
+            return int(BASE_WIDTH)
         return max(60, min(width, 600))
 
-    def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802
-        """Wake the position sync while the canvas is being manipulated."""
-        if event.type() in _WAKING_EVENTS:
-            self._wake()
-        return False  # never consume: the canvas still needs these
-
-    def _wake(self) -> None:
-        """
-        Run the sync for the next :data:`_SETTLE_MS`, refreshed on each
-        event -- so a continuous drag keeps it running and letting go
-        stops it, without either end needing an explicit signal.
-        """
-        if not self.thumbnails_enabled() or not self._thumbs:
-            return
-        if not self._timer.isActive():
-            self._timer.start()
-        self._idle.start()
-
     def apply_preferences(self) -> None:
-        """Show or hide the thumbnails, and re-apply their size."""
-        visible = self.thumbnails_enabled()
-        for thumb in self._thumbs.values():
-            thumb.setVisible(visible)
-        if visible:
-            self.sync_positions()
-            self._wake()
-        else:
-            self._timer.stop()  # nothing to keep in step
-            self._idle.stop()
+        """Show or hide the cards, and re-apply their size."""
+        for view in list(self._views.values()):
+            self._place(view)
+
+    def apply_theme(self) -> None:
+        """Repaint every card in the active theme's colours."""
+        for card in self._cards.values():
+            card.update()
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def cards(self) -> dict[str, PreviewCard]:
+        """node id -> card, for callers and tests."""
+        return dict(self._cards)
 
     def _on_node_created(self, node: BaseNode) -> None:
-        if not is_figure_node(node) or node.id in self._thumbs:
+        if not is_figure_node(node) or node.id in self._cards:
             return
+        view = node.view
         core_cls = type(node).CORE_NODE_CLASS
-        thumb = FigureThumbnail(
-            node.id, placeholder_text_for_category(core_cls.category), self._viewport
+        card = PreviewCard(
+            node.id,
+            placeholder_text_for_category(core_cls.category),
+            self._request_render,
         )
-        thumb.clicked.connect(self._open_window)
-        self._thumbs[node.id] = thumb
-        thumb.setVisible(self.thumbnails_enabled())
-        self.sync_positions()
-        self._wake()
+        card.request_upgrade = self._request_upgrade
+        self._viewer.scene().addItem(card)
+        self._cards[node.id] = card
+        self._views[node.id] = view
+        if isinstance(view, RuysoNodeItem):
+            view.has_preview = True
+            view.geometry_listener = self._place
+            view.update()
+        # A node brought back by undo gets its picture back straight away.
+        figure = resolve_figure(node, self._outputs) if self._outputs else None
+        if figure is not None:
+            card.set_figure(figure, _screen_ratio())
+        self._place(view)
 
     def _on_nodes_deleted(self, node_ids: list[str]) -> None:
         for node_id in node_ids:
-            thumb = self._thumbs.pop(node_id, None)
-            if thumb is not None:
-                thumb.deleteLater()
+            self._drop_card(node_id)
             self._close_window(node_id)
-        if not self._thumbs:
-            self._timer.stop()
-            self._idle.stop()
+
+    def _drop_card(self, node_id: str) -> None:
+        card = self._cards.pop(node_id, None)
+        view = self._views.pop(node_id, None)
+        self._upgrades.discard(node_id)
+        if view is not None and getattr(view, "geometry_listener", None) == self._place:
+            view.geometry_listener = None
+        if card is None:
+            return
+        try:
+            scene = card.scene()
+            if scene is not None:
+                scene.removeItem(card)
+        except RuntimeError:  # the scene is already being torn down
+            pass
 
     def _close_window(self, node_id: str) -> None:
         """Drop the pop-out window of a node that no longer exists."""
@@ -572,28 +601,50 @@ class NodePreviewOverlay(QObject):
             window.deleteLater()
 
     def clear(self) -> None:
-        for thumb in self._thumbs.values():
-            thumb.deleteLater()
-        self._thumbs.clear()
+        for node_id in list(self._cards):
+            self._drop_card(node_id)
         for node_id in list(self._windows):
             self._close_window(node_id)
-        self._timer.stop()
-        self._idle.stop()
+        self._upgrade_timer.stop()
 
-    # -- content ----------------------------------------------------------
+    # -- placement -------------------------------------------------------
+
+    def _place(self, view: Any) -> None:
+        """
+        Put a node's card just beneath it.
+
+        Called from the node item's ``itemChange`` / ``draw_node`` -- in the
+        same frame the node moves or changes size -- which is what keeps a
+        dragged node and its preview together.
+        """
+        card = self._cards.get(getattr(view, "id", None))
+        if card is None:
+            return
+        try:
+            rect = view.sceneBoundingRect()
+        except RuntimeError:  # the node item is already gone
+            return
+        card.set_width(rect.width() * self.thumbnail_width() / BASE_WIDTH)
+        card.setPos(rect.left(), rect.bottom() + GAP)
+        card.setVisible(
+            self.thumbnails_enabled() and not getattr(view, "preview_collapsed", False)
+        )
+
+    # -- content ---------------------------------------------------------
 
     def set_run_outputs(self, outputs: dict[str, dict]) -> None:
-        """Refresh every thumbnail -- and any open window -- from a run."""
+        """Refresh every card -- and any open window -- from a run."""
         self._outputs = outputs
+        ratio = _screen_ratio()
         node_by_id = {n.id: n for n in self._graph.all_nodes()}
-        for node_id, thumb in self._thumbs.items():
+        for node_id, card in self._cards.items():
             node = node_by_id.get(node_id)
             figure = resolve_figure(node, outputs) if node is not None else None
             if figure is not None:
-                thumb.show_figure(figure)
-            else:
+                card.set_figure(figure, ratio)
+            elif node is not None:
                 core_cls = type(node).CORE_NODE_CLASS
-                thumb.show_placeholder(placeholder_text_for_category(core_cls.category))
+                card.show_placeholder(placeholder_text_for_category(core_cls.category))
 
             # An open pop-out follows the re-render, so editing a plot's
             # params in the Options panel updates the big figure live.
@@ -601,46 +652,130 @@ class NodePreviewOverlay(QObject):
             if window is not None and figure is not None:
                 window.set_figure(figure)
 
-    # -- geometry ----------------------------------------------------------
+    # -- rendering -------------------------------------------------------
 
-    def sync_positions(self, *_args: object) -> None:
-        """Move/scale every thumbnail to sit just beneath its node."""
-        if not self.thumbnails_enabled():
+    def _request_render(self, node_id: str, figure: Figure, pixels: int) -> None:
+        """A card wants a bitmap: queue it for the render thread."""
+        render_queue.queue().submit(
+            (_CARD_JOB, node_id),
+            figure,
+            lambda fig: (pixels, figure_to_png_bytes(fig, width_px=pixels)),
+        )
+
+    def _on_rendered(self, key: Any, figure: Figure, result: Any) -> None:
+        """A finished render, back on the GUI thread."""
+        kind, node_id = key
+        if kind != _CARD_JOB:
+            return  # the dashboard's own jobs share this queue
+        card = self._cards.get(node_id)
+        if card is None:
             return
-        node_by_id = {n.id: n for n in self._graph.all_nodes()}
-        preferred = self.thumbnail_width()
-        for node_id, thumb in self._thumbs.items():
-            node = node_by_id.get(node_id)
-            if node is None:
+        if result is None:  # the render failed; let the card ask again
+            card.render_failed(figure)
+            return
+        pixels, data = result
+        card.apply_render(figure, pixels, png_bytes_to_pixmap(data))
+
+    def _request_upgrade(self, node_id: str) -> None:
+        """A card's bitmap no longer suits the zoom: re-render once it settles."""
+        self._upgrades.add(node_id)
+        self._upgrade_timer.start()  # restarted by every request: a debounce
+
+    def _run_upgrades(self) -> None:
+        pending, self._upgrades = self._upgrades, set()
+        for node_id in pending:
+            card = self._cards.get(node_id)
+            if card is not None and card.wanted_px:
+                card.rasterise_at(card.wanted_px)
+
+    # -- collapsing ------------------------------------------------------
+
+    def is_collapsed(self, node_id: str) -> bool:
+        return bool(getattr(self._views.get(node_id), "preview_collapsed", False))
+
+    def toggle_collapsed(self, node_id: str) -> None:
+        """Collapse or expand one node's preview, from its chevron."""
+        view = self._views.get(node_id)
+        if not isinstance(view, RuysoNodeItem):
+            return
+        view.set_preview_collapsed(not view.preview_collapsed)  # re-places the card
+        self.layout_changed.emit()
+
+    # -- clicks ------------------------------------------------------------
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802
+        """
+        Take left clicks on a card or a chevron before NodeGraphQt does.
+
+        Acts on release, over the same target as the press, like a button:
+        pressing on a card and dragging off it does nothing. The matching
+        release is consumed too, so the viewer never sees half a click.
+        """
+        etype = event.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.LeftButton or event.modifiers() != Qt.NoModifier:
+                return False
+            target = self.target_at(event.position().toPoint())
+            if target is None:
+                return False
+            self._pressed = target
+            return True
+        if etype == QEvent.Type.MouseButtonRelease and self._pressed is not None:
+            if event.button() != Qt.LeftButton:
+                return False
+            pressed, self._pressed = self._pressed, None
+            if self.target_at(event.position().toPoint()) == pressed:
+                self._activate(*pressed)
+            return True
+        if etype == QEvent.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
+            # The first click already acted; a double-click must not also
+            # reach NodeGraphQt, which would open its name editor.
+            return self.target_at(event.position().toPoint()) is not None
+        return False
+
+    def target_at(self, viewport_pos: QPoint) -> tuple[str, str] | None:
+        """
+        What a click at ``viewport_pos`` would hit: ``("card", node_id)``,
+        ``("chevron", node_id)``, or ``None`` for anything else.
+
+        Walks the scene's items topmost first, so a node lying over a card
+        wins -- a click on a node's body is the node's, whatever is behind.
+        """
+        scene_pos = self._viewer.mapToScene(viewport_pos)
+        for item in self._viewer.scene().items(scene_pos):
+            if isinstance(item, PreviewCard):
+                if item.isVisible() and item.node_id in self._cards:
+                    return ("card", item.node_id)
                 continue
-            scene_rect = node.view.sceneBoundingRect()
-            top_left = self._viewer.mapFromScene(scene_rect.bottomLeft())
-            node_px = self._viewer.mapFromScene(scene_rect.topRight()).x() - top_left.x()
-            # Track the node's on-screen width so the thumbnail scales
-            # with zoom, but let the preference set how big it is
-            # relative to the node.
-            width_px = max(60, int(node_px * preferred / _THUMB_W))
-            height_px = int(width_px * _THUMB_H / _THUMB_W)
-            thumb.setGeometry(top_left.x(), top_left.y() + 4, int(width_px), height_px)
+            top = item.topLevelItem()
+            if isinstance(top, RuysoNodeItem):
+                if top.id in self._cards and top.chevron_hit(scene_pos):
+                    return ("chevron", top.id)
+                return None
+        return None
+
+    def _activate(self, kind: str, node_id: str) -> None:
+        if kind == "chevron":
+            self.toggle_collapsed(node_id)
+        else:
+            self._open_window(node_id)
 
     # -- window ----------------------------------------------------------
 
     def _open_window(self, node_id: str) -> None:
         """Raise this node's figure window, creating it the first time."""
-        # Selection first: a click on a figure is a click on its plot, and
-        # the thumbnail no longer lets the event fall through to the
-        # canvas (which used to clear the selection instead).
+        # Selection first: a click on a figure is a click on its plot.
         self.node_activated.emit(node_id)
 
-        thumb = self._thumbs.get(node_id)
-        if thumb is None or thumb.figure() is None:
+        card = self._cards.get(node_id)
+        if card is None or card.figure() is None:
             return
         window = self._windows.get(node_id)
         if window is None:
-            window = FigureWindow(thumb.figure(), title=self._window_title(node_id))
+            window = FigureWindow(card.figure(), title=self._window_title(node_id))
             self._windows[node_id] = window
         else:
-            window.set_figure(thumb.figure())
+            window.set_figure(card.figure())
             window.setWindowTitle(self._window_title(node_id))
         window.show_at_configured_size()
 

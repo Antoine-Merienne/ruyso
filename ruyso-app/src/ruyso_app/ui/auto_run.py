@@ -143,6 +143,23 @@ class AutoRunController(QObject):
     def is_user_enabled(self) -> bool:
         return self._user_enabled
 
+    def cache_snapshot(self) -> ResultCache:
+        """
+        A detached copy of what previous runs computed.
+
+        Handed to a manual run so pressing Run does not redo work
+        nothing has changed for; the window gives the filled copy back
+        through :meth:`adopt_cache`.
+        """
+        return self._cache.snapshot()
+
+    def adopt_cache(self, cache: ResultCache) -> None:
+        """Take a finished run's results as the ones to reuse from now on."""
+        self._cache = cache
+        # Any background run still in flight was started from an older
+        # copy; letting it land would throw this one away.
+        self._pending_cache = None
+
     def interrupt(self) -> None:
         """Hard-stop auto-run now: cancel the pending timer and, if an
         auto-run is mid-flight on the worker thread, terminate it. Its

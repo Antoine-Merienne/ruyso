@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 
 from ruyso_app.engine import settings
 from ruyso_app.ui.dashboard_canvas import DashboardView
-from ruyso_app.ui import dashboard_layout
+from ruyso_app.ui import dashboard_layout, render_queue
 from ruyso_app.ui.dashboard_items import FigureItem, TextInspector, TextItem
 from ruyso_app.ui.dashboard_menus import fill_arrange_menu, fill_shape_menu
 from ruyso_app.ui.dashboard_shapes import SHAPE_LABELS, ShapeInspector, ShapeItem
@@ -66,6 +66,10 @@ from ruyso_app.ui.options_panel import OptionsPanel
 
 #: core node_type whose input figure becomes a dashboard figure item.
 _EXPORT_NODE_TYPE = "export_to_dashboard"
+
+#: This tab's half of the shared render queue (``ui/render_queue.py``),
+#: whose other half is the canvas preview cards.
+_DASHBOARD_JOB = "dashboard"
 
 #: Right-pane stack indices.
 _PAGE_OPTIONS = 0
@@ -105,6 +109,7 @@ class DashboardPage(QWidget):
         #: unchanged one is not serialised again (see sync_figures).
         self._rendered: dict[str, object] = {}
         self._source_message = ""
+        render_queue.queue().rendered.connect(self._on_rendered)
 
         self._view = DashboardView(self)
         self._scene = self._view.scene()
@@ -186,11 +191,15 @@ class DashboardPage(QWidget):
             figure = resolve_figure(node, outputs)
             if figure is not None and figure is not self._rendered.get(name):
                 # Serialising a figure to SVG is the most expensive thing
-                # this tab does. The skip cache returns the *same* Figure
-                # object for a grapher nothing changed for, so identity
-                # tells us the vector art on screen is already correct.
-                item.set_svg(figure_to_svg_bytes(figure))
+                # this tab does -- 4.6 s for a dense scatter -- so it goes
+                # to the render thread and comes back at _on_rendered.
+                # The skip cache returns the *same* Figure object for a
+                # grapher nothing changed for, so identity tells us the
+                # vector art on screen is already correct.
                 self._rendered[name] = figure
+                render_queue.queue().submit(
+                    (_DASHBOARD_JOB, name), figure, figure_to_svg_bytes
+                )
 
             source = resolve_source_node(node)
             src_id = source.name() if source is not None else None
@@ -201,6 +210,20 @@ class DashboardPage(QWidget):
                 or (figure is None and item.is_stale())
             )
         self._refresh_overlay()
+
+    def _on_rendered(self, key: Any, figure: Any, data: Any) -> None:
+        """One block's vector art, back from the render thread."""
+        kind, name = key
+        if kind != _DASHBOARD_JOB:
+            return  # the preview cards' jobs share this queue
+        item = self._figure_items.get(name)
+        if data is None:  # the render failed; let the next run try again
+            if self._rendered.get(name) is figure:
+                self._rendered.pop(name, None)
+            return
+        # A newer run may have replaced the figure while this was drawing.
+        if item is not None and self._rendered.get(name) is figure:
+            item.set_svg(data)
 
     # -- text / title items -----------------------------------------
 

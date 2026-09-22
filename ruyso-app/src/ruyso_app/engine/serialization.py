@@ -110,6 +110,11 @@ GRAPH_KEYS = frozenset({"nodes", "connections"})
 #: Key under which the Dashboard stores its layout.
 DASHBOARD_KEY = "dashboard"
 
+#: Key under which the pipeline canvas stores its layout: where each node
+#: sits, and which figure previews are collapsed. Pure presentation --
+#: the engine never reads it, so a headless run is unaffected.
+CANVAS_KEY = "canvas"
+
 
 def document_to_dict(
     graph: PipelineGraph, extras: dict[str, Any] | None = None

@@ -16,6 +16,7 @@ beyond what already exists in the engine layer.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from NodeGraphQt import BaseNode, NodeGraph
@@ -152,3 +153,71 @@ def _property_display_value(value: Any) -> Any:
     if value is None:
         return ""
     return value
+
+
+# --------------------------------------------------------------------------
+# canvas layout (the ``canvas`` section of a saved pipeline)
+# --------------------------------------------------------------------------
+
+#: Version of the ``canvas`` section written into a saved pipeline.
+CANVAS_LAYOUT_VERSION = 1
+
+
+def canvas_layout(graph: NodeGraph) -> dict[str, Any]:
+    """
+    Where each node sits, and which figure previews are collapsed, as plain
+    data for the ``canvas`` section of a saved pipeline.
+
+    Keyed by display name -- the key ``NodeSpec.id`` already uses -- so the
+    layout lines up with the pipeline saved beside it. Empty for an empty
+    canvas, so a file only grows the section once there is something in it.
+    Before this, a reopened pipeline was laid out in a single row by
+    :func:`pipeline_to_canvas`, throwing away however it had been arranged.
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    for node in graph.all_nodes():
+        if not hasattr(type(node), "CORE_NODE_TYPE"):
+            continue
+        x, y = node.pos()
+        entry: dict[str, Any] = {"pos": [round(float(x), 2), round(float(y), 2)]}
+        if getattr(node.view, "preview_collapsed", False):
+            entry["preview_collapsed"] = True
+        nodes[node.name()] = entry
+    if not nodes:
+        return {}
+    return {"version": CANVAS_LAYOUT_VERSION, "nodes": nodes}
+
+
+def apply_canvas_layout(
+    canvas_nodes: dict[str, BaseNode], data: dict[str, Any] | None
+) -> None:
+    """
+    Put nodes back where a saved layout had them.
+
+    ``canvas_nodes`` is what :func:`pipeline_to_canvas` returns. Never
+    raises: a layout that cannot be read costs the arrangement, and the
+    pipeline is the part worth protecting -- a node the layout does not
+    mention, or an entry that is not two finite numbers, simply stays where
+    it was placed. Moves are not pushed onto the undo stack: opening a file
+    is not an edit.
+    """
+    entries = data.get("nodes") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return
+    for name, entry in entries.items():
+        node = canvas_nodes.get(name)
+        if node is None or not isinstance(entry, dict):
+            continue
+        position = entry.get("pos")
+        try:
+            x, y = float(position[0]), float(position[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            pass
+        else:
+            if math.isfinite(x) and math.isfinite(y):
+                node.set_property("pos", [x, y], push_undo=False)
+        if entry.get("preview_collapsed") is True:
+            collapse = getattr(node.view, "set_preview_collapsed", None)
+            if collapse is not None:
+                collapse(True)
+

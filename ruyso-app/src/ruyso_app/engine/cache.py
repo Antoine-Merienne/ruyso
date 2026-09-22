@@ -39,6 +39,43 @@ DEFAULT_CACHE_DIR = Path.home() / ".ruyso_app" / "cache"
 _BYTES_PER_GB = 1024 ** 3
 
 
+#: A node whose own work takes less than this is faster to re-run than
+#: to look up: joblib has to hash every input before it can answer, and
+#: hashing a 50 MB table costs ~100 ms whatever the answer turns out to
+#: be. Measured on a 500k-row pipeline, cache *hits* against plain
+#: re-execution: one-hot 190 ms vs 49, train/test split 223 vs 54, a
+#: linear fit 168 vs 70. Only genuinely slow work -- an ARIMA search, an
+#: optuna study, t-SNE -- earns its place on disk.
+CACHE_MIN_SECONDS = 0.5
+
+#: node_type -> seconds its own execution last took. Filled by
+#: ``scheduler._execute_node``, which only runs when there was no cached
+#: result, so these are always real compute times and never a cache hit.
+#: Per process: a session learns what is slow as it goes, and starts
+#: again next time with nobody's stale guess.
+_LAST_COMPUTE: dict[str, float] = {}
+
+
+def record_compute_time(node_type: str, seconds: float) -> None:
+    """Remember how long this node type's real execution took."""
+    _LAST_COMPUTE[node_type] = float(seconds)
+
+
+def worth_caching(node_type: str) -> bool:
+    """
+    Whether results for ``node_type`` should go through the disk cache.
+
+    A type nobody has timed yet is cached: the first question a fresh
+    session asks about a slow node must not be answered by running it.
+    """
+    return _LAST_COMPUTE.get(node_type, float("inf")) >= CACHE_MIN_SECONDS
+
+
+def forget_compute_times() -> None:
+    """Drop what this process learned (tests, and a cleared cache)."""
+    _LAST_COMPUTE.clear()
+
+
 def cache_dir() -> Path:
     """Where cached node results are written."""
     return DEFAULT_CACHE_DIR

@@ -21,6 +21,15 @@ from ruyso_app.ui.node_factory import qt_type_for, register_all_nodes
 NodeRegistry.discover_package(ruyso_app.nodes)
 
 
+def _renders_done():
+    """Wait for the render thread: a block's vector art is drawn off the
+    GUI thread (``ui/render_queue.py``), so it is not there the instant
+    ``sync_figures`` returns."""
+    from ruyso_app.ui import render_queue
+
+    assert render_queue.queue().wait_idle(15_000), "a render never finished"
+
+
 def _graph_with_export(qapp, title=""):
     """
     example_data -> table_viewer -> export_to_dashboard.
@@ -102,6 +111,7 @@ def test_sync_figures_creates_one_vector_item_per_export_node(qapp):
     page = DashboardPage()
 
     page.sync_figures(graph, {source.name(): {"figure": plt.figure()}})
+    _renders_done()
     figs = [i for i in page._scene.items() if isinstance(i, FigureItem)]
     assert len(figs) == 1
     item = figs[0]
@@ -218,9 +228,11 @@ def test_an_unchanged_figure_is_not_serialised_to_svg_again(qapp):
 
         page.sync_figures(graph, outputs)
         page.sync_figures(graph, outputs)  # the same Figure object
+        _renders_done()
         assert len(calls) == 1
 
         page.sync_figures(graph, {source.name(): {"figure": plt.figure()}})
+        _renders_done()
         assert len(calls) == 2
     finally:
         module.figure_to_svg_bytes = original

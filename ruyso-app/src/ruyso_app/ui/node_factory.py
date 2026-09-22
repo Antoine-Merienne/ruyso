@@ -25,6 +25,7 @@ from ruyso_app.core.node import Node
 from ruyso_app.core.registry import NodeRegistry
 from ruyso_app.ui import node_defaults, theme
 from ruyso_app.ui.node_item import RuysoNodeItem
+from ruyso_app.ui.wiring import paint_port
 from ruyso_app.ui.node_preview import is_figure_core_class
 from ruyso_app.ui.property_forms import add_properties_to_node
 
@@ -73,10 +74,13 @@ def build_node_graph_class(node_type: str, node_cls: type[Node]) -> type[BaseNod
         BaseNode.__init__(self, qgraphics_item=RuysoNodeItem)
         self.set_color(*theme.color_for_category(node_cls.category))
 
+        # painter_func is NodeGraphQt's only hook for a port's look: its
+        # own PortItem.paint ignores a port's colour as soon as the port
+        # is hovered or connected. See ui/wiring.py.
         for port in node_cls.inputs:
-            self.add_input(port.name, multi_input=False)
+            self.add_input(port.name, multi_input=False, painter_func=paint_port)
         for port in node_cls.outputs:
-            self.add_output(port.name)
+            self.add_output(port.name, painter_func=paint_port)
 
         add_properties_to_node(self, node_cls.params_schema)
         # Chart / Export / Data preferences describe how a *new* node

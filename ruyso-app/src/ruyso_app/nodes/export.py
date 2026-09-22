@@ -14,6 +14,7 @@ is missing or wrong.
 from pathlib import Path
 from typing import Any, Literal
 
+from ruyso_app.core.figure_lock import figure_guard
 from ruyso_app.core.node import Node, NodeParams
 from ruyso_app.core.params import visible_field
 from ruyso_app.core.port import Port
@@ -83,13 +84,17 @@ class ExportFigure(Node):
         self.validate_inputs(inputs)
         p = self.params
         path = _resolve_path(p.filepath, _FIGURE_EXT[p.format])
-        inputs["figure"].savefig(
-            path,
-            format=p.format,
-            dpi=int(p.dpi),
-            transparent=bool(p.transparent),
-            bbox_inches="tight" if p.bbox_tight else None,
-        )
+        # The same figure may be on its way to a preview card on the
+        # render thread; a save rewrites the figure's dpi and canvas for
+        # the duration, so the two must not overlap.
+        with figure_guard():
+            inputs["figure"].savefig(
+                path,
+                format=p.format,
+                dpi=int(p.dpi),
+                transparent=bool(p.transparent),
+                bbox_inches="tight" if p.bbox_tight else None,
+            )
         return {}
 
 

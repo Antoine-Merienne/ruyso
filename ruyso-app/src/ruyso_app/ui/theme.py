@@ -70,6 +70,10 @@ class Theme:
     input_background: str  # text fields / lists / tables
     text_color: str
     border_color: str
+    #: Ports and the links between nodes: plain white on the dark theme,
+    #: plain black on the light one. Deliberately not the text colour --
+    #: wiring is structure, and reads best at full contrast.
+    wire_color: str
     accent_color: str
     highlight_color: str  # selection / active accent
 
@@ -97,6 +101,7 @@ DARK_THEME = Theme(
     input_background="#121212",
     text_color="#ededed",
     border_color="#3d3d3d",
+    wire_color="#ffffff",
     accent_color="#2a2a2a",
     highlight_color="#1e88e5",  # Material Blue 600 -- reads on deep dark
 )
@@ -114,6 +119,7 @@ LIGHT_THEME = Theme(
     input_background="#ffffff",
     text_color="#1c1c1e",
     border_color="#dcd8d1",
+    wire_color="#000000",
     accent_color="#efece7",
     highlight_color="#1976d2",  # Material Blue 700
 )
@@ -601,6 +607,10 @@ QComboBox {{
     border-radius: 8px;
     padding: 3px 8px;
     min-height: 20px;
+    /* In "popup" mode the private container paints Fusion's
+       PE_PanelMenu -- a square box with a grey outline -- behind the
+       rounded list; translucency cannot hide what the widget draws. */
+    combobox-popup: 0;
 }}
 QComboBox:focus, QComboBox:on {{
     border: 1px solid {primary};

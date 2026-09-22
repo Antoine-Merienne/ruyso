@@ -102,6 +102,62 @@ def test_no_grapher_still_carries_an_axis_limit_toggle():
                 assert fields[edge].default == ""
 
 
+#: Graphers whose axes carry a measured magnitude, and which of them.
+#: Everything absent from this map plots categories, dates, map
+#: coordinates, lag indices or signed quantities (correlations,
+#: loadings, quantiles), where a log scale has nothing to say.
+_LOG_AXES = {
+    "matplotlib_plot": ("log_x", "log_y"),
+    "regression_plot": ("log_x", "log_y"),
+    "histogram_plot": ("log_x", "log_y"),
+    "box_plot": ("log_x", "log_y"),
+    "density_2d": ("log_x", "log_y"),
+    "roc_curve_plot": ("log_x", "log_y"),
+    "precision_recall_plot": ("log_x", "log_y"),
+    "det_curve_plot": ("log_x", "log_y"),
+    "calibration_curve_plot": ("log_x", "log_y"),
+    "learning_curve_plot": ("log_x", "log_y"),
+    "pca_scree_plot": ("log_y",),
+    "time_series_plot": ("log_y",),
+    "multivariate_timeseries_plot": ("log_y",),
+    "forecast_plot": ("log_y",),
+}
+
+
+def test_every_grapher_with_a_measured_axis_offers_a_log_toggle():
+    """A new grapher on a numeric axis has to say whether it takes one:
+    the toggle is a checkbox the panel renders from the field alone, so
+    forgetting it is silent."""
+    from ruyso_app.core.registry import NodeRegistry
+
+    for node_type, cls in NodeRegistry.all().items():
+        if cls.category != "grapher":
+            continue
+        fields = cls.params_schema.model_fields
+        expected = set(_LOG_AXES.get(node_type, ()))
+        present = {name for name in ("log_x", "log_y") if name in fields}
+        assert present == expected, f"{node_type}: log toggles {present}, expected {expected}"
+        for name in present:
+            assert fields[name].annotation is bool
+            assert fields[name].default is False
+
+
+def test_a_log_toggle_actually_reaches_the_axes():
+    """Declaring the field is not enough: a node that styles its own
+    axes instead of going through ``_finalize_plot`` has to apply it --
+    forecast_plot carried the flag and ignored it."""
+    df = pd.DataFrame({"x": [1.0, 5.0, 20.0], "y": [2.0, 8.0, 40.0]})
+    ax = _run(df=df, x="x", y="y", log_x=True, log_y=True).axes[0]
+    assert (ax.get_xscale(), ax.get_yscale()) == ("log", "log")
+
+    from ruyso_app.core.registry import NodeRegistry
+
+    density = NodeRegistry.get("density_2d")(
+        params={"x": "x", "y": "y", "log_y": True}
+    ).run(df=pd.DataFrame({"x": list(range(1, 60)), "y": list(range(1, 60))}))
+    assert density["figure"].axes[0].get_yscale() == "log"
+
+
 def test_matplotlib_plot_returns_a_figure_with_correct_labels():
     df = pd.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
     node = MatplotlibPlot(params=MatplotlibPlotParams(x="x", y="y", title="Test plot"))
@@ -211,6 +267,33 @@ def test_colour_by_categorical_line_draws_one_line_per_group():
     ax = _run(df=df, x="x", y="y", kind="line", color_by="g").axes[0]
     assert len(ax.get_lines()) == 2
     assert [t.get_text() for t in ax.get_legend().get_texts()] == ["a", "b"]
+
+
+def test_a_single_colour_scatter_never_carries_one_colour_per_point():
+    """A per-row colour array is matplotlib's slow path: 3.6 s for half a
+    million points, against 0.15 s when the call carries one colour."""
+    ax = _run(x="x", y="y").axes[0]
+    assert len(ax.collections[0].get_facecolors()) == 1
+
+
+def test_a_big_categorical_scatter_is_drawn_one_colour_at_a_time():
+    """Only above ``_GROUPED_SCATTER_MIN``: grouping costs the
+    interleaved draw order, so small plots keep a colour per row."""
+    from ruyso_app.nodes.viz import _GROUPED_SCATTER_MIN
+
+    n = _GROUPED_SCATTER_MIN + 10
+    df = pd.DataFrame(
+        {"x": range(n), "y": range(n), "g": (["a", "b"] * n)[:n]}
+    )
+    big = _run(df=df, x="x", y="y", color_by="g").axes[0]
+    assert len(big.collections) == 2  # one call per colour
+    for collection in big.collections:
+        assert len(collection.get_facecolors()) == 1
+
+    small = _run(df=df.head(100), x="x", y="y", color_by="g").axes[0]
+    assert len(small.collections) == 1  # one call, a colour per row
+    assert len(small.collections[0].get_facecolors()) == 100
+    assert [t.get_text() for t in small.get_legend().get_texts()] == ["a", "b"]
 
 
 def test_unknown_colour_by_column_falls_back_to_a_single_colour():
@@ -1542,3 +1625,221 @@ def test_materialblue_resolves_once_a_figure_has_been_built():
     colors.register()
     assert to_hex("materialblue") == "#1e88e5"
     assert to_hex("darkblue") == "#00008b"  # never shadows a built-in name
+
+
+# -- regression_plot -----------------------------------------------------
+#
+# A smoother node: what is drawn is the *fit*, and the observations are
+# an option. LOWESS has no interval of its own, so the band around it is
+# bootstrapped (seeded, so it is reproducible).
+
+
+def _reg_df(n_per_group=30, groups=("a", "b", "c")):
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    x = np.tile(np.linspace(0.0, 10.0, n_per_group), len(groups))
+    g = np.repeat(list(groups), n_per_group)
+    offsets = {name: i * 2.0 for i, name in enumerate(groups)}
+    y = 0.5 * x + np.array([offsets[name] for name in g]) + rng.normal(0, 0.3, x.size)
+    return pd.DataFrame({"x": x, "y": y, "g": g})
+
+
+def _reg(df=None, **params):
+    from ruyso_app.nodes.viz import RegressionPlot, RegressionPlotParams
+
+    df = _reg_df() if df is None else df
+    node = RegressionPlot(params=RegressionPlotParams(**params))
+    return node.run(df=df)["figure"]
+
+
+def test_regression_plot_draws_one_curve_and_a_band():
+    ax = _reg(x="x", y="y").axes[0]
+    assert len(ax.get_lines()) == 1
+    assert len(ax.collections) == 1  # the confidence band
+
+
+def test_the_observations_are_not_drawn_by_default():
+    """This node is about the trend; the data is opt-in."""
+    without = _reg(x="x", y="y", ci_style="none")
+    with_points = _reg(x="x", y="y", ci_style="none", show_points=True)
+
+    assert len(without.axes[0].collections) == 0
+    assert len(with_points.axes[0].collections) == 1
+
+
+def test_ci_style_none_drops_the_band():
+    assert len(_reg(x="x", y="y", ci_style="none").axes[0].collections) == 0
+
+
+def test_a_discrete_colour_column_fits_one_curve_per_category():
+    ax = _reg(x="x", y="y", color_by="g").axes[0]
+
+    assert len(ax.get_lines()) == 3
+    assert len(ax.collections) == 3  # one band each
+    colours = {tuple(line.get_color()) for line in ax.get_lines()}
+    assert len(colours) == 3  # each category its own colour
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == ["a", "b", "c"]
+
+
+def test_a_discrete_shape_column_fits_per_category_and_varies_the_line_style():
+    ax = _reg(x="x", y="y", shape_by="g", ci_style="none").axes[0]
+
+    assert len(ax.get_lines()) == 3
+    assert len({line.get_linestyle() for line in ax.get_lines()}) == 3
+
+
+def test_colour_and_shape_on_the_same_column_give_one_combined_legend():
+    ax = _reg(x="x", y="y", color_by="g", shape_by="g", ci_style="none").axes[0]
+
+    assert len(ax.get_lines()) == 3
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == ["a", "b", "c"]
+    extra = [a for a in ax.artists if type(a).__name__ == "Legend"]
+    assert extra == []
+
+
+def test_two_discrete_columns_fit_every_combination():
+    df = _reg_df()
+    df["h"] = ["p", "q"] * (len(df) // 2)
+    ax = _reg(df, x="x", y="y", color_by="g", shape_by="h", ci_style="none").axes[0]
+
+    assert len(ax.get_lines()) == 6  # 3 colours x 2 styles
+    extra = [a for a in ax.artists if type(a).__name__ == "Legend"]
+    assert len(extra) == 1  # a colour legend and a shape legend
+
+
+def test_a_continuous_colour_column_cannot_split_the_fit():
+    df = _reg_df()
+    df["z"] = df["x"] * 2.0
+    fig = _reg(df, x="x", y="y", color_by="z", show_points=True, ci_style="none")
+
+    assert len(fig.axes[0].get_lines()) == 1
+    assert "continuous" in " ".join(t.get_text() for t in fig.texts)
+
+
+def test_the_linear_fit_is_a_straight_line():
+    import numpy as np
+
+    line = _reg(x="x", y="y", method="linear", ci_style="none").axes[0].get_lines()[0]
+    ys = np.asarray(line.get_ydata(), dtype=float)
+
+    assert np.allclose(np.diff(ys, 2), 0.0, atol=1e-9)
+
+
+def test_the_linear_interval_is_narrowest_at_the_mean_of_x():
+    """It is the confidence interval of the mean response, which is a
+    hyperbola pinched at x-bar -- not a constant-width ribbon."""
+    import numpy as np
+
+    from ruyso_app.nodes.viz import _fit_grid, _linear_fit_at
+
+    x = np.arange(40.0)
+    y = 2.0 + 0.5 * x + np.random.default_rng(4).normal(0, 2, 40)
+    grid = _fit_grid(x)
+    _, low, high = _linear_fit_at(y, x, grid, 0.95, True)
+    width = high - low
+
+    assert abs(grid[int(np.argmin(width))] - x.mean()) < 1.0
+    assert width[0] > width[len(width) // 2]
+
+
+def test_the_lowess_band_is_bootstrapped_and_reproducible():
+    """statsmodels' lowess returns smoothed values only, so the band is
+    resampled -- seeded, or it would move on every auto-run."""
+    import numpy as np
+
+    first = _reg(x="x", y="y", n_boot=30)
+    second = _reg(x="x", y="y", n_boot=30)
+
+    a = first.axes[0].collections[0].get_paths()[0].vertices
+    b = second.axes[0].collections[0].get_paths()[0].vertices
+    assert np.array_equal(a, b)
+
+
+def test_a_wider_confidence_level_gives_a_wider_lowess_band():
+    import numpy as np
+
+    from ruyso_app.nodes.viz import _fit_grid, _lowess_bootstrap_ci
+
+    x = np.arange(40.0)
+    y = np.sin(x / 3) + np.random.default_rng(5).normal(0, 0.3, 40)
+    grid = _fit_grid(x)
+    narrow = _lowess_bootstrap_ci(y, x, grid, 0.667, 0.80, 40)
+    wide = _lowess_bootstrap_ci(y, x, grid, 0.667, 0.99, 40)
+
+    assert np.nanmean(wide[1] - wide[0]) > np.nanmean(narrow[1] - narrow[0])
+
+
+def test_a_larger_frac_smooths_more():
+    import numpy as np
+
+    from ruyso_app.nodes.viz import _fit_grid, _lowess_at
+
+    x = np.linspace(0, 10, 60)
+    y = np.sin(x) + np.random.default_rng(6).normal(0, 0.4, 60)
+    grid = _fit_grid(x)
+    wiggly = _lowess_at(y, x, grid, 0.15)
+    smooth = _lowess_at(y, x, grid, 0.9)
+
+    assert np.abs(np.diff(smooth, 2)).sum() < np.abs(np.diff(wiggly, 2)).sum()
+
+
+def test_a_group_with_too_few_points_is_skipped_and_noted():
+    df = pd.DataFrame(
+        {"x": [1.0, 2, 3, 4, 5, 1], "y": [1.0, 2, 3, 4, 5, 9], "g": ["a"] * 5 + ["b"]}
+    )
+    fig = _reg(df, x="x", y="y", color_by="g", method="linear")
+
+    assert len(fig.axes[0].get_lines()) == 1
+    assert "too few points" in " ".join(t.get_text() for t in fig.texts)
+
+
+def test_a_datetime_x_column_is_fitted_and_drawn_as_dates():
+    import numpy as np
+
+    df = pd.DataFrame({"t": pd.date_range("2024-01-01", periods=40, freq="D")})
+    df["y"] = np.arange(40) * 0.3 + np.random.default_rng(8).normal(0, 0.5, 40)
+    line = _reg(df, x="t", y="y", method="linear", ci_style="none").axes[0].get_lines()[0]
+    drawn = np.asarray(line.get_xdata())
+
+    # drawn as dates, not as the integers it was fitted on -- and in the
+    # column's own resolution, whatever pandas resolved it to
+    assert np.issubdtype(drawn.dtype, np.datetime64)
+    assert drawn.min() == df["t"].min().to_numpy()
+    assert drawn.max() == df["t"].max().to_numpy()
+
+
+def test_a_non_numeric_y_is_refused_with_a_sentence():
+    with pytest.raises(ValueError, match="must be numeric"):
+        _reg(x="x", y="g")
+
+
+def test_regression_plot_shares_the_matplotlib_plot_axis_and_title_blocks():
+    from ruyso_app.nodes.viz import MatplotlibPlotParams, RegressionPlotParams
+
+    shared = {
+        "title", "x_label", "y_label", "x_min", "x_max", "y_min", "y_max",
+        "axis_font_size", "show_grid", "show_box", "log_x", "log_y",
+        "fig_width", "fig_height", "title_font_size", "title_bold",
+        "title_italic", "show_legend", "legend_title", "legend_location",
+        "legend_font_size", "color_by", "colormap", "mark_color", "shape_by",
+        "shape_map", "line_style", "marker_shape", "alpha",
+    }
+    assert shared <= set(RegressionPlotParams.model_fields)
+    assert shared <= set(MatplotlibPlotParams.model_fields)
+    # the per-row channels that have no meaning for a fitted curve
+    assert "size_by" not in RegressionPlotParams.model_fields
+    assert "alpha_by" not in RegressionPlotParams.model_fields
+
+
+def test_the_fit_options_are_tied_to_the_method_and_the_interval():
+    from ruyso_app.core.params import visible_unless, visible_when
+    from ruyso_app.nodes.viz import RegressionPlotParams
+
+    fields = RegressionPlotParams.model_fields
+    assert visible_when(fields["frac"]) == ("method", "lowess")
+    assert visible_when(fields["n_boot"]) == ("method", "lowess")
+    assert visible_unless(fields["n_boot"]) == ("ci_style", "none")
+    assert visible_unless(fields["confidence_level"]) == ("ci_style", "none")
+    assert visible_when(fields["point_size"]) == ("show_points", "True")
+    assert fields["show_points"].default is False

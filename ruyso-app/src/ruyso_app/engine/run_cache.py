@@ -30,6 +30,7 @@ Two deliberate limits:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable
 
 #: Node categories that must always re-execute, whatever their signature
@@ -48,7 +49,33 @@ def is_skippable(node_cls: Any) -> bool:
     return getattr(node_cls, "category", "") not in ALWAYS_RUN_CATEGORIES
 
 
-def content_token(signature: str, outputs: dict[str, Any]) -> str:
+def source_token(node_cls: Any, params: dict[str, Any]) -> tuple:
+    """
+    A stamp of every file ``node_cls`` reads: ``(path, mtime, size)`` each.
+
+    Empty for a node that reads no file, which is nearly all of them.
+    A path that cannot be stat-ed stamps as missing rather than raising:
+    the node's own run reports that far better than a cache helper
+    could. Parameters that do not validate stamp as empty for the same
+    reason -- running the node is what should produce that error.
+    """
+    try:
+        paths = node_cls.params_schema(**params).source_paths()
+    except Exception:  # noqa: BLE001 - the run reports a bad path/param
+        return ()
+    stamps = []
+    for path in paths:
+        try:
+            stat = Path(path).stat()
+            stamps.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamps.append((str(path), None, None))
+    return tuple(stamps)
+
+
+def content_token(
+    signature: str, outputs: dict[str, Any], source: tuple = ()
+) -> str:
     """
     A signature that also changes when the node's *output* changes.
 
@@ -63,7 +90,14 @@ def content_token(signature: str, outputs: dict[str, Any]) -> str:
 
     A value joblib cannot hash yields a token that never repeats, so
     the safe reading -- "assume it changed" -- is the fallback.
+
+    ``source``, when the node declares one, says the same thing far
+    more cheaply: a loader's output changes when its file does, and
+    stat-ing that file costs nothing next to hashing the 50 MB table it
+    returned (measured at ~100 ms, on every single auto-run).
     """
+    if source:
+        return f"{signature}:{source}"
     try:
         import joblib
 

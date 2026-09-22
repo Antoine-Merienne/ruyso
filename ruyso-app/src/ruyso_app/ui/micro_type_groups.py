@@ -126,6 +126,7 @@ MICRO_TYPE_GROUPS: dict[str, list[list[str]]] = {
         # base plots -- general-purpose, single/two-variable, no model needed
         [
             "matplotlib_plot",
+            "regression_plot",
             "box_plot",
             "histogram_plot",
             "heatmap_plot",

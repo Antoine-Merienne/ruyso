@@ -60,6 +60,71 @@ def test_csv_loader_respects_custom_separator(tmp_path):
     assert df["a"].tolist() == [1, 2]
 
 
+#: CSV shapes that have to come out exactly as ``pd.read_csv`` makes
+#: them, whichever reader the loader picked. The pyarrow path is the
+#: fast one; the last three it cannot do, and falls back for.
+_CSV_CASES = [
+    "a,b\n1,2\n3,4\n",                              # plain
+    "a,b\n1.5,\n,2.5\n",                            # floats with gaps
+    'a,b\n"x, y",z\n"he said ""hi""",w\n',          # quotes and commas
+    "a,b\nTrue,true\nFalse,false\n",                # booleans
+    "a,b\nNA,null\n1,2\n",                          # words meaning "missing"
+    "a\n007\n010\n",                                # leading zeros stay text
+    "d\n2020-01-02\n2021-03-04\n",                  # dates stay text
+    "d\n2020-01-02T03:04:05\n2021-03-04T00:00:00\n",
+    "a\n1\nx\n2\n",                                 # mixed types
+    'a\n""\n\nx\n',                                 # empty string vs missing
+    "﻿a,b\n1,2\n",                             # byte-order mark
+    "a,b\r\n1,2\r\n",                               # Windows line endings
+    "a\ncafé\nnaïve\n",                             # non-ASCII
+    "a\ninf\n1\n",
+    "a,a\n1,2\n",                                   # duplicate names -> pandas
+    "a,b\n1,2\n3\n",                                # ragged rows -> pandas
+    "a,b,\n1,2,\n",                                 # trailing separator
+]
+
+
+@pytest.mark.parametrize("text", _CSV_CASES)
+def test_csv_loader_matches_pandas_whichever_reader_runs(tmp_path, text):
+    """The loader reads through pyarrow when it can match pandas exactly
+    and hands the file to pandas when it cannot; the caller sees no
+    difference either way."""
+    path = tmp_path / "c.csv"
+    path.write_text(text, encoding="utf-8")
+    df = CSVLoader(params=CSVLoaderParams(filepath=str(path))).run()["df"]
+    expected = pd.read_csv(path)
+    pd.testing.assert_frame_equal(df, expected)
+
+
+def test_the_fast_reader_runs_where_it_can_and_declines_where_it_cannot(tmp_path):
+    """Parity alone would also pass if pyarrow never ran at all."""
+    from ruyso_app.nodes.loaders import _read_csv_arrow
+
+    plain = tmp_path / "plain.csv"
+    plain.write_text("a,b\n1,2\n", encoding="utf-8")
+    assert _read_csv_arrow(CSVLoaderParams(filepath=str(plain))) is not None
+
+    dupes = tmp_path / "dupes.csv"
+    dupes.write_text("a,a\n1,2\n", encoding="utf-8")
+    assert _read_csv_arrow(CSVLoaderParams(filepath=str(dupes))) is None
+    assert _read_csv_arrow(
+        CSVLoaderParams(filepath=str(plain), decimal=",")
+    ) is None
+    assert _read_csv_arrow(
+        CSVLoaderParams(filepath=str(plain), encoding="latin-1")
+    ) is None
+
+
+def test_csv_loader_falls_back_for_options_pyarrow_lacks(tmp_path):
+    """A comma decimal point has no pyarrow equivalent, so pandas reads it."""
+    path = tmp_path / "eu.csv"
+    path.write_text("a;b\n1,5;2\n", encoding="utf-8")
+    df = CSVLoader(
+        params=CSVLoaderParams(filepath=str(path), sep=";", decimal=",")
+    ).run()["df"]
+    assert df["a"].tolist() == [1.5]
+
+
 def test_fixed_width_loader(tmp_path, frame):
     path = tmp_path / "s.txt"
     path.write_text("id   value\n1    10.5\n2    20.0\n")

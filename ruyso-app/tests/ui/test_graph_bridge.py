@@ -122,3 +122,105 @@ def test_canvas_to_pipeline_rejects_unsupported_builtin_node(qapp):
 
     with pytest.raises(UnsupportedCanvasNodeError):
         canvas_to_pipeline(canvas.graph)
+
+
+# -- the canvas layout saved beside a pipeline ---------------------------
+
+
+def _layout_graph():
+    from NodeGraphQt import NodeGraph
+
+    from ruyso_app.ui.node_factory import qt_type_for, register_all_nodes
+
+    graph = NodeGraph()
+    register_all_nodes(graph)
+    load = graph.create_node(qt_type_for("example_data"), name="load", pos=[-300, 40])
+    plot = graph.create_node(qt_type_for("matplotlib_plot"), name="plot", pos=[120.5, -60])
+    return graph, load, plot
+
+
+def test_canvas_layout_records_positions_and_collapsed_previews(qapp):
+    from ruyso_app.ui.graph_bridge import CANVAS_LAYOUT_VERSION, canvas_layout
+
+    graph, load, plot = _layout_graph()
+    plot.view.set_preview_collapsed(True)
+
+    layout = canvas_layout(graph)
+
+    assert layout["version"] == CANVAS_LAYOUT_VERSION
+    assert layout["nodes"]["load"] == {"pos": [-300.0, 40.0]}
+    assert layout["nodes"]["plot"] == {"pos": [120.5, -60.0], "preview_collapsed": True}
+
+
+def test_an_empty_canvas_writes_no_layout(qapp):
+    from NodeGraphQt import NodeGraph
+
+    from ruyso_app.ui.graph_bridge import canvas_layout
+
+    assert canvas_layout(NodeGraph()) == {}
+
+
+def test_applying_a_layout_moves_nodes_back_without_an_undo_step(qapp):
+    """Opening a file is not an edit: undoing must not unbuild the layout."""
+    from ruyso_app.ui.graph_bridge import apply_canvas_layout
+
+    graph, load, plot = _layout_graph()
+    graph.clear_undo_stack()
+
+    apply_canvas_layout(
+        {"load": load, "plot": plot},
+        {"version": 1, "nodes": {
+            "load": {"pos": [10, 20]},
+            "plot": {"pos": [300, 400], "preview_collapsed": True},
+        }},
+    )
+
+    assert load.pos() == [10.0, 20.0]
+    assert plot.pos() == [300.0, 400.0]
+    assert plot.view.preview_collapsed
+    assert graph.undo_stack().count() == 0
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        [],
+        {"nodes": "not a mapping"},
+        {"nodes": {"plot": "not a mapping"}},
+        {"nodes": {"plot": {"pos": "ab"}}},
+        {"nodes": {"plot": {"pos": [1]}}},
+        {"nodes": {"plot": {"pos": [float("nan"), 3]}}},
+        {"nodes": {"plot": {"pos": None, "preview_collapsed": "yes"}}},
+        {"nodes": {"somebody_else": {"pos": [1, 2]}}},
+    ],
+)
+def test_a_layout_that_cannot_be_read_leaves_the_nodes_where_they_are(qapp, data):
+    """It costs the arrangement, never the pipeline."""
+    from ruyso_app.ui.graph_bridge import apply_canvas_layout
+
+    graph, load, plot = _layout_graph()
+
+    apply_canvas_layout({"load": load, "plot": plot}, data)
+
+    assert plot.pos() == [120.5, -60.0]
+    assert not plot.view.preview_collapsed
+
+
+def test_the_engine_carries_the_canvas_section_without_reading_it():
+    from ruyso_app.engine.serialization import (
+        CANVAS_KEY,
+        document_from_dict,
+        document_to_dict,
+    )
+    from ruyso_app.engine.graph import NodeSpec, PipelineGraph
+
+    graph = PipelineGraph()
+    graph.add_node(NodeSpec(id="load", node_type="example_data"))
+    canvas = {"version": 1, "nodes": {"load": {"pos": [1.0, 2.0]}}}
+
+    data = document_to_dict(graph, {CANVAS_KEY: canvas})
+    reread, extras = document_from_dict(data)
+
+    assert list(reread.nodes) == ["load"]
+    assert extras[CANVAS_KEY] == canvas

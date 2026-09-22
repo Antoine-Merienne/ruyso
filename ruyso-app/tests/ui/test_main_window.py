@@ -383,6 +383,10 @@ def test_run_populates_a_dashboard_block_editable_via_the_source_plot(window):
 
     assert export.name() in window._dashboard_page._figure_items
     item = window._dashboard_page._figure_items[export.name()]
+    # The vector art is drawn on the render thread (ui/render_queue.py).
+    from ruyso_app.ui import render_queue
+
+    assert render_queue.queue().wait_idle(15_000)
     assert item._renderer is not None  # rendered from SVG
     item.setSelected(True)
 
@@ -1042,7 +1046,9 @@ def test_saving_writes_the_dashboard_into_the_pipeline_file(
     window._on_save_pipeline()
 
     data = json.loads(path.read_text())
-    assert sorted(data) == ["connections", "dashboard", "nodes"]
+    # The canvas layout (node positions, collapsed previews) is saved
+    # beside the dashboard's.
+    assert sorted(data) == ["canvas", "connections", "dashboard", "nodes"]
     assert [i["type"] for i in data["dashboard"]["items"]] == ["shape"]
     window.close()
 
@@ -1110,4 +1116,72 @@ def test_opening_a_file_with_no_dashboard_clears_the_canvas(
     window._open_pipeline_file(str(plain))
 
     assert window._dashboard_page.blocks() == []
+    window.close()
+
+
+# -- the canvas layout travels with the document -------------------------
+
+
+def _saveable_window():
+    """A window whose pipeline passes validate(): an unsatisfied required
+    port would raise the save error dialog, and a modal hangs the suite."""
+    window = MainWindow()
+    graph = window._canvas.graph
+    load = graph.create_node(qt_type_for("example_data"), name="load", pos=[-320, 10])
+    plot = graph.create_node(qt_type_for("matplotlib_plot"), name="plot", pos=[140, 75])
+    load.outputs()["df"].connect_to(plot.inputs()["df"])
+    return window, load, plot
+
+
+def test_node_positions_and_collapsed_previews_survive_save_and_open(
+    qapp, monkeypatch, tmp_path
+):
+    """Reopening used to lay every node out in a single row."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    path = tmp_path / "doc.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(path), ""))
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *a, **k: pytest.fail("no modal expected")
+    )
+    window, load, plot = _saveable_window()
+    plot.view.set_preview_collapsed(True)
+    window._on_save_pipeline()
+    window.close()
+
+    reopened = MainWindow()
+    reopened._open_pipeline_file(str(path))
+    nodes = {n.name(): n for n in reopened._canvas.graph.all_nodes()}
+
+    assert nodes["load"].pos() == [-320.0, 10.0]
+    assert nodes["plot"].pos() == [140.0, 75.0]
+    assert nodes["plot"].view.preview_collapsed
+    card = reopened._preview_overlay.cards()[nodes["plot"].id]
+    assert not card.isVisible()
+    assert not reopened.is_modified()  # opening a file is not an edit
+    reopened.close()
+
+
+def test_collapsing_a_preview_marks_the_document_until_it_is_saved(
+    qapp, monkeypatch, tmp_path
+):
+    """The flag is saved with the pipeline but pushes no undo command, so
+    without its own marker the close prompt would not know about it."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    path = tmp_path / "doc.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(path), ""))
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *a, **k: pytest.fail("no modal expected")
+    )
+    window, _load, plot = _saveable_window()
+    window._on_save_pipeline()
+    assert not window.is_modified()
+
+    window._preview_overlay.toggle_collapsed(plot.id)
+    assert window.is_modified()
+    assert window.windowTitle().endswith("•")
+
+    window._on_save_pipeline()
+    assert not window.is_modified()
     window.close()

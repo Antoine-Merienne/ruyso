@@ -20,6 +20,7 @@ from ruyso_app.engine import settings
 from ruyso_app.ui import theme
 from ruyso_app.ui.canvas_grid import install_dot_grid
 from ruyso_app.ui.canvas_nav import CanvasNavigation
+from ruyso_app.ui.wiring import install_wiring, refresh_wiring
 from ruyso_app.ui.node_factory import register_all_nodes
 
 #: ``appearance.canvas_grid`` -> the NodeGraphQt grid mode it means.
@@ -48,6 +49,7 @@ class PipelineCanvas:
 
     def __init__(self) -> None:
         install_dot_grid()  # small round dots instead of NodeGraphQt's squares
+        install_wiring()  # themed ports and links (see ui/wiring.py)
         self.graph = NodeGraph()
         register_all_nodes(self.graph)
         self._navigation = CanvasNavigation(self.graph.viewer())
@@ -142,3 +144,5 @@ class PipelineCanvas:
             refresh = getattr(node.view, "apply_theme", None)
             if refresh is not None:
                 refresh()
+        # Ports and links are the theme's wire colour, not the macro type's.
+        refresh_wiring(self.graph)

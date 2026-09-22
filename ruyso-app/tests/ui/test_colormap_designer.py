@@ -28,6 +28,40 @@ def test_gradient_bar_stops_reverse_and_seed(qapp):
     assert len(bar.stops()) == 5
 
 
+def test_choosing_a_seed_applies_it_without_the_button(qapp):
+    """Picking a colormap and seeing nothing happen reads as "seeding is
+    broken" -- and the bar's own default is a plain blue-to-red gradient,
+    so an unapplied seed looks like somebody's own saved colormap."""
+    designer = ColormapDesigner()
+    default = designer._gradient.stops()
+
+    index = designer._seed.findText("plasma")
+    designer._seed.setCurrentIndex(index)
+    designer._seed.activated.emit(index)  # what choosing in the list does
+
+    stops = designer._gradient.stops()
+    assert stops != default
+    assert stops[0][1] == "#0d0887"  # plasma's dark end
+
+    # ...and the qualitative side of the same control
+    designer._kind_qual.setChecked(True)
+    index = designer._seed.findText("tab10")
+    designer._seed.setCurrentIndex(index)
+    designer._seed.activated.emit(index)
+    assert designer._swatches.colours()[0] == "#1f77b4"
+
+
+def test_refilling_the_seed_list_does_not_seed_anything(qapp):
+    """Switching kind refills the list in code; only a real choice seeds."""
+    designer = ColormapDesigner()
+    before = designer._gradient.stops()
+
+    designer._kind_qual.setChecked(True)
+    designer._kind_cont.setChecked(True)
+
+    assert designer._gradient.stops() == before
+
+
 def test_swatch_list_edits(qapp):
     strip = SwatchList()
     strip.set_colours(["#111111", "#222222", "#333333"])

@@ -16,22 +16,32 @@ This module replaces that one paint method:
 * the **name bar fills with that colour when the node is selected**,
   and the contour thickens. Unselected, the name bar is simply the top
   of the card: no divider, no tint, so the fill is unmistakable;
-* corners are :data:`RADIUS`, the same 8 the QSS uses for buttons,
-  menus, inputs and panels.
+* corners are :data:`RADIUS`.
 
 Text follows the same rule (:meth:`RuysoNodeItem._set_text_color`): the
 name and the port labels take the theme's text colour, except the name
 while the node is selected, which flips to whatever reads on the macro
 colour -- white on the blue loader, near-black on the orange transform.
 
-The status dot (``ui/node_status.py``) keeps painting into the icon item
-to the left of the name; nothing here touches it.
+Two things here exist for the figure preview beneath a grapher node
+(``ui/node_preview.py``):
+
+* **geometry notifications** -- the item sends ``ItemPositionHasChanged``
+  and reports :meth:`draw_node` resizes to ``geometry_listener``, so the
+  preview card is re-placed in the *same frame* the node moves. The
+  preview used to be a widget re-placed by a timer, which trailed the
+  node by up to four frames and made every drag look jagged;
+* the **collapse chevron** on the right of the name bar, drawn only on
+  a node that has a preview (:attr:`has_preview`), pointing down while
+  the preview shows and right while it is collapsed.
 """
 
 from __future__ import annotations
 
+from typing import Callable
+
 from NodeGraphQt.qgraphics.node_base import NodeItem
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -49,12 +59,19 @@ BORDER_SELECTED = 3.2
 #: Diameter of the run-status dot, in scene units.
 STATUS_DOT_SIZE = 9.0
 
+#: Size of the preview collapse chevron's box, in scene units.
+CHEVRON_SIZE = 9.0
+
+#: Extra slop around the chevron for clicking it: a 9-unit target is
+#: a fiddly thing to hit at 1:1 zoom.
+CHEVRON_HIT_SLOP = 5.0
+
 #: Inset of the contour from the item's bounding rect. Half the widest
 #: pen, so a selected node's contour is not clipped by its own bounds.
 _MARGIN = BORDER_SELECTED / 2.0
 
-#: Inset of the status dot from the card's left edge, so the rounder
-#: corner does not cut into it.
+#: Inset of the status dot and the chevron from the card's side edges,
+#: so the rounded corners do not cut into them.
 _LEFT_INSET = 5.0
 
 
@@ -94,6 +111,20 @@ class RuysoNodeItem(NodeItem):
         self._icon_item.setVisible(False)
         self._status_colour = QColor(theme.STATUS_COLORS["idle"])
 
+        # Without this flag Qt never calls itemChange for a move, and
+        # the preview card would have nothing to follow the node by.
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        #: Called with this item whenever it moves or is re-laid out.
+        #: A plain callable rather than a Qt signal: QGraphicsItem is not
+        #: a QObject, and the preview manager is the only listener.
+        self.geometry_listener: Callable[[RuysoNodeItem], None] | None = None
+        #: Whether this node has a figure preview (and so a chevron).
+        self.has_preview = False
+        #: Whether that preview is collapsed. Kept on the node rather
+        #: than on the card, so it survives the card being rebuilt --
+        #: which is what deleting a node and undoing it does.
+        self.preview_collapsed = False
+
     # -- run status ----------------------------------------------------
 
     def set_status_colour(self, colour: QColor) -> None:
@@ -104,11 +135,53 @@ class RuysoNodeItem(NodeItem):
     def status_colour(self) -> QColor:
         return QColor(self._status_colour)
 
+    # -- figure preview ------------------------------------------------
+
+    def set_preview_collapsed(self, collapsed: bool) -> None:
+        """Collapse or expand this node's preview, and tell the listener."""
+        collapsed = bool(collapsed)
+        if collapsed == self.preview_collapsed:
+            return
+        self.preview_collapsed = collapsed
+        self.update()
+        self._notify_geometry()
+
+    def chevron_rect(self) -> QRectF:
+        """The chevron's box, in item coordinates."""
+        rect = self._card_rect()
+        return QRectF(
+            rect.right() - _LEFT_INSET - CHEVRON_SIZE,
+            self._text_item.boundingRect().center().y() - CHEVRON_SIZE / 2.0,
+            CHEVRON_SIZE,
+            CHEVRON_SIZE,
+        )
+
+    def chevron_hit(self, scene_pos: QPointF) -> bool:
+        """Whether ``scene_pos`` lands on this node's chevron."""
+        if not self.has_preview:
+            return False
+        target = self.chevron_rect().adjusted(
+            -CHEVRON_HIT_SLOP, -CHEVRON_HIT_SLOP, CHEVRON_HIT_SLOP, CHEVRON_HIT_SLOP
+        )
+        return target.contains(self.mapFromScene(scene_pos))
+
+    def _notify_geometry(self) -> None:
+        listener = getattr(self, "geometry_listener", None)
+        if listener is None:
+            return
+        try:
+            listener(self)
+        except RuntimeError:  # the card is already gone during teardown
+            pass
+
     # -- painting ------------------------------------------------------
+
+    def _card_rect(self) -> QRectF:
+        return self.boundingRect().adjusted(_MARGIN, _MARGIN, -_MARGIN, -_MARGIN)
 
     def _paint_horizontal(self, painter, option, widget) -> None:  # noqa: N802
         painter.save()
-        rect = self.boundingRect().adjusted(_MARGIN, _MARGIN, -_MARGIN, -_MARGIN)
+        rect = self._card_rect()
         body = QPainterPath()
         body.addRoundedRect(rect, RADIUS, RADIUS)
         accent = QColor(*self.color[:3])
@@ -140,6 +213,9 @@ class RuysoNodeItem(NodeItem):
             )
         )
 
+        if self.has_preview:
+            self._paint_chevron(painter, accent, selected)
+
         pen = QPen(accent, BORDER_SELECTED if selected else BORDER)
         viewer = self.viewer()
         if viewer is not None:
@@ -151,6 +227,40 @@ class RuysoNodeItem(NodeItem):
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(body)
         painter.restore()
+
+    def _paint_chevron(self, painter: QPainter, accent: QColor, selected: bool) -> None:
+        """A down-pointing chevron while the preview shows, right while collapsed.
+
+        Drawn in the name's own colour -- including the flip to whatever
+        reads on the macro colour while the name bar is filled -- so it
+        belongs to the title rather than competing with it.
+        """
+        box = self.chevron_rect()
+        colour = (
+            readable_on(accent)
+            if selected
+            else QColor(theme.current_theme().text_color)
+        )
+        colour.setAlpha(200)
+        pen = QPen(colour, 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        inset = box.width() * 0.2
+        if self.preview_collapsed:  # >
+            points = [
+                QPointF(box.left() + inset * 1.5, box.top() + inset * 0.5),
+                QPointF(box.right() - inset * 1.5, box.center().y()),
+                QPointF(box.left() + inset * 1.5, box.bottom() - inset * 0.5),
+            ]
+        else:  # v
+            points = [
+                QPointF(box.left() + inset * 0.5, box.top() + inset * 1.5),
+                QPointF(box.center().x(), box.bottom() - inset * 1.5),
+                QPointF(box.right() - inset * 0.5, box.top() + inset * 1.5),
+            ]
+        painter.drawPolyline(points)
 
     def name_bar_height(self) -> float:
         """
@@ -190,6 +300,22 @@ class RuysoNodeItem(NodeItem):
 
     # -- Qt overrides --------------------------------------------------
 
+    def _align_ports_horizontal(self, v_offset) -> None:
+        """Centre ports on the contour line, not on the item's outer edge."""
+        super()._align_ports_horizontal(v_offset)
+        for ports, items, dx in (
+            (self.inputs, self._input_items, _MARGIN),
+            (self.outputs, self._output_items, -_MARGIN),
+        ):
+            for port in ports:
+                port.moveBy(dx, 0.0)
+                items[port].moveBy(dx, 0.0)
+
+    def draw_node(self) -> None:
+        """Re-lay the node out, then let the preview follow its new size."""
+        super().draw_node()
+        self._notify_geometry()
+
     def itemChange(self, change, value):  # noqa: N802 - Qt override
         result = super().itemChange(change, value)
         if change == QGraphicsItem.ItemSelectedHasChanged:
@@ -197,5 +323,6 @@ class RuysoNodeItem(NodeItem):
             # band selection never reaches a Python ``setSelected``, so
             # this is the only hook that catches every route in.
             self._set_text_color(self.text_color)
+        elif change == QGraphicsItem.ItemPositionHasChanged:
+            self._notify_geometry()
         return result
-

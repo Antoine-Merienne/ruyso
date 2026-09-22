@@ -14,6 +14,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 
 from ruyso_app.engine.graph import PipelineGraph
+from ruyso_app.engine.run_cache import ResultCache
 from ruyso_app.engine.scheduler import PipelineScheduler
 
 
@@ -54,6 +55,7 @@ class PipelineExecutionWorker(QThread):
         pipeline: PipelineGraph,
         scheduler: PipelineScheduler | None = None,
         parent=None,
+        result_cache: ResultCache | None = None,
     ) -> None:
         """
         Args:
@@ -62,10 +64,17 @@ class PipelineExecutionWorker(QThread):
                 ``PipelineScheduler()`` (with the default on-disk
                 joblib cache).
             parent: Optional Qt parent object.
+            result_cache: If given, steps nothing has changed for are
+                served from it rather than re-executed. ``None`` runs
+                every node, which is what Pipeline > Force Full Run
+                passes.
         """
         super().__init__(parent)
         self._pipeline = pipeline
         self._scheduler = scheduler if scheduler is not None else PipelineScheduler()
+        #: Filled in by the run, then adopted by the window -- so what a
+        #: manual run computed is there for the next background one.
+        self.result_cache = result_cache
 
     def run(self) -> None:
         """Entry point invoked by Qt on the background thread (do not call directly)."""
@@ -74,6 +83,7 @@ class PipelineExecutionWorker(QThread):
                 self._pipeline,
                 progress_callback=lambda done, total: self.progress.emit(done, total),
                 node_callback=lambda node_id, phase: self.node_status.emit(node_id, phase),
+                result_cache=self.result_cache,
             )
         except Exception as exc:  # noqa: BLE001 - reported to the UI, never swallowed
             self.failed.emit(str(exc))

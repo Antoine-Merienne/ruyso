@@ -173,6 +173,23 @@ def test_selection_thickens_the_contour(qapp):
     assert contour_depth(_render(item)) > before
 
 
+def test_ports_are_centred_on_the_contour_line(qapp):
+    from ruyso_app.ui import node_item
+
+    canvas = PipelineCanvas()
+    node = _node(canvas.graph, "sort", name="sort")
+    item = node.view
+    item.draw_node()
+    card = item._card_rect()
+
+    assert item.inputs and item.outputs
+    for port in item.inputs:
+        assert abs(port.mapToParent(port.boundingRect().center()).x() - card.left()) < 1e-6
+    for port in item.outputs:
+        assert abs(port.mapToParent(port.boundingRect().center()).x() - card.right()) < 1e-6
+    assert card.left() == node_item._MARGIN
+
+
 # -- text colours --------------------------------------------------------
 
 
@@ -225,3 +242,54 @@ def test_a_theme_toggle_recolours_the_body_and_the_labels(qapp):
         )
     finally:
         theme.set_theme_mode(started_as)
+
+
+# -- what the figure preview relies on -----------------------------------
+
+
+def test_only_a_node_with_a_preview_has_a_chevron_to_hit(qapp):
+    canvas = PipelineCanvas()
+    node = _node(canvas.graph, "csv_loader", name="load")
+    item = node.view
+    centre = item.mapToScene(item.chevron_rect().center())
+
+    assert not item.chevron_hit(centre)  # no preview, no chevron
+
+    item.has_preview = True
+    assert item.chevron_hit(centre)
+
+
+def test_the_chevron_sits_at_the_right_of_the_name_bar(qapp):
+    canvas = PipelineCanvas()
+    item = _node(canvas.graph, name="load").view
+    box = item.chevron_rect()
+    bounds = item.boundingRect()
+
+    assert box.right() < bounds.right()
+    assert box.left() > bounds.center().x()  # right half, clear of the status dot
+    assert box.bottom() <= item.name_bar_height() + 1.0
+
+
+def test_moving_a_node_reports_to_its_geometry_listener(qapp):
+    """A preview card follows its node from here, in the same frame."""
+    canvas = PipelineCanvas()
+    node = _node(canvas.graph, name="load")
+    seen = []
+    node.view.geometry_listener = lambda item: seen.append(tuple(item.pos().toTuple()))
+
+    node.set_pos(80, 40)
+
+    assert seen and seen[-1] == (80.0, 40.0)
+
+
+def test_collapsing_reports_only_an_actual_change(qapp):
+    canvas = PipelineCanvas()
+    item = _node(canvas.graph, name="load").view
+    calls = []
+    item.geometry_listener = lambda _item: calls.append(1)
+
+    item.set_preview_collapsed(False)  # already expanded
+    assert calls == []
+    item.set_preview_collapsed(True)
+    item.set_preview_collapsed(True)
+    assert calls == [1]

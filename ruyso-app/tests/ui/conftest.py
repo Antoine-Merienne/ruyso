@@ -24,6 +24,22 @@ def qapp():
 
 
 @pytest.fixture(autouse=True)
+def _stop_render_thread():
+    """
+    End the figure-render thread after every UI test.
+
+    ``ui/render_queue.py`` starts a worker on its first job. A QThread
+    still running when the test's widgets are collected prints
+    "QThread: Destroyed while thread is still running" and aborts, which
+    is the same class of teardown crash as the undo-stack one below.
+    """
+    yield
+    from ruyso_app.ui import render_queue
+
+    render_queue.shutdown()
+
+
+@pytest.fixture(autouse=True)
 def _collect_qt_garbage():
     """
     Force a garbage collection after every UI test, while the

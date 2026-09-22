@@ -56,13 +56,20 @@ toolbar; every action is in a menu:
     the exact same JSON format used by the headless CLI below, so a
     pipeline built visually runs from the command line and vice versa.
     The Dashboard's layout rides along in a separate `dashboard` section
-    of the same file; the CLI ignores it, and a file that has none opens
-    with an empty dashboard.
+    of the same file, and the canvas's in a `canvas` section — where
+    every node sits, and which figure previews are collapsed. The CLI
+    ignores both. A file without a `dashboard` section opens with an
+    empty dashboard; one without a `canvas` section (hand-written, or
+    saved before it existed) is laid out in a row.
   - **Export as Script (.py)…** — write the pipeline out as a
     standalone `.py` file (see below).
   - **Run Pipeline** (shortcut **F5**) — execute the canvas on a
     background thread; results land in the run log and the on-canvas
-    figure previews.
+    figure previews. Steps nothing has changed for are reused from the
+    last run rather than recomputed (loaders and exports always run, so
+    a file edited on disk is still picked up).
+  - **Force Full Run** (shortcut **Shift+F5**, or **Shift** with the Run
+    button) — the same, but computing every step again from scratch.
 - **Edit** menu (always): **Undo** (`Cmd/Ctrl+Z`) and **Redo**
   (`Cmd/Ctrl+Shift+Z`, or `Ctrl+Y`), driven by NodeGraphQt's own
   `QUndoStack` — it already records node creation, deletion, wiring and
@@ -106,10 +113,12 @@ right then shows a **macro type** and a **micro type** dropdown
 (changing either recreates the node in place — its name follows the
 new type; see `ui/node_editing.py`), plus its parameter form. Wire
 nodes together by dragging between ports. Grapher / figure nodes carry
-a small floating preview that, after a run, shows the figure; click it
-to select that plot and open (or raise) its resizable window — always
-at the figure's own size, and following any edit you then make in the
-Options panel.
+a **preview card** just beneath them that, after a run, shows the
+figure; click it to select that plot and open (or raise) its resizable
+window — always at the figure's own size, and following any edit you
+then make in the Options panel. The chevron at the right of such a
+node's name bar collapses its card; that, and every node's position,
+is saved with the pipeline.
 
 **Canvas navigation** (`ui/canvas_nav.py`): two-finger trackpad drag
 **pans** (both axes, following the OS scroll direction); **pinch**
@@ -123,7 +132,9 @@ is ready, on a background thread (`ui/auto_run.py`,
 `PipelineScheduler.run_available`). Data files load without pressing
 Run, so column pickers and previews populate on their own; unfinished
 or broken branches are skipped silently (no error dialog). An explicit
-**Run Pipeline** still runs everything and reports errors.
+**Run Pipeline** covers the whole pipeline and reports errors — reusing,
+like auto-run does, whatever nothing has changed for; **Force Full Run**
+(Shift+F5) is the way to recompute every step.
 
 **Run controls:** the right of the tab band holds a **Run Pipeline**
 button, a slim progress bar, and a percentage. During a run the bar
@@ -264,11 +275,78 @@ phases. Decisions taken so far (spec section 8):
   one in place, keeping its name, position, every still-valid wire,
   and any parameter whose field name is shared. See
   `ui/node_editing.py`.
-- **On-canvas figure preview** is a floating thumbnail parented to the
-  viewport and re-synced to its node on a light timer (Qt paints child
-  widgets over the `QGraphicsScene`, so a true "behind the node" is not
-  possible — it sits attached just beneath). See `ui/node_preview.py`.
-  The old bottom "Figure Preview" pane is gone. Clicking a thumbnail:
+- **Ports and links** are drawn by `ui/wiring.py`, not by NodeGraphQt's
+  own palette (teal ports, orange links, cyan when selected, yellow on a
+  selected node's links — none of it related to either theme). A **port**
+  is the theme's `wire_color`, plain white on the dark theme and plain
+  black on the light one: a hollow ring while nothing is plugged in, a
+  solid disc once something is, so wiring state reads without a second
+  colour; hovering it takes the accent. A **link** is that same colour at
+  rest and the **accent** while it is selected or while either end's node
+  is, so selecting a node lights its whole neighbourhood. A link **being
+  dragged** is its origin node's macro-type colour *desaturated* — that
+  node's colour, visibly not yet a connection — turning red over a target
+  it cannot attach to. The mid-link **direction arrow** is 3.5 units
+  (NodeGraphQt's is 6) and **solid in the link's colour**; upstream fills
+  it with `color.darker(200)` inside a `color` outline, which is what
+  made it read as two-tone.
+
+  Ports go through NodeGraphQt's supported hook (`add_input(...,
+  painter_func=)`): its own `PortItem.paint` consults a port's colour
+  only while the port is idle, and falls back to hard-coded enum colours
+  as soon as it is hovered *or connected*. Links have no such hook —
+  `PipeItem` hard-codes those colours inside `reset` / `activate` /
+  `highlight` — so those methods are patched on the class, the way
+  `canvas_grid.py` patches the dot grid. Each patched method reads the
+  theme as it runs, so a dark/light toggle only needs `refresh_wiring()`.
+- **On-canvas figure preview** is a **card in the canvas scene**
+  (`ui/preview_card.py`), not a widget over it. It is re-placed from the
+  node item's own `itemChange` (`ItemPositionHasChanged`, plus
+  `draw_node` for a resize — `ui/node_item.py`), so it moves in the same
+  frame as its node: the widget it replaced was re-placed by a 60 ms
+  timer and, measured over a 60-frame drag, sat off its node in 44
+  frames (a 0 → 6 → 12 → 18 px sawtooth); the card is off in none. It is
+  stacked at z 0 — above the wires, below every node — so it never
+  covers a neighbouring node. It is a *scene-owned* item rather than a
+  child of the node: a child item is deleted with its C++ parent while
+  Python still holds the wrapper, and collecting it afterwards segfaults
+  in NodeGraphQt's `QUndoStack` teardown.
+
+  It is drawn as a rounded card in the theme's panel colour with a
+  hairline border (the node keeps the macro-type colour as its
+  identity), around the figure on its own **white plate, as it will
+  export**; before a run, a muted placeholder line. The figure is a
+  **bitmap at the resolution it is shown at**: the plate's on-screen
+  width × the device pixel ratio, rounded up to a power of two
+  (`preview_card.raster_bucket`, 128–2048 px), re-rendered 150 ms after a
+  zoom settles rather than on every frame of a pinch. The old thumbnail
+  was scaled at *logical* size and shown on a 2× screen, which is why its
+  tick labels were unreadable. An unchanged `Figure` object is never
+  rasterised again, and a new one is rendered for the zoom the card was
+  last *painted* at rather than for 1:1 — auto-run hands back a new
+  figure after every edit, so rendering each at 1:1 left a zoomed-in card
+  blurry after every change. A card asks for a re-render only when the
+  size it needs actually changes: asking on every paint let unrelated
+  repaints (a status-dot animation, a hover) keep restarting the
+  debounce, so the re-render always ran a zoom step late. `figure_to_pixmap` goes through `savefig` with an
+  explicit dpi rather than wrapping the figure in a `FigureCanvasAgg`,
+  which would replace the canvas of a figure also open in a window.
+
+  **Collapsing**: a chevron at the right of a figure node's name bar
+  (drawn by `RuysoNodeItem`, pointing down while the card shows and right
+  while it is collapsed) hides that one card; Preferences ▸ Appearance
+  still turns them all off. The flag lives on the node item, so it
+  survives delete + undo, and is saved in the document's `canvas` section
+  (`ui/graph_bridge.canvas_layout` / `apply_canvas_layout`) with every
+  node's position. It pushes no undo command — a Python `QUndoCommand` is
+  exactly the teardown-crash area — so `MainWindow` marks the document
+  modified with a flag of its own.
+
+  Clicks on a card or a chevron are taken in a **viewport event filter**,
+  before NodeGraphQt sees them: its viewer treats anything that is not a
+  node or a wire as empty canvas and starts a rubber band without ever
+  handing the press to the scene. A click acts on release over the same
+  target, like a button. Clicking a card:
   - **selects its plot node**, so the Options panel shows that figure's
     parameters while you look at it. The click is *accepted*: letting it
     fall through (`QWidget.mousePressEvent` ignores the event) reached
@@ -716,6 +794,29 @@ phases. Decisions taken so far (spec section 8):
   *all* hold. Ratio / fraction floats — `test_size`, `subsample`,
   `l1_ratio`, `alpha`, … — use `core.params.unit_interval_field`,
   rendered as a 0→1 slider.)
+- **`regression_plot`** (grapher). The fit, not the data: a **LOWESS**
+  smoother (`statsmodels.nonparametric.smoothers_lowess`, window set by
+  `frac`) or a **linear** least-squares line, with a confidence
+  interval. Drawing the observations is a `show_points` option, **off by
+  default**. A *discrete* `color_by` or `shape_by` column fits **one
+  curve per category**, in that category's colour and line style (its
+  points take the matching marker from the same `shape_map` series);
+  two different discrete columns fit the cross-product, one curve per
+  combination, with two legends. A *continuous* colour-by column cannot
+  split a fit, so it colours the points and leaves one curve (noted on
+  the figure). The interval is exact for the linear fit (the
+  confidence interval of the mean response, from `statsmodels` OLS) and
+  **bootstrapped** for LOWESS — statsmodels' lowess returns smoothed
+  values and nothing else, so `n_boot` resamples are refitted and the
+  band is their percentile envelope. That bootstrap is seeded
+  (`viz._BOOT_SEED`), so the same data always draws the same band: an
+  interval that flickered on every auto-run would be unreadable, and
+  untestable. Groups with fewer than three points, or with no spread in
+  x, are skipped and noted. Everything else — the colour/shape
+  channels, axis labels, manual limits, log scales, grid/frame, figure
+  size, title and legend blocks — matches `matplotlib_plot`; the
+  per-row `size_by` / `alpha_by` channels do not apply to a fitted
+  curve and are not offered.
 - **`table_viewer`** (grapher). Renders a *small* DataFrame as a table
   image (matplotlib `ax.table`, no LaTeX needed) that previews and
   exports like any figure — intended for a presentation-sized table,
@@ -774,10 +875,27 @@ phases. Decisions taken so far (spec section 8):
   (`orthogonalized`, `cumulative`), with tickbox `responses` (rows) and
   `shocks` (columns) chosen from the model, a `line_color`, and the
   same `ci_style` options for the standard-error interval.
+**Log scales.** Any grapher axis that carries a *measured* quantity
+offers a `log_x` / `log_y` tickbox: `matplotlib_plot`, `regression_plot`,
+`histogram_plot`, `box_plot`, `density_2d`, the classifier curves
+(`roc_curve_plot`, `precision_recall_plot`, `det_curve_plot`,
+`calibration_curve_plot`), `learning_curve_plot`, and — on the value
+axis only — `pca_scree_plot`, `time_series_plot`,
+`multivariate_timeseries_plot` and `forecast_plot`. Axes showing
+categories, dates, map coordinates, lag indices, or signed quantities
+(correlations, loadings, quantiles) do not offer one, since a log scale
+has nothing to say about them. `nodes/viz.py::_finalize_plot` applies
+the toggle for every grapher that routes through it, so a new grapher
+usually only has to declare the two fields —
+`tests/nodes/test_viz.py::test_every_grapher_with_a_measured_axis_offers_a_log_toggle`
+is the list that has to be updated with it.
+
 - **`density_2d`** (grapher). Bivariate density of two numeric columns
   — `kind` = `contour` (seaborn `kdeplot`, `fill` + `levels`) or
   `hexbin` (a binned count grid, better for a lot of data), with an
-  optional light scatter overlay of the raw points.
+  optional light scatter overlay of the raw points. `log_x` / `log_y`
+  estimate the density *in* log space (and bin the hexagons there),
+  rather than drawing it and re-scaling the axis afterwards.
 - **PCA plots** (grapher). `pca_scree_plot` — takes the `pca` node's
   `variance` output; % variance explained per component (bars) with an
   optional cumulative line (secondary axis) and a Kaiser reference
@@ -1224,12 +1342,12 @@ when the `Figure` object is the same one as last time. Serialising a
 figure to SVG is the most expensive thing the Dashboard does, and it
 used to happen on every background run.
 
-The on-canvas thumbnails are plain widgets over the `QGraphicsView`, so
-nothing moves them when the canvas does and they have to be re-placed on
-a timer. That timer used to tick every 60 ms for the life of the app —
-16 wakeups a second to re-place widgets that had not moved. It now runs
-only while the canvas is being manipulated (an event filter wakes it;
-300 ms of quiet stops it), so an idle canvas costs nothing.
+The on-canvas figure previews cost nothing while the canvas is idle, and
+nothing extra while it moves: each card is a scene item re-placed by its
+node's own geometry notification, so there is no timer at all. (They were
+widgets over the `QGraphicsView`, re-placed by a timer that first ticked
+16 times a second for the life of the app and was later throttled to run
+only during interaction — and still trailed a dragged node.)
 
 ## Project layout
 

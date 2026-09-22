@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from NodeGraphQt import BaseNode
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,8 +51,13 @@ from ruyso_app.core import toolboxes
 from ruyso_app.core.registry import NodeRegistry
 from ruyso_app.engine import settings
 from ruyso_app.engine.errors import NodeError
-from ruyso_app.engine.serialization import DASHBOARD_KEY, load_document, save_document
-from ruyso_app.ui import theme
+from ruyso_app.engine.serialization import (
+    CANVAS_KEY,
+    DASHBOARD_KEY,
+    load_document,
+    save_document,
+)
+from ruyso_app.ui import render_queue, theme
 from ruyso_app.ui.auto_run import AutoRunController
 from ruyso_app.ui.canvas import PipelineCanvas
 from ruyso_app.ui.column_spec import input_column_values, input_dataframe_columns
@@ -60,7 +65,12 @@ from ruyso_app.ui.dashboard_menus import fill_arrange_menu, fill_shape_menu
 from ruyso_app.ui.dashboard_page import DashboardPage
 from ruyso_app.ui.error_panel import GRAPH_PROBLEM
 from ruyso_app.ui.execution_worker import PipelineExecutionWorker
-from ruyso_app.ui.graph_bridge import canvas_to_pipeline, pipeline_to_canvas
+from ruyso_app.ui.graph_bridge import (
+    apply_canvas_layout,
+    canvas_layout,
+    canvas_to_pipeline,
+    pipeline_to_canvas,
+)
 from ruyso_app.ui.node_editing import change_node_micro_type
 from ruyso_app.ui.node_factory import (
     core_node_types_by_category,
@@ -159,6 +169,7 @@ class MainWindow(QMainWindow):
         # Clicking a figure preview selects its plot, so the Options
         # panel stays on that node while its pop-out window is open.
         self._preview_overlay.node_activated.connect(self._on_preview_clicked)
+        self._preview_overlay.layout_changed.connect(self._on_canvas_layout_changed)
 
         self._tab_bar = TabBar(TABS)
         self._stack = QStackedWidget()
@@ -254,6 +265,14 @@ class MainWindow(QMainWindow):
         pipeline_menu.addSeparator()
         self._run_action = pipeline_menu.addAction("Run Pipeline", self._on_run_pipeline)
         self._run_action.setShortcut(QKeySequence("F5"))
+        # Run reuses results nothing has changed for, so on a pipeline
+        # that is already current it finishes in a blink. This is the way
+        # back to "compute every step again, whatever you think you know"
+        # -- also what Shift + the Run button does.
+        self._force_run_action = pipeline_menu.addAction(
+            "Force Full Run", self._on_force_run_pipeline
+        )
+        self._force_run_action.setShortcut(QKeySequence("Shift+F5"))
 
         # -- Edit menu (always) ---------------------------------------
         # NodeGraphQt records node creation, deletion, wiring and every
@@ -414,6 +433,9 @@ class MainWindow(QMainWindow):
             return (
                 not self._graph.undo_stack().isClean()
                 or not self._dashboard_page.undo_stack().isClean()
+                # A collapsed preview is saved with the pipeline but pushes
+                # no undo command, so it needs a flag of its own.
+                or getattr(self, "_layout_dirty", False)
             )
         except RuntimeError:  # a C++ stack is already deleted
             return False
@@ -431,7 +453,14 @@ class MainWindow(QMainWindow):
         self._pipeline_path = path
         self._graph.undo_stack().setClean()
         self._dashboard_page.undo_stack().setClean()
+        self._layout_dirty = False
         settings.set("general.last_pipeline", path)
+        self._refresh_title()
+
+    def _on_canvas_layout_changed(self) -> None:
+        """A preview was collapsed or expanded -- saved with the document,
+        but not an undoable edit, so it marks the document by hand."""
+        self._layout_dirty = True
         self._refresh_title()
 
     def _dialog_folder(self) -> str:
@@ -895,6 +924,7 @@ class MainWindow(QMainWindow):
         self._table_page.apply_theme()
         self._dashboard_page.apply_theme()
         self._node_status.refresh_theme()
+        self._preview_overlay.apply_theme()
 
     # -- Pipeline menu actions -----------------------------------------
 
@@ -968,7 +998,11 @@ class MainWindow(QMainWindow):
             if not self._enable_toolboxes_for(pipeline):
                 return
             self._graph.clear_session()
-            pipeline_to_canvas(pipeline, self._graph)
+            canvas_nodes = pipeline_to_canvas(pipeline, self._graph)
+            # Nodes go back where they were saved. A file without a canvas
+            # section (hand-written, or from before it existed) keeps the
+            # row pipeline_to_canvas lays out.
+            apply_canvas_layout(canvas_nodes, extras.get(CANVAS_KEY))
             # Opening a document replaces the document: a file with no
             # dashboard section means an empty dashboard, so blocks from
             # the pipeline that was open before cannot bleed into this
@@ -1001,7 +1035,12 @@ class MainWindow(QMainWindow):
             # whole document, so sending someone a pipeline sends the
             # report with it.
             save_document(
-                pipeline, path, {DASHBOARD_KEY: self._dashboard_page.to_dict()}
+                pipeline,
+                path,
+                {
+                    DASHBOARD_KEY: self._dashboard_page.to_dict(),
+                    CANVAS_KEY: canvas_layout(self._graph),
+                },
             )
         except Exception as exc:  # noqa: BLE001
             self._show_error("Could not save pipeline", exc)
@@ -1023,9 +1062,18 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Exported script to {path}", 5000)
 
-    def _on_run_pipeline(self) -> None:
+    def _on_force_run_pipeline(self) -> None:
+        """Run every step, including the ones nothing has changed for."""
+        self._on_run_pipeline(force=True)
+
+    def _on_run_pipeline(self, *_args: object, force: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
             return  # a run is already in progress
+        # Shift is the unlabelled half of Force Full Run: the button
+        # carries no menu of its own to put the choice in.
+        force = force or bool(
+            QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+        )
 
         self._options.flush_recompute()  # fold in any pending tickbox edits
         try:
@@ -1046,7 +1094,9 @@ class MainWindow(QMainWindow):
         self._pending_snapshot = pipeline_signatures(pipeline)
         self._node_status.reset("pending")  # clear stale dots before streaming
 
-        self._worker = PipelineExecutionWorker(pipeline)
+        self._worker = PipelineExecutionWorker(
+            pipeline, result_cache=None if force else self._auto_run.cache_snapshot()
+        )
         self._worker.progress.connect(self._tab_bar.progress.set_progress)
         self._worker.node_status.connect(self._node_status.set_status)
         self._worker.succeeded.connect(self._on_run_succeeded)
@@ -1076,6 +1126,11 @@ class MainWindow(QMainWindow):
             self._pipeline_page.append_log(f"ERROR [{node_id}]: {message}")
             # dot is already red from the streamed phase; enrich the tooltip
             self._node_status.set_status(node_id, "error", message)
+
+        # What this run computed is what the next background one reuses.
+        worker_cache = getattr(self._worker, "result_cache", None)
+        if worker_cache is not None:
+            self._auto_run.adopt_cache(worker_cache)
 
         self._last_outputs = outputs
         self._last_run_errors = errors
@@ -1213,6 +1268,10 @@ class MainWindow(QMainWindow):
         for worker in (self._worker, getattr(self._auto_run, "_worker", None)):
             if worker is not None and worker.isRunning():
                 worker.wait(3000)
+        # The figure renderer outlives any one run, so it is stopped here
+        # too: a QThread still going while Qt tears down is a segfault,
+        # not a traceback.
+        render_queue.shutdown()
         super().closeEvent(event)
 
     def restore_window_geometry(self) -> bool:
