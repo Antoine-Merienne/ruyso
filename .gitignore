@@ -68,6 +68,14 @@ graphify-out/
 !.env.example
 
 # =========================
+# Claude
+# =========================
+CLAUDE.md
+.claude/
+handover.md
+
+
+# =========================
 # PySide6 / Qt
 # =========================
 
@@ -103,5 +111,8 @@ graphify-out/
 # data/
 # output/
 # cache/
+# The small inputs the example pipelines read.
+!examples/*.csv
 # Large datasets (GitHub rejects files > 100 MB)
 examples/communes_france.geojson
+examples/communes_france.parquet
