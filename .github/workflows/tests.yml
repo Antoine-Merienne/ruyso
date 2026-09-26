@@ -5,13 +5,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # release.yml runs this first: nothing is built from a red suite.
+  workflow_call:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # The floor requires-python claims, and what the installers ship.
+        python-version: ["3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4

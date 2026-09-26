@@ -1,0 +1,178 @@
+name: release
+
+# Push a tag to ship:  git tag v0.1.0 && git push origin v0.1.0
+# A tag with a suffix (v0.1.0-rc1) is a rehearsal: installers and a draft
+# pre-release, but nothing goes to PyPI, whose versions can never be reused.
+# workflow_dispatch builds everything and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  installers:
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15,       target: macOS-arm64 }
+          - { os: macos-15-intel, target: macOS-x86_64 }
+          - { os: windows-latest, target: Windows-x64 }
+          # The oldest Ubuntu offered: glibc compatibility runs forward only.
+          - { os: ubuntu-22.04,   target: Linux-x86_64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Version from the tag, checked against the code
+        id: version
+        run: |
+          APP=$(python -c "exec(open('src/ruyso_app/__init__.py').read()); print(__version__)")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            case "$TAG" in
+              "$APP"|"$APP"-*) ;;
+              *) echo "::error::tag v$TAG does not match __version__ $APP"; exit 1 ;;
+            esac
+            echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$APP-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Inno Setup
+        if: runner.os == 'Windows'
+        run: |
+          choco install innosetup -y --no-progress
+          echo "C:\\Program Files (x86)\\Inno Setup 6" >> "$GITHUB_PATH"
+
+      - name: Install the build environment
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c packaging/constraints.txt -e ".[build]"
+          # The build extra exists to keep 885 MB of Qt Addons out.
+          ! python -c "import PySide6.QtWebEngineCore" 2>/dev/null
+
+      - name: Freeze
+        run: pyinstaller packaging/ruyso.spec --noconfirm --distpath dist --workpath build
+
+      - name: Package
+        run: packaging/package.sh "${{ steps.version.outputs.value }}" "${{ matrix.target }}"
+
+      # Against the thing a person downloads, not the folder it came from.
+      - name: Self-test the packaged app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          case "${{ matrix.target }}" in
+            macOS-*)
+              MNT="$RUNNER_TEMP/ruyso-dmg"
+              hdiutil attach -nobrowse -readonly -mountpoint "$MNT" out/*.dmg
+              "$MNT/Ruyso.app/Contents/MacOS/ruyso" --self-test
+              hdiutil detach "$MNT"
+              ;;
+            Windows-x64)
+              DIR="$(cygpath -w "$RUNNER_TEMP")\\Ruyso"
+              out/*-Setup.exe //VERYSILENT //SUPPRESSMSGBOXES //CURRENTUSER "//DIR=$DIR"
+              # Windowed build: no console, so the verdict lands in ruyso.log.
+              code=0; "$RUNNER_TEMP/Ruyso/ruyso.exe" --self-test || code=$?
+              cat ruyso.log
+              exit $code
+              ;;
+            Linux-*)
+              APPIMAGE_EXTRACT_AND_RUN=1 out/*.AppImage --self-test
+              ;;
+          esac
+
+      - name: Checksums
+        run: |
+          cd out
+          python - <<'PY'
+          import hashlib, pathlib
+          for f in pathlib.Path(".").iterdir():
+              digest = hashlib.sha256(f.read_bytes()).hexdigest()
+              pathlib.Path(f"{f.name}.sha256").write_text(f"{digest}  {f.name}\n")
+          PY
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  python-dist:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install build && python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  # A draft, so the notes get written and "Publish" pressed by a person.
+  # Runs even if one installer failed (a billed Intel runner, say): the
+  # draft then simply lacks that file.
+  github-release:
+    needs: [installers, python-dist]
+    if: ${{ !cancelled() && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: INSTALL.md
+          files: release/*
+
+  # Trusted publishing: pypi.org is told once which repo, workflow and
+  # environment may publish "ruyso", so no token is stored anywhere.
+  pypi:
+    needs: [installers, python-dist]
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

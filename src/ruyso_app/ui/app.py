@@ -119,6 +119,10 @@ def main() -> int:
     Returns:
         The process exit code from the Qt event loop.
     """
+    if sys.stdout is None and {"--version", "--self-test"} & set(sys.argv):
+        # A windowed Windows build has no console: leave the answer in a
+        # file instead of printing into the void.
+        sys.stdout = sys.stderr = open("ruyso.log", "w", encoding="utf-8")
     if "--version" in sys.argv:
         print(f"{APP_NAME} {__version__}")
         return 0

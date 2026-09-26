@@ -1,14 +1,17 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ruyso-app"
+name = "ruyso"
 # Single-sourced from ruyso_app.__version__, so the tag, the wheel and
 # the About box cannot disagree.
 dynamic = ["version"]
 description = "Visual data science pipeline builder - Layers 1 (node model), 2 (execution engine) & 3 (UI)"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2",
     "pandas",

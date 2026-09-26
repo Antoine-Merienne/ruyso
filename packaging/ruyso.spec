@@ -31,6 +31,7 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import (
     collect_data_files,
+    collect_delvewheel_libs_directory,
     collect_dynamic_libs,
     collect_submodules,
 )
@@ -71,6 +72,9 @@ datas += collect_data_files("NodeGraphQt")
 # and every geo node fails.
 datas += collect_data_files("pyogrio", excludes=["**/tests/**"])
 binaries = collect_dynamic_libs("pyogrio")
+# On Windows those DLLs live beside the package, in pyogrio.libs/
+# (delvewheel), out of collect_dynamic_libs' reach. No-op elsewhere.
+datas, binaries = collect_delvewheel_libs_directory("pyogrio", datas=datas, binaries=binaries)
 
 hiddenimports = (
     [f"ruyso_app.nodes.{name}" for name in ruyso_app.nodes.__all__]
