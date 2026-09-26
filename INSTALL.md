@@ -5,10 +5,10 @@ Download the file for your computer from the **Assets** list below. Each one has
 
 | Computer | File |
 |---|---|
-| Mac with Apple silicon (M1 or later) | `Ruyso-<version>-macOS-arm64.dmg` |
-| Mac with an Intel processor | `Ruyso-<version>-macOS-x86_64.dmg` |
-| Windows 10 or 11 (64-bit) | `Ruyso-<version>-Windows-x64-Setup.exe` |
-| Linux (x86_64) | `Ruyso-<version>-Linux-x86_64.AppImage` |
+| Mac with Apple silicon (M1 or later) | `Ruyso-macOS-arm64.dmg` |
+| Mac with an Intel processor | `Ruyso-macOS-x86_64.dmg` |
+| Windows 10 or 11 (64-bit) | `Ruyso-Windows-x64-Setup.exe` |
+| Linux (x86_64) | `Ruyso-Linux-x86_64.AppImage` |
 
 To check which Mac you have, open the Apple menu and choose **About This Mac**. If you see "Chip",
 you have Apple silicon; if you see "Processor … Intel", you have an Intel Mac.
@@ -38,7 +38,7 @@ this warning. Use one of the two options in step 3 instead.
 
 ## Windows
 
-1. Run `Ruyso-<version>-Windows-x64-Setup.exe`.
+1. Run `Ruyso-Windows-x64-Setup.exe`.
 2. If Windows shows *"Windows protected your PC"*, click **More info**, then **Run anyway**.
 3. Follow the installer. It installs Ruyso for your user account only, so it does not ask for
    administrator rights. Ruyso then appears in the Start menu.
@@ -46,8 +46,8 @@ this warning. Use one of the two options in step 3 instead.
 ## Linux
 
 ```
-chmod +x Ruyso-<version>-Linux-x86_64.AppImage
-./Ruyso-<version>-Linux-x86_64.AppImage
+chmod +x Ruyso-Linux-x86_64.AppImage
+./Ruyso-Linux-x86_64.AppImage
 ```
 
 If the window does not open and the error mentions `xcb`, install Qt's X11 cursor library, for
@@ -71,5 +71,5 @@ everything works:
 - macOS: `/Applications/Ruyso.app/Contents/MacOS/ruyso --self-test`
 - Windows: `"%LOCALAPPDATA%\Programs\Ruyso\ruyso.exe" --self-test`. The result is written to
   `ruyso.log` in the current folder.
-- Linux: `./Ruyso-<version>-Linux-x86_64.AppImage --self-test`
+- Linux: `./Ruyso-Linux-x86_64.AppImage --self-test`
 - PyPI install: `ruyso --self-test`
