@@ -55,7 +55,7 @@ example `sudo apt install libxcb-cursor0` on Debian or Ubuntu.
 
 ## Already have Python?
 
-Ruyso is also on PyPI. It needs Python 3.12 or newer, and you must include the `[ui]` extra to get
+Ruyso is also on PyPI. It needs Python 3.13 or 3.14, and you must include the `[ui]` extra to get
 the desktop app:
 
 ```

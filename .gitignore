@@ -41,6 +41,11 @@ graphify-out/
 *.pdf
 *.svg
 
+# ...except the ones the app ships: the offline seaborn datasets and the
+# theme's chevron/grip icons. Without them CI builds a broken app.
+!src/ruyso_app/nodes/data/**/*.csv
+!src/ruyso_app/ui/assets/*.svg
+
 # =========================
 # IDEs / Editors
 # =========================

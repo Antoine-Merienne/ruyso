@@ -8,7 +8,7 @@ name = "ruyso"
 # the About box cannot disagree.
 dynamic = ["version"]
 description = "Visual data science pipeline builder - Layers 1 (node model), 2 (execution engine) & 3 (UI)"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
