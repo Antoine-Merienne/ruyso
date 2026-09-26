@@ -1,15 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "ruyso_app"
-version = "0.1.0"
+name = "ruyso-app"
+# Single-sourced from ruyso_app.__version__, so the tag, the wheel and
+# the About box cannot disagree.
+dynamic = ["version"]
+description = "Visual data science pipeline builder - Layers 1 (node model), 2 (execution engine) & 3 (UI)"
+requires-python = ">=3.10"
 dependencies = [
-    "pytest",
-    "numpy",
+    "pydantic>=2",
     "pandas",
-    "geopandas",
-    "scipy",
-    "matplotlib",
-    "pydantic",
-    "typing",
     "scikit-learn",
-    "PySide6"
+    "statsmodels",
+    "matplotlib",
+    "seaborn>=0.13",
+    "networkx",
+    "joblib",
+    "geopandas>=1",
+    "mapclassify>=2.6",
+    "pyarrow",
+    "openpyxl",
+    "optuna",
 ]
+
+[project.gui-scripts]
+# gui-scripts rather than scripts: on Windows this builds ruyso.exe
+# against pythonw, so launching it does not open a console window.
+ruyso = "ruyso_app.ui.app:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+ui = ["PySide6>=6.5", "NodeGraphQt>=0.6"]
+# Build-only. "pyside6-essentials" is the same Qt the app uses
+# (QtCore/QtGui/QtWidgets/QtSvg) without the PySide6-Addons wheel --
+# 885 MB of WebEngine, Qt3D, Charts and Multimedia that nothing here
+# imports. Not installing it beats excluding it: the freezer cannot
+# collect what is not on disk.
+build = [
+    "pyside6-essentials>=6.5",
+    "NodeGraphQt>=0.6",
+    "pyinstaller>=6.16",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "ruyso_app.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Pre-seeded seaborn example-dataset cache (see nodes/example_data.py) so
+# "seaborn/..." example datasets load without any network access, plus
+# the small themed QSS chevron assets used by ui/theme.py.
+ruyso_app = ["nodes/data/seaborn/*.csv", "ui/assets/*"]

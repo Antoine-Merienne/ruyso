@@ -27,8 +27,8 @@
     },
     {
       "id": "export_plot",
-      "node_type": "figure_export",
-      "params": {"filepath": "examples/output_scatter.png", "dpi": 150}
+      "node_type": "export_figure",
+      "params": {"filepath": "examples/output_scatter", "format": "png", "dpi": 150}
     }
   ],
   "connections": [

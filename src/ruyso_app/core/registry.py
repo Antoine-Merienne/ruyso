@@ -138,10 +138,20 @@ class NodeRegistry:
         if not hasattr(package, "__path__"):
             raise TypeError(f"{package!r} is not a package (no __path__).")
 
-        for module_info in pkgutil.iter_modules(package.__path__):
-            if only is not None and module_info.name not in only:
+        # A package may declare its own submodules in ``__all__``, and
+        # ``ruyso_app.nodes`` does. Scanning the directory is the right
+        # default, but inside a packaged build (PyInstaller and friends)
+        # there is no directory to scan -- the modules live in an
+        # archive -- and a silent empty result would mean an app with an
+        # empty node catalogue. A declared list works in both.
+        names = getattr(package, "__all__", None)
+        if names is None:
+            names = [info.name for info in pkgutil.iter_modules(package.__path__)]
+
+        for name in names:
+            if only is not None and name not in only:
                 continue
-            importlib.import_module(f"{package.__name__}.{module_info.name}")
+            importlib.import_module(f"{package.__name__}.{name}")
 
 
 def register_node(node_cls: type[Node]) -> type[Node]:

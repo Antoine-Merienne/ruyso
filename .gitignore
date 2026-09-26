@@ -5,16 +5,19 @@
 # Byte-compiled / optimized files
 __pycache__/
 *.py[cod]
-*$py.class
+*.egg-info/
+.pytest_cache/
 
 # Distribution / packaging
 build/
 dist/
 *.egg-info/
 .eggs/
+out/
 
 # Virtual environments
 .venv/
+.venv-build/
 venv/
 env/
 ENV/
@@ -25,6 +28,7 @@ ENV/
 .ruff_cache/
 .coverage
 htmlcov/
+graphify-out/
 
 # =========================
 # Data files
@@ -34,8 +38,8 @@ htmlcov/
 *.parquet
 
 # Generated outputs
-*.png
 *.pdf
+*.svg
 
 # =========================
 # IDEs / Editors
@@ -94,3 +98,5 @@ htmlcov/
 # data/
 # output/
 # cache/
+# Large datasets (GitHub rejects files > 100 MB)
+examples/communes_france.geojson

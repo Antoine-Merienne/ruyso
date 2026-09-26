@@ -112,3 +112,22 @@ def test_by_category_groups_registered_nodes_by_macro_type():
     assert "statistical_test" not in grouped
     # the no-file example-dataset loader
     assert "example_data" in grouped["loading"]
+
+def test_declared_submodules_match_the_files_on_disk():
+    """
+    ``ruyso_app.nodes.__all__`` is what discovery imports, because a
+    packaged build has no directory to scan. A node module added
+    without listing it there works in a source checkout and is missing
+    from the installers -- which is exactly the kind of difference
+    nobody notices until a user reports a node that does not exist.
+    """
+    from pathlib import Path
+
+    import ruyso_app.nodes as nodes_pkg
+
+    on_disk = {
+        path.stem
+        for path in Path(nodes_pkg.__file__).parent.glob("*.py")
+        if not path.stem.startswith("_")
+    }
+    assert set(nodes_pkg.__all__) == on_disk

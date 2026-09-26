@@ -12,15 +12,22 @@ window: restoring its geometry, and trimming the disk cache.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QThread
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from ruyso_app import __version__
 from ruyso_app.engine import cache, settings
 from ruyso_app.ui import theme
 from ruyso_app.ui.main_window import MainWindow
 
+
+#: Shown in the dock, the task bar, the About box and the window title.
+APP_NAME = "Ruyso"
 
 #: Libraries a first run would otherwise wait for. Nodes import these
 #: inside ``run()`` -- ``core``/``nodes``/``engine`` must not pull a GUI
@@ -70,6 +77,41 @@ class _CacheTrimmer(QThread):
         cache.enforce_size_limit()
 
 
+def _settle_frozen_environment() -> None:
+    """
+    The two things a packaged build gets wrong before it draws anything.
+
+    A double-clicked bundle starts with the *filesystem root* as its
+    working directory, so a relative export path ("plot.png") aims at
+    "/plot.png" and fails; home is the only sane default.
+
+    And ``n_jobs`` on a model node hands work to joblib, which starts
+    workers by re-running ``sys.executable`` -- which in a bundle is the
+    app itself, so a fork bomb of windows rather than a pool. Stdlib
+    ``multiprocessing`` is handled by ``freeze_support()`` in
+    ``__main__``; loky has its own spawn path that is unverified here,
+    and the failure lands on the user's machine, so the packaged build
+    does that work in-process until it is measured.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    os.environ.setdefault("JOBLIB_MULTIPROCESSING", "0")
+    if Path.cwd() == Path(Path.cwd().anchor):
+        os.chdir(Path.home())
+
+
+def _apply_app_identity(app: QApplication) -> None:
+    """Name, version and icon -- what the dock, the task bar and the
+    About box read. Without it a packaged app is an unnamed generic."""
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    icon_path = Path(__file__).resolve().parent / "assets" / "app-icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+
 def main() -> int:
     """
     Run the pipeline builder application.
@@ -77,7 +119,17 @@ def main() -> int:
     Returns:
         The process exit code from the Qt event loop.
     """
+    if "--version" in sys.argv:
+        print(f"{APP_NAME} {__version__}")
+        return 0
+    if "--self-test" in sys.argv:
+        from ruyso_app.selftest import run
+
+        return run()
+
+    _settle_frozen_environment()
     app = QApplication.instance() or QApplication(sys.argv)
+    _apply_app_identity(app)
     theme.set_theme_mode(str(settings.get("appearance.theme")))
     theme.apply_to_app(app)
 

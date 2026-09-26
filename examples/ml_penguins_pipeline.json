@@ -1,0 +1,343 @@
+{
+  "nodes": [
+    {
+      "id": "Csv Loader",
+      "node_type": "csv_loader",
+      "params": {
+        "filepath": "/Users/antoinemerienne/Downloads/ruyso-app-5/examples/penguins_cleaned.csv",
+        "datetime_columns": null,
+        "datetime_format": null,
+        "sep": ","
+      }
+    },
+    {
+      "id": "One Hot Encode",
+      "node_type": "one_hot_encode",
+      "params": {
+        "columns": [
+          "island",
+          "sex",
+          "species"
+        ],
+        "drop_first": true,
+        "replace": true
+      }
+    },
+    {
+      "id": "Learning Curve Plot",
+      "node_type": "learning_curve_plot",
+      "params": {
+        "cv": 5,
+        "n_points": 5,
+        "scoring": "",
+        "shade_std": true,
+        "train_color": "black",
+        "test_color": "darkorange",
+        "x_label": "",
+        "y_label": "",
+        "axis_font_size": 10,
+        "show_grid": true,
+        "show_box": false,
+        "fig_width": 6.0,
+        "fig_height": 4.0,
+        "title": null,
+        "title_font_size": 12,
+        "title_bold": false,
+        "title_italic": false,
+        "show_legend": true,
+        "legend_title": "",
+        "legend_location": "best",
+        "legend_font_size": 9
+      }
+    },
+    {
+      "id": "Model Scores",
+      "node_type": "model_scores",
+      "params": {
+        "task": "classification",
+        "classification_metrics": [
+          "accuracy",
+          "f1",
+          "precision",
+          "recall"
+        ],
+        "regression_metrics": [
+          "r2",
+          "mae",
+          "rmse"
+        ],
+        "average": "macro"
+      }
+    },
+    {
+      "id": "Qq Plot",
+      "node_type": "qq_plot",
+      "params": {
+        "standardize": true,
+        "point_size": 18.0,
+        "point_color": "darkblue",
+        "show_reference_line": true,
+        "x_label": "",
+        "y_label": "",
+        "axis_font_size": 10,
+        "show_grid": true,
+        "show_box": false,
+        "fig_width": 6.0,
+        "fig_height": 4.0,
+        "title": null,
+        "title_font_size": 12,
+        "title_bold": false,
+        "title_italic": false
+      }
+    },
+    {
+      "id": "Residuals",
+      "node_type": "residuals",
+      "params": {
+        "standardized": true
+      }
+    },
+    {
+      "id": "Model Coeffs",
+      "node_type": "model_coeffs",
+      "params": {
+        "include_intercept": true,
+        "sort_by_magnitude": false
+      }
+    },
+    {
+      "id": "Histogram Plot",
+      "node_type": "histogram_plot",
+      "params": {
+        "value_column": "residual",
+        "mode": "kde",
+        "bins": 30,
+        "stat": "count",
+        "color_by": "",
+        "multiple": "layer",
+        "colormap": "viridis",
+        "single_color": "darkblue",
+        "x_label": "",
+        "y_label": "",
+        "axis_font_size": 10,
+        "show_grid": true,
+        "show_box": false,
+        "log_x": false,
+        "log_y": false,
+        "fig_width": 6.0,
+        "fig_height": 4.0,
+        "title": null,
+        "title_font_size": 12,
+        "title_bold": false,
+        "title_italic": false,
+        "show_legend": true,
+        "legend_title": "",
+        "legend_location": "best",
+        "legend_font_size": 9
+      }
+    },
+    {
+      "id": "Matplotlib Plot",
+      "node_type": "matplotlib_plot",
+      "params": {
+        "x": "y_true",
+        "y": "y_pred",
+        "kind": "scatter",
+        "title": null,
+        "color_by": "",
+        "single_color": "darkblue",
+        "colormap": "viridis",
+        "bar_mode": "dodge",
+        "style_by": "",
+        "marker_shape": "circle",
+        "line_style": "solid",
+        "bar_hatch": "none",
+        "shape_map": "assorted",
+        "style_min_size": 10.0,
+        "style_max_size": 150.0,
+        "style_min_width": 0.8,
+        "style_max_width": 4.0,
+        "point_size": 4.0,
+        "line_width": 1.2,
+        "x_label": "",
+        "y_label": "",
+        "axis_font_size": 10,
+        "show_grid": true,
+        "show_box": false,
+        "log_x": false,
+        "log_y": false,
+        "fig_width": 6.0,
+        "fig_height": 4.0,
+        "title_font_size": 12,
+        "title_bold": false,
+        "title_italic": false,
+        "show_legend": true,
+        "legend_title": "",
+        "legend_location": "best",
+        "legend_font_size": 9
+      }
+    },
+    {
+      "id": "Gradient Boosting Fit",
+      "node_type": "gradient_boosting_fit",
+      "params": {
+        "task": "regressor",
+        "classifier_loss": "log_loss",
+        "regressor_loss": "squared_error",
+        "learning_rate": 0.1,
+        "n_estimators": 100,
+        "subsample": 1.0,
+        "criterion": "friedman_mse",
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_depth": 3,
+        "max_features": "none",
+        "min_impurity_decrease": 0.0,
+        "validation_fraction": 0.1,
+        "n_iter_no_change": 0,
+        "tol": 0.0001,
+        "ccp_alpha": 0.0,
+        "random_state": 0
+      }
+    },
+    {
+      "id": "Train Test Split",
+      "node_type": "train_test_split",
+      "params": {
+        "target_column": "",
+        "test_size": 0.2,
+        "random_state": 42,
+        "shuffle": true,
+        "stratify": false
+      }
+    }
+  ],
+  "connections": [
+    {
+      "source_node": "Csv Loader",
+      "source_port": "df",
+      "target_node": "One Hot Encode",
+      "target_port": "df"
+    },
+    {
+      "source_node": "One Hot Encode",
+      "source_port": "df",
+      "target_node": "Train Test Split",
+      "target_port": "df"
+    },
+    {
+      "source_node": "Residuals",
+      "source_port": "df",
+      "target_node": "Histogram Plot",
+      "target_port": "df"
+    },
+    {
+      "source_node": "Residuals",
+      "source_port": "df",
+      "target_node": "Matplotlib Plot",
+      "target_port": "df"
+    },
+    {
+      "source_node": "Gradient Boosting Fit",
+      "source_port": "model",
+      "target_node": "Learning Curve Plot",
+      "target_port": "model"
+    },
+    {
+      "source_node": "Gradient Boosting Fit",
+      "source_port": "model",
+      "target_node": "Model Scores",
+      "target_port": "model"
+    },
+    {
+      "source_node": "Gradient Boosting Fit",
+      "source_port": "model",
+      "target_node": "Qq Plot",
+      "target_port": "model"
+    },
+    {
+      "source_node": "Gradient Boosting Fit",
+      "source_port": "model",
+      "target_node": "Model Coeffs",
+      "target_port": "model"
+    },
+    {
+      "source_node": "Gradient Boosting Fit",
+      "source_port": "model",
+      "target_node": "Residuals",
+      "target_port": "model"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_train",
+      "target_node": "Gradient Boosting Fit",
+      "target_port": "X_train"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_test",
+      "target_node": "Gradient Boosting Fit",
+      "target_port": "X_test"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_test",
+      "target_node": "Qq Plot",
+      "target_port": "X"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_test",
+      "target_node": "Learning Curve Plot",
+      "target_port": "X"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_test",
+      "target_node": "Model Scores",
+      "target_port": "X"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "X_test",
+      "target_node": "Residuals",
+      "target_port": "X"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_train",
+      "target_node": "Gradient Boosting Fit",
+      "target_port": "y_train"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_test",
+      "target_node": "Gradient Boosting Fit",
+      "target_port": "y_test"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_test",
+      "target_node": "Qq Plot",
+      "target_port": "y"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_test",
+      "target_node": "Learning Curve Plot",
+      "target_port": "y"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_test",
+      "target_node": "Model Scores",
+      "target_port": "y"
+    },
+    {
+      "source_node": "Train Test Split",
+      "source_port": "y_test",
+      "target_node": "Residuals",
+      "target_port": "y"
+    }
+  ]
+}
