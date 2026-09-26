@@ -35,7 +35,9 @@ ruyso = "ruyso_app.ui.app:main"
 
 [project.optional-dependencies]
 dev = ["pytest"]
-ui = ["PySide6>=6.5", "NodeGraphQt>=0.6"]
+# setuptools: NodeGraphQt 0.6.44 still imports distutils, which 3.12
+# removed; setuptools puts it back. Without it a fresh env cannot start.
+ui = ["PySide6>=6.5", "NodeGraphQt>=0.6", "setuptools"]
 # Build-only. "pyside6-essentials" is the same Qt the app uses
 # (QtCore/QtGui/QtWidgets/QtSvg) without the PySide6-Addons wheel --
 # 885 MB of WebEngine, Qt3D, Charts and Multimedia that nothing here
@@ -44,6 +46,7 @@ ui = ["PySide6>=6.5", "NodeGraphQt>=0.6"]
 build = [
     "pyside6-essentials>=6.5",
     "NodeGraphQt>=0.6",
+    "setuptools",
     "pyinstaller>=6.16",
 ]
 

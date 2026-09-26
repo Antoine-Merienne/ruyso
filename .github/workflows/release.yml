@@ -141,10 +141,11 @@ jobs:
 
   # A draft, so the notes get written and "Publish" pressed by a person.
   # Runs even if one installer failed (a billed Intel runner, say): the
-  # draft then simply lacks that file.
+  # draft then simply lacks that file. python-dist succeeding is the proof
+  # the tests passed; without it every installer was skipped.
   github-release:
     needs: [installers, python-dist]
-    if: ${{ !cancelled() && github.ref_type == 'tag' }}
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.python-dist.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
