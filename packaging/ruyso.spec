@@ -180,7 +180,9 @@ exe = EXE(
     # UPX on Qt and NumPy shared libraries is a well-known source of
     # "works here, crashes there", and on macOS it invalidates the
     # signature. The compression is not worth the class of bug.
-    strip=sys.platform != "win32",
+    # strip only on macOS: on Linux it breaks auditwheel-patched libraries
+    # (numpy's OpenBLAS: "ELF load command address/offset not page-aligned").
+    strip=sys.platform == "darwin",
     upx=False,
     console=False,
     icon=icon_for_exe,
@@ -190,7 +192,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=sys.platform != "win32",
+    strip=sys.platform == "darwin",
     upx=False,
     name="ruyso",
 )

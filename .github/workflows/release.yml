@@ -98,9 +98,10 @@ jobs:
             Windows-x64)
               DIR="$(cygpath -w "$RUNNER_TEMP")\\Ruyso"
               out/*-Setup.exe //VERYSILENT //SUPPRESSMSGBOXES //CURRENTUSER "//DIR=$DIR"
-              # Windowed build: no console, so the verdict lands in ruyso.log.
+              # A windowed build prints here when it inherits the runner's
+              # pipes, and to ruyso.log when it has no console at all.
               code=0; "$RUNNER_TEMP/Ruyso/ruyso.exe" --self-test || code=$?
-              cat ruyso.log
+              [ -f ruyso.log ] && cat ruyso.log
               exit $code
               ;;
             Linux-*)
