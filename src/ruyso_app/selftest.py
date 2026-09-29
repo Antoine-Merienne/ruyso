@@ -158,6 +158,24 @@ def run() -> int:
         figure = report.outputs["plot"]["figure"]
         checks.append("pipeline")
 
+        # 3b. every example dataset: each library ships its data files
+        # differently, and a freezer collects some and not others.
+        from typing import get_args
+
+        from ruyso_app.nodes.example_data import ExampleData, ExampleDataParams
+
+        datasets = get_args(ExampleDataParams.model_fields["dataset"].annotation)
+        failed = []
+        with _no_network():
+            for dataset in datasets:
+                try:
+                    ExampleData(params={"dataset": dataset}).run()
+                except Exception as exc:  # noqa: BLE001 - collected, reported below
+                    failed.append(f"{dataset} ({type(exc).__name__}: {exc})")
+        if failed:
+            raise AssertionError("example datasets missing: " + "; ".join(failed))
+        checks.append(f"{len(datasets)} datasets")
+
         # 4. the figure actually rasterises and vectorises
         from ruyso_app.ui.node_preview import figure_to_png_bytes, figure_to_svg_bytes
 

@@ -64,6 +64,9 @@ datas = collect_data_files(
 )
 # NodeGraphQt has no PyInstaller hook and ships one icon its widgets load.
 datas += collect_data_files("NodeGraphQt")
+# statsmodels' hook collects its code but not the CSVs its example
+# datasets read (example_data's "statsmodels/..." entries).
+datas += collect_data_files("statsmodels.datasets", includes=["**/*.csv"], excludes=["**/tests/**"])
 
 # pyogrio is the engine geopandas 1.x reads and writes files with, and it
 # has no PyInstaller hook either: it vendors its own GDAL (a 61 MB dylib)
