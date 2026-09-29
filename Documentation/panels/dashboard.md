@@ -31,10 +31,42 @@ until a **figure** arrives: it is not asking for a text box, and
 clearing it when one was added left someone who had typed a heading
 with no idea how to get their plot across. **Dashboard ▸ Exporter…**
 renders the bounding box of all items to PDF (vectors preserved) or
-PNG, by file extension. The canvas is session state — only each
-node's `title` param persists (with the pipeline). Right-clicking a
+PNG, by file extension. The whole layout is saved with the pipeline
+(see "Shapes, arranging and saving" below). Right-clicking a
 figure-bearing node on the Pipeline canvas offers **Add to
 Dashboard**, which drops a wired `export_to_dashboard` node for it.
+
+## Text boxes, frames and images
+
+**Text and title boxes** are resized from the small handle on their right
+edge: drag it to set the width, and the height follows the number of
+lines. Double-click a box to edit its text.
+
+**Every block has a frame**: a contour (colour, width, line style; width
+0 means none), a background fill (colour and opacity) and a corner
+radius. The frame is set in the same form a shape uses:
+
+- **Text boxes**: the Frame section at the bottom of the text panel.
+  A new box has no contour and no fill.
+- **Figures**: a left click still opens the plot's own options, so the
+  frame is one step away. Right-click the figure and choose **Cosmetic
+  Panel...**; **Options Panel...** goes back to the plot's options. The
+  plot is drawn on a transparent background, so the fill shows behind
+  the axes. A new figure has a white fill and a thin grey contour.
+- **Images**: clicking one opens its frame directly, since an image has
+  nothing else to edit.
+
+A right-click acts on the block under the pointer: it becomes the
+selection, unless it was already part of it.
+
+**Images** are added with **Add Image...** (tool strip, Dashboard menu
+or canvas right-click). PNG, JPEG, SVG, GIF, BMP and WebP are accepted.
+The image is **embedded in the pipeline file**, so the file carries it
+to another computer; the original can be moved or deleted. An SVG stays
+a vector, sharp at any zoom and in a PDF export. An image arrives at its
+own size (at most 480 px wide), keeps its proportions when resized from
+its corner handle, and can be duplicated, locked and arranged like any
+other block.
 
 ## Shapes, arranging and saving
 

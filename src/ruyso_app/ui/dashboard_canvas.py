@@ -140,6 +140,22 @@ class DashboardView(QGraphicsView):
             self.items_moved.emit()
         self._press_pos = None
 
+    def select_block_at(self, pos: QPoint) -> None:
+        """
+        Make a right-click act on the block under it.
+
+        A block outside the selection becomes the selection, as in any
+        drawing tool; one already in it keeps the whole selection, so a
+        group can still be right-clicked as a group. Empty canvas leaves
+        the selection alone.
+        """
+        item = self.itemAt(pos)
+        while item is not None and not hasattr(item, "capture_state"):
+            item = item.parentItem()
+        if item is not None and not item.isSelected():
+            self._scene.clearSelection()
+            item.setSelected(True)
+
     def snap_selection(self) -> None:
         """
         Round the selected items' positions to the grid.
@@ -300,6 +316,7 @@ class DashboardNavigation(QObject):
         self._rmb_panning = False
         self._view.viewport().unsetCursor()
         if not was_pan:
+            self._view.select_block_at(event.position().toPoint())
             global_pos = event.globalPosition().toPoint()
             self._view.context_menu_requested.emit(global_pos)
         return True

@@ -215,9 +215,9 @@ def test_an_unchanged_figure_is_not_serialised_to_svg_again(qapp):
     calls: list[int] = []
     original = module.figure_to_svg_bytes
 
-    def counted(figure):
+    def counted(figure, **kwargs):
         calls.append(1)
-        return original(figure)
+        return original(figure, **kwargs)
 
     module.figure_to_svg_bytes = counted
     try:

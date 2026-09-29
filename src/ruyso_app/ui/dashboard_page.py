@@ -15,7 +15,10 @@ own parameter form -- the very :class:`ui.options_panel.OptionsPanel`
 used on the Pipeline tab -- so restyling a figure is the same act as
 editing its grapher node (``MainWindow`` fills the panel and re-runs).
 Text / title items are added by hand and restyled through
-:class:`ui.dashboard_items.TextInspector`.
+:class:`ui.dashboard_items.TextInspector`; images are imported from a
+file and embedded. Every block's frame (contour, fill, corners) is set
+in the shape inspector -- a figure's through its right-click "Cosmetic
+Panel...", since a left click keeps opening its plot's options.
 
 The canvas is **saved with the pipeline**, in a ``dashboard`` section of
 the same JSON file (:meth:`DashboardPage.to_dict` /
@@ -45,9 +48,11 @@ from typing import Any, Iterable
 from PySide6.QtCore import QMarginsF, QPoint, QPointF, QRectF, QSizeF, Qt, Signal
 from PySide6.QtGui import QImage, QPageSize, QPainter, QPdfWriter, QUndoStack
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QWidget,
@@ -56,7 +61,13 @@ from PySide6.QtWidgets import (
 from ruyso_app.engine import settings
 from ruyso_app.ui.dashboard_canvas import DashboardView
 from ruyso_app.ui import dashboard_layout, render_queue
-from ruyso_app.ui.dashboard_items import FigureItem, TextInspector, TextItem
+from ruyso_app.ui.dashboard_items import (
+    IMAGE_FILTER,
+    FigureItem,
+    ImageItem,
+    TextInspector,
+    TextItem,
+)
 from ruyso_app.ui.dashboard_menus import fill_arrange_menu, fill_shape_menu
 from ruyso_app.ui.dashboard_shapes import SHAPE_LABELS, ShapeInspector, ShapeItem
 from ruyso_app.ui.dashboard_tools import DashboardTools
@@ -84,7 +95,19 @@ _EXPORT_MARGIN = 24.0
 DASHBOARD_VERSION = 1
 
 #: Item class -> the name it is saved under, and rebuilt from.
-_ITEM_KINDS = {FigureItem: "figure", TextItem: "text", ShapeItem: "shape"}
+_ITEM_KINDS = {
+    FigureItem: "figure",
+    TextItem: "text",
+    ShapeItem: "shape",
+    ImageItem: "image",
+}
+
+
+def _dashboard_svg(figure: Any) -> bytes:
+    """A dashboard block's vector art, drawn on a transparent background
+    so the block's own fill shows behind the plot. With the default
+    white fill it looks exactly as an opaque render did."""
+    return figure_to_svg_bytes(figure, transparent=True)
 
 
 class DashboardPage(QWidget):
@@ -122,8 +145,9 @@ class DashboardPage(QWidget):
         # -- right pane: options form / text inspector / empty ----------
         self.options_panel = OptionsPanel(self)
         self._text_inspector = TextInspector(self)
+        self._text_inspector.changed = lambda: self._commit("Restyle text")
         self._shape_inspector = ShapeInspector(self)
-        self._shape_inspector.changed = lambda: self._commit("Restyle shape")
+        self._shape_inspector.changed = lambda: self._commit("Restyle")
         self._empty = QLabel("Select a block to edit it.", self)
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setWordWrap(True)
@@ -198,7 +222,7 @@ class DashboardPage(QWidget):
                 # vector art on screen is already correct.
                 self._rendered[name] = figure
                 render_queue.queue().submit(
-                    (_DASHBOARD_JOB, name), figure, figure_to_svg_bytes
+                    (_DASHBOARD_JOB, name), figure, _dashboard_svg
                 )
 
             source = resolve_source_node(node)
@@ -248,6 +272,34 @@ class DashboardPage(QWidget):
         self._select_only(item)
         self._commit(f"Add {SHAPE_LABELS.get(kind, kind).lower()}", before)
         return item
+
+    def add_image(self, path: str) -> ImageItem:
+        """
+        Import the image at ``path`` into the middle of the view.
+
+        Raises ``OSError`` / ``ValueError`` for a file that cannot be
+        read as an image; :meth:`import_image` reports those.
+        """
+        item = ImageItem.from_file(path)
+        before = self._capture()
+        centre = self._view.mapToScene(self._view.viewport().rect().center())
+        item.setPos(centre - item.visual_rect().center())
+        self._scene.addItem(item)
+        self._select_only(item)
+        self._commit("Add image", before)
+        return item
+
+    def import_image(self) -> None:
+        """Ask for an image file and add it (the menu / tool-strip entry)."""
+        path, _ = QFileDialog.getOpenFileName(self, "Import Image", "", IMAGE_FILTER)
+        if not path:
+            return
+        try:
+            self.add_image(path)
+        except (OSError, ValueError) as exc:
+            # A file action the person asked for: the one place a dialog
+            # is the right way to say it did not happen.
+            QMessageBox.warning(self, "Import Image", str(exc))
 
     def _select_only(self, item: Any) -> None:
         self._scene.clearSelection()
@@ -301,6 +353,8 @@ class DashboardPage(QWidget):
             copy = ShapeItem(item.kind)
         elif isinstance(item, TextItem):
             copy = TextItem(is_title=item.is_title)
+        elif isinstance(item, ImageItem):
+            copy = ImageItem()
         else:
             return None
         copy.apply_state(item.capture_state())
@@ -383,6 +437,8 @@ class DashboardPage(QWidget):
                 item = TextItem(is_title=bool(state.get("is_title")))
             elif kind == "shape":
                 item = ShapeItem(str(state.get("kind", "rectangle")))
+            elif kind == "image":
+                item = ImageItem()
             else:
                 return None
             item.apply_state(state)
@@ -486,6 +542,28 @@ class DashboardPage(QWidget):
     def show_options_page(self) -> None:
         self._inspector_stack.setCurrentIndex(_PAGE_OPTIONS)
 
+    def show_figure_options(self) -> None:
+        """Right-click > Options Panel...: the selected figure's plot options
+        (what a left click opens)."""
+        figures = self._selected_figures()
+        if figures:
+            self.figure_block_selected.emit(figures[0].export_node_id)
+
+    def show_figure_cosmetics(self) -> None:
+        """Right-click > Cosmetic Panel...: the selected figures' frame --
+        contour, background fill, corners."""
+        figures = self._selected_figures()
+        if not figures:
+            return
+        self._source_message = ""
+        self._pending_before = self._capture()
+        self._shape_inspector.set_items(figures)
+        self._inspector_stack.setCurrentIndex(_PAGE_SHAPE)
+        self._refresh_overlay()
+
+    def _selected_figures(self) -> list[FigureItem]:
+        return [i for i in self._scene.selectedItems() if isinstance(i, FigureItem)]
+
     def is_editing_figure(self) -> bool:
         return self._inspector_stack.currentIndex() == _PAGE_OPTIONS
 
@@ -510,7 +588,9 @@ class DashboardPage(QWidget):
         selected = self._scene.selectedItems()
         figures = [i for i in selected if isinstance(i, FigureItem)]
         texts = [i for i in selected if isinstance(i, TextItem)]
-        shapes = [i for i in selected if isinstance(i, ShapeItem)]
+        # Images have no options of their own: their frame is all there
+        # is to edit, in the same form a shape uses.
+        shapes = [i for i in selected if isinstance(i, (ShapeItem, ImageItem))]
         # Whatever is selected now is the "before" for any edit the
         # inspector is about to make.
         self._pending_before = self._capture()
@@ -578,9 +658,18 @@ class DashboardPage(QWidget):
         came to be raising ``NameError`` on every right-click.
         """
         menu = QMenu(self)
+        selected = self._scene.selectedItems()
+        if selected and all(isinstance(i, FigureItem) for i in selected):
+            # A left click opens the plot's options; its frame is the
+            # other thing worth editing on a figure.
+            if len(selected) == 1:
+                menu.addAction("Options Panel...", self.show_figure_options)
+            menu.addAction("Cosmetic Panel...", self.show_figure_cosmetics)
+            menu.addSeparator()
         menu.addAction("Add Title", lambda: self.add_text_item(is_title=True))
         menu.addAction("Add Text Box", lambda: self.add_text_item(is_title=False))
         fill_shape_menu(menu.addMenu("Add Shape"), self)
+        menu.addAction("Add Image...", self.import_image)
 
         if self._scene.selectedItems():
             menu.addSeparator()

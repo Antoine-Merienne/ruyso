@@ -98,7 +98,9 @@ def test_the_canvas_menu_builds_without_a_selection(qapp):
     page = DashboardPage()
     labels = _labels(page.build_context_menu())
 
-    assert labels == ["Add Title", "Add Text Box", "Add Shape", "Exporter..."]
+    assert labels == [
+        "Add Title", "Add Text Box", "Add Shape", "Add Image...", "Exporter..."
+    ]
 
 
 def test_a_glyph_fills_its_icon_instead_of_being_cropped(qapp):

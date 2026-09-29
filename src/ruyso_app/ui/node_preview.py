@@ -289,7 +289,7 @@ def _dense_artists(figure: Figure) -> list:
     return dense
 
 
-def figure_to_svg_bytes(figure: Figure) -> bytes:
+def figure_to_svg_bytes(figure: Figure, transparent: bool = False) -> bytes:
     """
     Serialise ``figure`` to an SVG document that Qt's SVG renderer can
     draw cleanly.
@@ -301,6 +301,9 @@ def figure_to_svg_bytes(figure: Figure) -> bytes:
     latter and would drop every label. Goes through matplotlib's own SVG
     backend rather than the figure's live Qt canvas, so it does not
     disturb an on-screen preview of the same figure.
+
+    ``transparent`` drops the figure and axes backgrounds, so whatever
+    the SVG is drawn over shows through (a Dashboard block's fill).
     """
     import io
 
@@ -322,6 +325,7 @@ def figure_to_svg_bytes(figure: Figure) -> bytes:
                     buffer,
                     format="svg",
                     bbox_inches="tight",
+                    transparent=transparent,
                     **({"dpi": _SVG_RASTER_DPI} if dense else {}),
                 )
         finally:

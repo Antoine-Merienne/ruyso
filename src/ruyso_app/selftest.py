@@ -211,6 +211,18 @@ def run() -> int:
         from ruyso_app.ui.main_window import MainWindow
 
         app = QApplication.instance() or QApplication([])
+
+        # The Dashboard's Import Image reads these through Qt plugins
+        # (imageformats/), which a freezer can leave behind; SVG goes
+        # through QtSvg, already exercised by the rendering step.
+        from PySide6.QtGui import QImageReader
+
+        readable = {bytes(f).decode() for f in QImageReader.supportedImageFormats()}
+        unreadable = {"png", "jpg", "gif", "bmp", "webp"} - readable
+        if unreadable:
+            raise AssertionError(f"image formats not readable: {sorted(unreadable)}")
+        checks.append("images")
+
         window = MainWindow()
         window.close()
         app.processEvents()

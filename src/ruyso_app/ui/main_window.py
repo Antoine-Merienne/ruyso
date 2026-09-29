@@ -364,6 +364,7 @@ class MainWindow(QMainWindow):
         # The same two menus the canvas right-click and the Dashboard
         # tool strip offer -- built once, in ui/dashboard_menus.py.
         fill_shape_menu(self._dashboard_menu.addMenu("Add Shape"), page)
+        self._dashboard_menu.addAction("Add Image...", page.import_image)
         fill_arrange_menu(self._dashboard_menu.addMenu("Arrange"), page)
 
         self._dashboard_menu.addSeparator()

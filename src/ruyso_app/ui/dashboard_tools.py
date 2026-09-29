@@ -68,6 +68,15 @@ def _draw_shape(painter: QPainter, colour: QColor) -> None:
     painter.drawEllipse(QPointF(15.0, 9.5), 5.0, 5.0)
 
 
+def _draw_image(painter: QPainter, colour: QColor) -> None:
+    """A framed picture: a mountain and a sun."""
+    _pen(painter, colour)
+    painter.drawRoundedRect(QRectF(3.5, 5.5, 17, 13), 2.5, 2.5)
+    painter.drawPolyline([QPointF(5.5, 16.5), QPointF(10, 11), QPointF(13, 14),
+                          QPointF(15, 12), QPointF(18.5, 16.5)])
+    painter.drawEllipse(QPointF(15.5, 9.0), 1.4, 1.4)
+
+
 def _draw_arrange(painter: QPainter, colour: QColor) -> None:
     """Three left-aligned bars -- the align/distribute glyph."""
     _pen(painter, colour, 2.0)
@@ -111,7 +120,7 @@ def make_icon(
 
 
 class DashboardTools(QWidget):
-    """The vertical icon strip: Title, Text Box, Shape, Arrange."""
+    """The vertical icon strip: Title, Text Box, Shape, Image, Arrange."""
 
     def __init__(self, page: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -124,6 +133,7 @@ class DashboardTools(QWidget):
             "Add text box", _draw_text_box, lambda: page.add_text_item(is_title=False)
         )
         self.shape_button = self._button("Add shape", _draw_shape)
+        self.image_button = self._button("Add image", _draw_image, page.import_image)
         self.arrange_button = self._button("Arrange", _draw_arrange)
 
         self._shape_menu = fill_shape_menu(QMenu(self), page)
@@ -169,6 +179,7 @@ class DashboardTools(QWidget):
             self.title_button,
             self.text_button,
             self.shape_button,
+            self.image_button,
             self.arrange_button,
         ]
 

@@ -17,7 +17,7 @@ to draw one at an arbitrary angle.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF
@@ -85,6 +85,51 @@ DEFAULT_STYLE: dict[str, Any] = {
     "rotation": 0.0,
     "locked": False,
 }
+
+
+#: The frame keys every other block (text, figure, image) shares with a
+#: shape, so the same inspector styles all of them. A width of 0 means
+#: no contour, a blank fill no background.
+FRAME_KEYS = ("fill", "fill_alpha", "stroke", "stroke_width", "stroke_style", "radius")
+
+
+def paint_frame(
+    painter: QPainter,
+    rect: QRectF,
+    style: dict[str, Any],
+    content: Callable[[], None] | None = None,
+) -> None:
+    """
+    Draw a block's frame: fill, then ``content`` clipped to the (possibly
+    rounded) outline, then the contour on top.
+
+    The contour goes last so an image or plot cannot paint over its inner
+    half, and the clip is what makes rounded corners round the content
+    too rather than only the fill behind it.
+    """
+    radius = max(0.0, float(style.get("radius") or 0.0))
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+
+    fill = QColor(style.get("fill") or "")
+    alpha = max(0.0, min(1.0, float(style.get("fill_alpha", 1.0))))
+    if fill.isValid() and alpha > 0:
+        fill.setAlphaF(alpha)
+        painter.fillPath(path, fill)
+
+    if content is not None:
+        painter.save()
+        painter.setClipPath(path, Qt.IntersectClip)
+        content()
+        painter.restore()
+
+    width = float(style.get("stroke_width") or 0.0)
+    if width > 0:
+        colour = QColor(style.get("stroke") or DEFAULT_STYLE["stroke"])
+        pen = QPen(colour, width)
+        pen.setStyle(STROKE_STYLES.get(style.get("stroke_style"), Qt.SolidLine))
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.strokePath(path, pen)
 
 
 class ShapeItem(QGraphicsObject):
@@ -344,14 +389,28 @@ class ShapeItem(QGraphicsObject):
 MIXED = "—"
 
 
+def _describe(items: list[Any]) -> str:
+    """'Shape', '3 shapes', 'Image', 'Figure', or 'N blocks' for a mix."""
+    names = {getattr(type(i), "BLOCK_NAME", "shape") for i in items}
+    name = names.pop() if len(names) == 1 else "block"
+    if len(items) == 1:
+        return name.capitalize()
+    return f"{len(items)} {name}s"
+
+
 class ShapeInspector(QWidget):
     """
-    Styles the selected shapes -- one, or several at once.
+    Styles the selected shapes -- one, or several at once -- and the
+    frame (contour, fill, corners) of any other block.
 
     Editing a whole selection is most of why a report builder has an
     inspector: making five callouts match by hand is the tedious part.
     A field the selection disagrees on shows :data:`MIXED` until it is
     set, at which point it applies to all of them.
+
+    It takes anything with ``style()`` / ``set_style()`` over
+    :data:`FRAME_KEYS`: figures, images and text boxes use it for their
+    frame. Rotation and the lock are shape-only and hidden otherwise.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -379,8 +438,11 @@ class ShapeInspector(QWidget):
             "Use Dashboard > Unlock all to release it."
         )
 
+        self._stroke_width.setToolTip("0 draws no line")
+
         self._heading = QLabel("Shape", self)
         form = QFormLayout()
+        self._form = form
         form.addRow(self._fill)
         form.addRow("Fill opacity", self._fill_alpha)
         form.addRow(self._stroke)
@@ -414,13 +476,18 @@ class ShapeInspector(QWidget):
 
     # -- binding ----------------------------------------------------------
 
-    def set_items(self, items: list[ShapeItem]) -> None:
+    def set_items(self, items: list[Any], heading: str | None = None) -> None:
+        """Bind the form to shapes, or to other blocks' frames.
+
+        ``heading`` overrides the title; otherwise it names what is
+        selected ("Shape", "3 images"...)."""
         self._loading = True  # suppress the feedback loop while filling
         self._items = list(items)
+        shapes_only = all(isinstance(i, ShapeItem) for i in items)
+        self._form.setRowVisible(self._rotation, shapes_only)
+        self._form.setRowVisible(self._locked, shapes_only)
         if items:
-            self._heading.setText(
-                "Shape" if len(items) == 1 else f"{len(items)} shapes"
-            )
+            self._heading.setText(heading or _describe(items))
             self._fill_alpha.setValue(float(self._common("fill_alpha", 0.18)))
             self._stroke_width.setValue(float(self._common("stroke_width", 2.0)))
             style = self._common("stroke_style", None)
@@ -429,7 +496,11 @@ class ShapeInspector(QWidget):
             self._rotation.setValue(int(self._common("rotation", 0.0) or 0))
             locked = self._common("locked", None)
             self._locked.setChecked(bool(locked))
-            self._radius.setEnabled(any(i.kind == "rounded" for i in items))
+            # A shape's corners are its kind; every other block's frame
+            # can be rounded.
+            self._radius.setEnabled(
+                any(getattr(i, "kind", "rounded") == "rounded" for i in items)
+            )
         self._loading = False
 
     def _common(self, key: str, default: Any) -> Any:

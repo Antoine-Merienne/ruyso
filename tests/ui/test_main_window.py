@@ -947,9 +947,16 @@ def test_an_ordinary_pipeline_asks_nothing(qapp, tmp_path, monkeypatch, _restore
 # -- the Dashboard's own history ----------------------------------------
 
 
-def test_every_dashboard_menu_entry_works(qapp):
+def test_every_dashboard_menu_entry_works(qapp, monkeypatch):
     """The menu called add_text_block; the method is add_text_item, so
     both entries raised AttributeError the moment they were used."""
+    from ruyso_app.ui import dashboard_page
+
+    # Add Image... opens a file dialog, which would block a headless run
+    # forever: answer it as if cancelled.
+    monkeypatch.setattr(
+        dashboard_page.QFileDialog, "getOpenFileName", lambda *a, **k: ("", "")
+    )
     window = MainWindow()
     for action in window._dashboard_menu.actions():
         if action.menu() or action.isSeparator() or action.text() == "Exporter...":
