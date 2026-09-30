@@ -259,7 +259,14 @@ class MainWindow(QMainWindow):
         # -- Pipeline menu (always enabled) -----------------------------
         pipeline_menu = menu_bar.addMenu("Pipeline")
         pipeline_menu.addAction("Open Pipeline (JSON)...", self._on_load_pipeline)
-        pipeline_menu.addAction("Save Pipeline (JSON)...", self._on_save_pipeline)
+        # Save writes to the open file and asks only for a new one; Save
+        # As always asks. Cmd+S on macOS, Ctrl+S elsewhere.
+        save_action = pipeline_menu.addAction("Save Pipeline", self._on_save_pipeline)
+        save_action.setShortcut(QKeySequence.Save)
+        save_as_action = pipeline_menu.addAction(
+            "Save Pipeline As (JSON)...", self._on_save_pipeline_as
+        )
+        save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         pipeline_menu.addSeparator()
         pipeline_menu.addAction("Export as Script (.py)...", self._on_export_script)
         pipeline_menu.addSeparator()
@@ -1022,14 +1029,23 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Opened {path}", 5000)
 
     def _on_save_pipeline(self) -> None:
+        """Save to the open file; a pipeline never saved asks for a name."""
+        if self._pipeline_path:
+            self._save_to(self._pipeline_path)
+        else:
+            self._on_save_pipeline_as()
+
+    def _on_save_pipeline_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Pipeline",
             self._pipeline_path or self._dialog_folder(),
             "Pipeline JSON (*.json)",
         )
-        if not path:
-            return
+        if path:
+            self._save_to(path)
+
+    def _save_to(self, path: str) -> None:
         try:
             pipeline = self._build_pipeline_or_raise()
             # The dashboard travels with the pipeline: one file is the

@@ -44,12 +44,43 @@ def _grid_color(background: tuple[int, int, int]) -> tuple[int, int, int]:
     return colour.red(), colour.green(), colour.blue()
 
 
+def install_paste_signals() -> None:
+    """
+    Make pasted and duplicated nodes announce themselves.
+
+    ``NodeGraph.create_node`` emits ``node_created`` (and its undo emits
+    ``nodes_deleted``), but ``add_node`` -- the path ``paste_nodes`` and
+    ``duplicate_nodes`` take -- builds its undo command with
+    ``emit_signal=False``. So nothing listening heard of a pasted node:
+    a pasted plot had no preview card, no status dot and no grid snap,
+    pasting onto an empty canvas left the "right-click to add" hint up,
+    and undoing a paste would have left its card floating.
+
+    The command class is looked up by name in NodeGraphQt's graph module,
+    so replacing it there reaches ``add_node`` without copying it.
+    Idempotent, like ``install_wiring``.
+    """
+    import NodeGraphQt.base.graph as graph_module
+
+    if getattr(graph_module.NodeAddedCmd, "_ruyso_announces", False):
+        return
+
+    class _AnnouncedNodeAddedCmd(graph_module.NodeAddedCmd):
+        _ruyso_announces = True
+
+        def __init__(self, graph, node, pos=None, emit_signal=True):
+            super().__init__(graph, node, pos=pos, emit_signal=True)
+
+    graph_module.NodeAddedCmd = _AnnouncedNodeAddedCmd
+
+
 class PipelineCanvas:
     """Wraps a NodeGraphQt ``NodeGraph`` configured for this application."""
 
     def __init__(self) -> None:
         install_dot_grid()  # small round dots instead of NodeGraphQt's squares
         install_wiring()  # themed ports and links (see ui/wiring.py)
+        install_paste_signals()  # pasted nodes get their preview card
         self.graph = NodeGraph()
         register_all_nodes(self.graph)
         self._navigation = CanvasNavigation(self.graph.viewer())

@@ -1192,3 +1192,104 @@ def test_collapsing_a_preview_marks_the_document_until_it_is_saved(
     window._on_save_pipeline()
     assert not window.is_modified()
     window.close()
+
+
+# -- copy / paste keeps the figure preview -------------------------------
+
+
+def test_a_pasted_plot_gets_its_own_preview_card(qapp):
+    """NodeGraphQt's paste path never emitted node_created, so a pasted
+    grapher came without its preview (see canvas.install_paste_signals)."""
+    window, _load, plot = _saveable_window()
+    overlay = window._preview_overlay
+    window._select_only(plot)
+
+    window._on_copy_nodes()
+    window._on_paste_nodes()
+
+    pasted = [n for n in window._canvas.graph.selected_nodes() if n is not plot]
+    assert len(pasted) == 1
+    assert pasted[0].id in overlay.cards()
+    assert pasted[0].view.has_preview  # the node draws its collapse chevron
+    window.close()
+
+
+def test_undoing_a_paste_takes_its_preview_card_away(qapp):
+    window, _load, plot = _saveable_window()
+    overlay = window._preview_overlay
+    window._select_only(plot)
+    window._on_copy_nodes()
+    window._on_paste_nodes()
+    pasted_id = next(
+        n.id for n in window._canvas.graph.selected_nodes() if n is not plot
+    )
+
+    window._canvas.graph.undo_stack().undo()
+    assert pasted_id not in overlay.cards()
+
+    window._canvas.graph.undo_stack().redo()
+    assert pasted_id in overlay.cards()
+    window.close()
+
+
+def test_a_duplicated_plot_gets_its_own_preview_card(qapp):
+    window, _load, plot = _saveable_window()
+    window._select_only(plot)
+
+    window._on_duplicate_nodes()
+
+    copy = next(n for n in window._canvas.graph.selected_nodes() if n is not plot)
+    assert copy.id in window._preview_overlay.cards()
+    window.close()
+
+
+# -- Save (Cmd/Ctrl+S) and Save As -----------------------------------------
+
+
+def _save_action(window, label):
+    menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "Pipeline")
+    return next(a for a in menu.actions() if a.text() == label)
+
+
+def test_save_has_the_platform_save_shortcut(qapp):
+    from PySide6.QtGui import QKeySequence
+
+    window = MainWindow()
+    assert _save_action(window, "Save Pipeline").shortcut() == QKeySequence(
+        QKeySequence.Save
+    )
+    assert _save_action(window, "Save Pipeline As (JSON)...").shortcut() == QKeySequence(
+        "Ctrl+Shift+S"
+    )
+    window.close()
+
+
+def test_save_writes_to_the_open_file_without_asking_again(qapp, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    path = tmp_path / "doc.json"
+    asked = []
+
+    def dialog(*_a, **_k):
+        asked.append(1)
+        return str(path), ""
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", dialog)
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *a, **k: pytest.fail("no modal expected")
+    )
+    window, _load, plot = _saveable_window()
+
+    _save_action(window, "Save Pipeline").trigger()  # never saved: asks
+    assert asked == [1] and path.exists()
+
+    plot.set_property("title", "changed")
+    assert window.is_modified()
+    _save_action(window, "Save Pipeline").trigger()  # has a file: just saves
+    assert asked == [1]
+    assert not window.is_modified()
+    assert '"changed"' in path.read_text()
+
+    _save_action(window, "Save Pipeline As (JSON)...").trigger()  # always asks
+    assert asked == [1, 1]
+    window.close()

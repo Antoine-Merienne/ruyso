@@ -99,7 +99,8 @@ picks the exact step, such as `csv_loader` or `drop_na`.
 5. **Build a report.** Back on the canvas, right-click the plot node and choose **Add to
    Dashboard**. The **Dashboard** tab now holds the figure; add titles, text and arrows, then use
    **Dashboard ▸ Exporter…** to save a PDF or PNG.
-6. **Save your work.** **Pipeline ▸ Save Pipeline (JSON)…** saves the whole pipeline, including
+6. **Save your work.** **Pipeline ▸ Save Pipeline** (Cmd+S on a Mac, Ctrl+S on Windows and Linux)
+   saves the whole pipeline, including
    the canvas layout and the dashboard. **Pipeline ▸ Export as Script (.py)…** writes it as plain
    Python you can run or share.
 

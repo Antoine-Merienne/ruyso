@@ -9,7 +9,10 @@ This opens a single window with a three-tab band — **Pipeline**,
 toolbar; every action is in a menu:
 
 - **Pipeline** menu (always available, on every tab):
-  - **Open Pipeline (JSON)…** / **Save Pipeline (JSON)…** — read/write
+  - **Save Pipeline** (`Cmd+S` on macOS, `Ctrl+S` elsewhere) writes to
+    the open file, asking for a name only the first time; **Save Pipeline
+    As (JSON)…** (`Cmd/Ctrl+Shift+S`) always asks.
+  - **Open Pipeline (JSON)…** / **Save Pipeline** — read/write
     the exact same JSON format used by the headless CLI below, so a
     pipeline built visually runs from the command line and vice versa.
     The Dashboard's layout rides along in a separate `dashboard` section
@@ -43,7 +46,8 @@ toolbar; every action is in a menu:
   shortcuts `Cmd/Ctrl+P` then `L`/`T`/`M`/`S`/`G`/`E`), and
   **Selected Node ▸** **Delete Node** (`Ctrl/Cmd+Backspace`), **Copy** /
   **Cut** / **Paste** (`Cmd/Ctrl+C`/`X`/`V`) and **Duplicate**
-  (`Cmd/Ctrl+D`).
+  (`Cmd/Ctrl+D`). A pasted or duplicated plot comes with its own figure
+  preview, filled in by the next automatic run.
 - **Dashboard** menu (Dashboard tab): **Exporter…**.
 - **Colormaps** menu (always): **Colormap Designer…** builds custom
   colormaps — a *continuous* one from draggable gradient stops or a
